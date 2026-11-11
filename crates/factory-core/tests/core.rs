@@ -425,6 +425,75 @@ fn terminal_cancellation_cannot_be_overwritten_by_late_worker_status() {
 }
 #[tokio::test]
 #[cfg(unix)]
+async fn every_agent_uses_its_workspace_as_process_and_logical_directory() {
+    for agent in ["codex", "opencode"] {
+        for access in ["read", "write"] {
+            let (dir, f) = fixture("exit 1", 4);
+            // A shell normalizes PWD on startup and would hide the inherited-directory bug.
+            std::fs::write(
+                dir.path().join("fake-agent"),
+                r#"#!/usr/bin/env python3
+import json, os, sys
+sys.stdin.read()
+result_path = os.environ["AI_FACTORY_RESULT_PATH"]
+with open(result_path + ".launch.json", "w") as output:
+    json.dump({"cwd": os.getcwd(), "pwd": os.environ.get("PWD")}, output)
+with open(result_path, "w") as output:
+    json.dump({"status": "succeeded", "summary": "done", "artifacts": [], "data": {}}, output)
+"#,
+            )
+            .unwrap();
+            let mut settings = f.settings().unwrap();
+            let node = &mut settings.flows[0].nodes[0];
+            node.agent = agent.into();
+            node.access = access.into();
+            let node_id = node.id.clone();
+            f.save_settings(settings).unwrap();
+            let id = f
+                .enqueue(TriggerEvent::issue(
+                    "acme/repo",
+                    41,
+                    "[AI] workspace directory",
+                    "alice",
+                    "",
+                ))
+                .unwrap()
+                .unwrap();
+            f.start();
+            let detail = terminal(&f, &id).await;
+            f.shutdown().await;
+            assert_eq!(detail.run.status, "succeeded", "{agent}/{access}");
+            let launch: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    dir.path()
+                        .join("data/sessions")
+                        .join(&id)
+                        .join(format!("{node_id}.result.json.launch.json")),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let workspace = dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("data/workspaces")
+                .join(&id);
+            assert_eq!(
+                launch["cwd"],
+                workspace.to_string_lossy().as_ref(),
+                "{agent}/{access}: process must run in its workspace"
+            );
+            assert_eq!(
+                launch["pwd"],
+                workspace.to_string_lossy().as_ref(),
+                "{agent}/{access}: logical directory must match its workspace"
+            );
+        }
+    }
+}
+#[tokio::test]
+#[cfg(unix)]
 async fn opencode_uses_private_server_and_path_scoped_memory_permissions() {
     let (_dir,f)=fixture("cat >/dev/null\ncase \"$*\" in *--standalone*) ;; *) exit 44;; esac\ncase \"$OPENCODE_CONFIG_CONTENT\" in *external_directory*allow*) ;; *) exit 45;; esac\necho '{\"type\":\"text\",\"part\":{\"text\":\"{\\\"status\\\":\\\"succeeded\\\",\\\"summary\\\":\\\"done\\\",\\\"artifacts\\\":[],\\\"data\\\":{}}\"}}'",4);
     let mut s = f.settings().unwrap();
