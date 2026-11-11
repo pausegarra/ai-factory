@@ -117,6 +117,7 @@ export interface RunDetail {
 }
 export interface Snapshot {
   runs: Run[];
+  deletions: RunDeletion[];
   metrics: {
     total: number;
     queued: number;
@@ -140,6 +141,23 @@ export interface LogChunk {
   next_offset: number;
   eof: boolean;
 }
+
+export interface RunDeletion {
+  run_id: string;
+  repository: string;
+  number: number;
+  title: string;
+  attempt: number;
+  state: "pending" | "failed";
+  last_error: string | null;
+}
+export type RunView =
+  | { state: "available"; detail: RunDetail }
+  | { state: "deleting"; deletion: RunDeletion }
+  | { state: "missing" };
+export type DeleteRunOutcome =
+  | { state: "deleted"; run_id: string }
+  | { state: "pending"; deletion: RunDeletion };
 
 export interface ImportReport {
   runs_imported: number;

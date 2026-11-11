@@ -83,6 +83,7 @@ const run: Run = {
 };
 const snapshot: Snapshot = {
   runs: [],
+  deletions: [],
   metrics: {
     total: 0,
     queued: 0,
@@ -171,7 +172,7 @@ it("resync refreshes active details and logs even without a run identifier", asy
       },
     ],
   };
-  vi.mocked(factoryApi.detail).mockResolvedValue(detail);
+  vi.mocked(factoryApi.detail).mockResolvedValue({ state: "available", detail });
   vi.mocked(factoryApi.logs).mockResolvedValue({
     text: "",
     offset: 0,

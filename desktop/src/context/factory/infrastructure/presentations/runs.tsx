@@ -12,12 +12,13 @@ import {
   Tray,
   WarningCircle,
 } from "@phosphor-icons/react";
-import type { Run, RunDetail, Snapshot, Trigger } from "../../domain/types";
+import type { Run, RunDetail, RunView, Snapshot } from "../../domain/types";
 import { TRIGGERS } from "../../domain/types";
 import { factoryApi } from "../ipc/factory-api";
 import { LogReader } from "../../application/log-reader";
 import { LiveResource } from "../../application/live-resource";
 import { Badge, date, duration, Empty, Notice } from "./ui";
+import { DeleteRunDialog } from "./delete-run-dialog";
 export function RunTable({
   runs,
   onSelect,
@@ -117,6 +118,15 @@ export function RunsPage({
           Live updates
         </span>
       </div>
+      {snapshot.deletions.length > 0 && <section className="panel" aria-label="Pending deletions">
+        <div className="panel-heading"><h2>Pending deletions</h2></div>
+        <p>Some files may already be deleted. There is no restoration. Retry deletion to finish cleanup.</p>
+        {snapshot.deletions.map(d => <div key={d.run_id} className="panel-heading">
+          <div><strong>{d.title}</strong><p>{d.repository} #{d.number} · Attempt {d.attempt}</p><code>{d.run_id}</code>
+          {d.last_error && <p>{d.last_error}</p>}</div>
+          <button className="button button-secondary" onClick={() => onSelect(d.run_id)}>Open cleanup</button>
+        </div>)}
+      </section>}
       <section className="panel">
         <div className="list-toolbar">
           <div className="segmented">
@@ -193,12 +203,29 @@ export function RunDetailPage({
   id,
   onBack,
   onSelect,
+  onDeleted,
+  onUnavailable,
+  onDeletionStarted,
+  onDeletionSettled,
 }: {
   id: string;
   onBack: () => void;
   onSelect: (id: string) => void;
+  onDeleted?: (id: string) => void;
+  onUnavailable?: (id: string) => void;
+  onDeletionStarted?: (id: string) => void;
+  onDeletionSettled?: (id: string) => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [view, setView] = useState<RunView | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  const callbacks = useRef({ onDeleted, onUnavailable });
+  callbacks.current = { onDeleted, onUnavailable };
+  const detailResource = useRef<LiveResource<RunView> | null>(null);
+  const progress = useRef<HTMLParagraphElement>(null);
   const [error, setError] = useState("");
   const [nodeId, setNodeId] = useState("");
   const [logs, setLogs] = useState("");
@@ -206,22 +233,34 @@ export function RunDetailPage({
   const [autoScroll, setAutoScroll] = useState(true);
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => {
+    mounted.current = true;
     setDetail(null);
+    setView(null);
     setNodeId("");
     setError("");
     const resource = new LiveResource(
       {
         listen: (cb) =>
           factoryApi.subscribe((e) => {
+            if (e.run_id === id && ["run_deleted", "run_deletion_pending", "run_deletion_failed"].includes(e.kind)) {
+              setDetail(null); setNodeId(""); setLogs(""); setConfirm(false);
+              if (e.kind === "run_deleted" && !inFlight.current) callbacks.current.onUnavailable?.(id);
+            }
             if (e.kind === "resync" || e.run_id === id) cb();
           }),
         load: () => factoryApi.detail(id),
       },
-      setDetail,
+      (next) => {
+        setView(next);
+        setDetail(next.state === "available" ? next.detail : null);
+        if (next.state !== "available") { setNodeId(""); setLogs(""); setConfirm(false); }
+        if (next.state === "missing" && !inFlight.current) callbacks.current.onUnavailable?.(id);
+      },
       (e) => setError(String(e)),
     );
+    detailResource.current = resource;
     void resource.start();
-    return () => resource.stop();
+    return () => { mounted.current = false; resource.stop(); };
   }, [id]);
   useEffect(() => {
     if (detail && !detail.nodes.some((n) => n.id === nodeId))
@@ -229,7 +268,7 @@ export function RunDetailPage({
   }, [detail, nodeId]);
   useEffect(() => {
     setLogs("");
-    if (!nodeId) return;
+    if (!nodeId || !detail) return;
     const reader = new LogReader((offset) =>
       factoryApi.logs(id, nodeId, offset),
     );
@@ -246,11 +285,11 @@ export function RunDetailPage({
         load: () => reader.read(),
       },
       setLogs,
-      (e) => setError(String(e)),
+      () => { void detailResource.current?.refresh(); },
     );
     void resource.start();
-    return () => resource.stop();
-  }, [id, nodeId]);
+    return () => { reader.stop(); resource.stop(); };
+  }, [id, nodeId, !!detail]);
   useEffect(() => {
     if (autoScroll && logRef.current)
       logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -267,6 +306,44 @@ export function RunDetailPage({
       setBusy(false);
     }
   }
+  async function remove() {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    onDeletionStarted?.(id);
+    setConfirm(false); setDeleting(true); setError("");
+    try {
+      const outcome = await factoryApi.deleteRun(id);
+      if (outcome.state === "deleted") callbacks.current.onDeleted?.(id);
+      else if (mounted.current) {
+        setView({ state: "deleting", deletion: outcome.deletion }); setDetail(null); setNodeId(""); setLogs("");
+      }
+    } catch (e) {
+      // A transport error does not establish whether the irreversible commit ran.
+      try {
+        const next = await factoryApi.detail(id);
+        if (next.state === "missing") callbacks.current.onDeleted?.(id);
+        else if (mounted.current) {
+          setView(next); setDetail(next.state === "available" ? next.detail : null);
+          setError(next.state === "available" ? String(e) : "");
+        }
+      } catch { if (mounted.current) setError(String(e)); }
+    } finally {
+      inFlight.current = false;
+      onDeletionSettled?.(id);
+      if (mounted.current) setDeleting(false);
+    }
+  }
+  useEffect(() => { if (deleting) progress.current?.focus(); }, [deleting, !!detail, view?.state]);
+  if (view?.state === "deleting") return <>
+    <button className="text-button mb-6" onClick={onBack}>Back to runs</button>
+    <h1>Deletion pending</h1><p>{view.deletion.title}</p>
+    <p>{view.deletion.repository} #{view.deletion.number} · Attempt {view.deletion.attempt}</p><code>{id}</code>
+    <Notice>{view.deletion.last_error || "Cleanup is pending."} Some files may already be deleted. There is no restoration.</Notice>
+    {error && <Notice>{error}</Notice>}
+    <p ref={progress} tabIndex={-1} role="status">{deleting ? "Deleting..." : "Retry deletion to finish cleanup."}</p>
+    <button className="button button-danger" disabled={deleting} onClick={() => void remove()}>Retry deletion</button>
+  </>;
+  if (view?.state === "missing") return <><button className="text-button" onClick={onBack}>Back to runs</button><Notice>This run is no longer available.</Notice></>;
   if (!detail)
     return (
       <>
@@ -274,11 +351,12 @@ export function RunDetailPage({
           <ArrowLeft />
           Back to runs
         </button>
-        {error ? <Notice>{error}</Notice> : <div className="skeleton h-64" />}
+        {error ? <Notice>{error}</Notice> : deleting ? <p ref={progress} tabIndex={-1} role="status">Deleting...</p> : <div className="skeleton h-64" />}
       </>
     );
   const { run } = detail;
   const active = ["running", "queued"].includes(run.status);
+  const eligible = ["succeeded", "failed", "blocked", "cancelled", "interrupted"].includes(run.status);
   const current = detail.nodes.find((n) => n.id === nodeId);
   return (
     <>
@@ -301,14 +379,19 @@ export function RunDetailPage({
           <Badge status={run.status} />
           <button
             className="button button-secondary"
-            disabled={busy}
+            disabled={busy || deleting}
             onClick={() => void action(active ? "cancel" : "retry")}
           >
             {active ? <Stop size={16} /> : <ArrowClockwise size={16} />}{" "}
             {busy ? "Processing…" : active ? "Cancel" : "Retry"}
           </button>
+          <button className="button button-danger" disabled={busy || deleting || !eligible}
+            aria-describedby={!eligible ? "delete-run-reason" : undefined} onClick={() => setConfirm(true)}>Delete run</button>
         </div>
       </div>
+      {!eligible && <p id="delete-run-reason">{active ? "Cancel this run before deleting it." : "This run cannot be deleted in its current state."}</p>}
+      {deleting && <p role="status" ref={progress} tabIndex={-1}>Deleting...</p>}
+      {confirm && <DeleteRunDialog run={run} busy={deleting} onCancel={() => setConfirm(false)} onConfirm={() => void remove()} />}
       {error && <Notice close={() => setError("")}>{error}</Notice>}
       {run.error && <Notice>{run.error}</Notice>}
       <div className="detail-grid">

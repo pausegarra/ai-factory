@@ -6,9 +6,16 @@ pub mod context {
             }
             pub mod entities {
                 pub mod models;
+                pub mod run_deletion;
             }
         }
         pub mod application {
+            pub(crate) mod use_cases {
+                pub mod delete_run;
+            }
+            pub mod interfaces {
+                pub mod run_cleanup;
+            }
             pub mod dto {
                 pub mod agent_model;
             }
@@ -18,10 +25,15 @@ pub mod context {
             }
         }
         pub mod infrastructure {
+            pub mod filesystem {
+                pub mod run_cleanup;
+            }
             pub mod migration {
                 pub mod legacy;
             }
             pub mod repositories {
+                pub(crate) mod pr_origins;
+                pub(crate) mod run_deletions;
                 pub mod secure_settings;
                 pub mod store;
             }
@@ -42,5 +54,6 @@ pub mod context {
 pub use context::factory::application::dto::agent_model::AgentModel;
 pub use context::factory::application::services::factory::Factory;
 pub use context::factory::domain::entities::models::*;
+pub use context::factory::domain::entities::run_deletion::*;
 pub use context::factory::domain::repositories::credentials::Credentials;
 pub type Result<T> = anyhow::Result<T>;

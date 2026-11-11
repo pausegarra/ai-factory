@@ -52,6 +52,21 @@ History, session logs, structured results and project memory stay outside tempor
 
 Overview and Runs show queued, active and historical tasks. Run details include step states, session identity, results and live logs, with cancel/retry actions. Rust emits Tauri events for creation, lifecycle changes and output. The UI subscribes before reading its initial snapshot and repeats reads if events arrive during a request. Event lag forces resynchronization.
 
+**Delete run** permanently removes one stopped attempt and its local logs, results,
+artifacts, private memory and remaining managed workspace. Cancel queued or running
+runs first, then wait for their processes and cleanup to finish. Confirm deletion
+from run details; there is no undo.
+
+GitHub resources, other attempts, shared import archives and minimal automation
+safety records are kept. Deleting history does not replay consumed events or remove
+verified PR provenance. Pending deletions show their run ID and a **Retry deletion**
+action; restarting Factory also resumes cleanup, never the workflow. Local deletion
+does not require a GitHub token or network access.
+
+External source files, CLI-owned sessions, backups and copies already embedded in
+other runs are outside this deletion. A later explicit legacy import can restore
+imported history from its unchanged source archive.
+
 Closing the window leaves Factory in the system tray. Choose **Quit AI Factory** from the tray to stop the engine and child processes. Startup at login uses each OS's native startup mechanism and opens in the background.
 
 ## Agent results and GitHub actions

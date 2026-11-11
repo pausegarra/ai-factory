@@ -33,11 +33,13 @@ export class LiveResource<T> {
     try {
       while (this.dirty && !this.stopped) {
         this.dirty = false;
-        const result = await this.adapter.load();
-        if (!this.stopped && !this.dirty) this.value(result);
+        try {
+          const result = await this.adapter.load();
+          if (!this.stopped && !this.dirty) this.value(result);
+        } catch (e) {
+          if (!this.stopped && !this.dirty) this.error(e);
+        }
       }
-    } catch (e) {
-      if (!this.stopped) this.error(e);
     } finally {
       this.loading = false;
     }

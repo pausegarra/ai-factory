@@ -214,13 +214,15 @@ impl Github {
             }
         }
         if s.flows.iter().any(|f| f.id == "pr_approved" && f.enabled) {
-            for (repo, n, source) in factory.store.tracked_prs()? {
+            for origin in factory.store.tracked_prs()? {
+                let repo = origin.repository.clone();
+                let n = origin.number;
                 let result=async {
-   let origin=factory.store.detail(&source)?;ensure!(origin.event.trigger_id=="new_issue"&&s.authors.iter().any(|a|a.eq_ignore_ascii_case(&origin.event.actor))&&s.owners.iter().any(|a|repo.split('/').next().unwrap().eq_ignore_ascii_case(a)),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.event.actor).await?)?;api.verify_actor(&origin.event.actor).await?;let pr=api.pr(&repo,n).await?;if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
+   ensure!(s.authors.iter().any(|a|a.eq_ignore_ascii_case(&origin.actor))&&s.owners.iter().any(|a|repo.split('/').next().unwrap().eq_ignore_ascii_case(a)),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.actor).await?)?;api.verify_actor(&origin.actor).await?;let pr=api.pr(&repo,n).await?;ensure!(pr["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)),"Tracked PR author mismatch");if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
    let reviews=api.pages(&format!("/repos/{repo}/pulls/{n}/reviews")).await;let comments=api.pages(&format!("/repos/{repo}/issues/{n}/comments")).await;
    let approved=reviews.as_ref().is_ok_and(|rows|rows.iter().any(|r|r["state"]=="APPROVED"&&r["commit_id"].as_str().is_some_and(|c|c.eq_ignore_ascii_case(sha))));
-   let fresh_comments:Vec<_>=comments.as_ref().map(|rows|rows.iter().filter(|c|c["body"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("ok")&&c["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.event.actor)&&pr["user"]["login"].as_str().is_some_and(|p|p.eq_ignore_ascii_case(a)))).filter_map(|c|c["id"].as_u64()).filter(|id|factory.store.observation(&format!("approval-comment:{repo}#{n}:{id}")).ok().flatten().is_none()).collect()).unwrap_or_default();
-   if approved||!fresh_comments.is_empty(){let e=pr_event("pr_approved",format!("approval:{repo}#{n}@{sha}"),&repo,n,&origin.event.actor,&pr,json!({"pull_request":pr,"source_issue":origin.event,"source_run":source}))?;factory.enqueue_approval(e,&fresh_comments,approved)?;}
+   let fresh_comments:Vec<_>=comments.as_ref().map(|rows|rows.iter().filter(|c|c["body"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("ok")&&c["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)&&pr["user"]["login"].as_str().is_some_and(|p|p.eq_ignore_ascii_case(a)))).filter_map(|c|c["id"].as_u64()).filter(|id|factory.store.observation(&format!("approval-comment:{repo}#{n}:{id}")).ok().flatten().is_none()).collect()).unwrap_or_default();
+   if approved||!fresh_comments.is_empty(){let source=json!({"event_id":origin.event_id,"trigger_id":"new_issue","repository":origin.issue_repository,"number":origin.issue_number,"actor":origin.actor,"url":format!("https://github.com/{}/issues/{}",origin.issue_repository,origin.issue_number)});let e=pr_event("pr_approved",format!("approval:{repo}#{n}@{sha}"),&repo,n,&origin.actor,&pr,json!({"pull_request":pr,"source_issue":source}))?;factory.enqueue_approval(e,&fresh_comments,approved)?;}
    if reviews.is_err()&&comments.is_err(){bail!("Both approval endpoints failed")};Ok::<(),anyhow::Error>(())}.await;
                 if let Err(e) = result {
                     failures.push(format!("Approval {repo}#{n}: {e}"));
@@ -416,12 +418,11 @@ impl Github {
         }
         let check_active = || -> Result<()> {
             ensure!(!factory.stop.is_cancelled(), "Factory is stopping");
-            if let Ok(detail) = factory.store.detail(run) {
-                ensure!(
-                    ["queued", "running"].contains(&detail.run.status.as_str()),
-                    "Run is already terminal"
-                );
-            }
+            let detail = factory.store.detail(run)?;
+            ensure!(
+                ["queued", "running"].contains(&detail.run.status.as_str()),
+                "Run is already terminal"
+            );
             Ok(())
         };
         check_active()?;
@@ -530,7 +531,7 @@ impl Github {
                         || (row["commit_id"] == event.head_sha && row["state"] == wanted_state))
             });
             if let Some(receipt) = existing {
-                factory.store.observe(&key, &receipt)?;
+                factory.store.record_action_receipt(&key, &receipt)?;
                 continue;
             }
             check_active()?;
@@ -546,7 +547,7 @@ impl Github {
                 json!({"body":body})
             };
             let receipt = self.request(Method::POST, &path, Some(&payload)).await?;
-            factory.store.observe(&key, &receipt)?;
+            factory.store.record_action_receipt(&key, &receipt)?;
         }
         Ok(())
     }
