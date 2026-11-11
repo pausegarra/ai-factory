@@ -2638,6 +2638,36 @@ select {
   font-size: 12px;
   line-height: 16px;
 }
+
+.token-agent-fields > h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+.token-agent-fields p {
+  margin: 0 0 16px;
+  color: #999997;
+  font-size: 12px;
+  line-height: 16px;
+}
+.token-agent-fields fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #313131;
+  border-radius: 8px;
+}
+.token-agent-fields legend {
+  max-width: 100%;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
 .model-catalog-status > span {
   flex: 1;
   min-width: 0;

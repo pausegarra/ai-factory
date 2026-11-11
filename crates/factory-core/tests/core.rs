@@ -193,6 +193,58 @@ async fn terminal(f: &Factory, id: &str) -> RunDetail {
 }
 #[tokio::test]
 #[cfg(unix)]
+async fn per_token_agent_override_drives_cli_without_changing_other_nodes() {
+    let (_dir, factory) = fixture(
+        "cat >/dev/null\nprintf '%s\\n' \"$@\" >&2\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"",
+        4,
+    );
+    let mut value = serde_json::to_value(factory.settings().unwrap()).unwrap();
+    let mut second = value["flows"][0]["nodes"][0].clone();
+    second["id"] = json!("second");
+    second["depends_on"] = json!(["spec"]);
+    second["model"] = json!("default-model");
+    second["effort"] = json!("low");
+    value["flows"][0]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    value["flows"][0]["nodes"][0]["token_overrides"] = json!({
+        "alice": {"agent":"opencode", "model":"provider/override", "effort":"deep"}
+    });
+    factory
+        .save_settings(serde_json::from_value(value).unwrap())
+        .unwrap();
+    let id = factory
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            190,
+            "[AI] config",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    let detail = terminal(&factory, &id).await;
+    factory.shutdown().await;
+    assert_eq!(detail.run.status, "succeeded", "{:?}", detail.nodes);
+    assert_eq!(detail.nodes[0].agent, "opencode");
+    assert_eq!(detail.nodes[1].agent, "codex");
+    let first = factory.logs(&id, "spec", 0).unwrap().text;
+    let second = factory.logs(&id, "second", 0).unwrap().text;
+    assert!(first.contains("run\n"), "{first}");
+    assert!(first.contains("provider/override#deep"), "{first}");
+    assert!(second.contains("exec\n"), "{second}");
+    assert!(second.contains("default-model"), "{second}");
+    assert!(
+        second.contains("model_reasoning_effort=\"low\""),
+        "{second}"
+    );
+    assert!(!second.contains("provider/override"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn cli_result_logs_and_workspace_are_real_and_private() {
     let (_dir,f)=fixture("cat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"session-1\"}'\necho log-line >&2\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"",4);
     let mut rx = f.subscribe();
@@ -455,6 +507,75 @@ fn terminal_cancellation_cannot_be_overwritten_by_late_worker_status() {
     assert_eq!(f.run_detail(&id).unwrap().run.status, "cancelled");
     f.set_run_status(&id, "succeeded", None).unwrap();
     assert_eq!(f.run_detail(&id).unwrap().run.status, "cancelled");
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn every_agent_uses_its_workspace_as_process_and_logical_directory() {
+    for agent in ["codex", "opencode"] {
+        for access in ["read", "write"] {
+            let (dir, f) = fixture("exit 1", 4);
+            // A shell normalizes PWD on startup and would hide the inherited-directory bug.
+            std::fs::write(
+                dir.path().join("fake-agent"),
+                r#"#!/usr/bin/env python3
+import json, os, sys
+sys.stdin.read()
+result_path = os.environ["AI_FACTORY_RESULT_PATH"]
+with open(result_path + ".launch.json", "w") as output:
+    json.dump({"cwd": os.getcwd(), "pwd": os.environ.get("PWD")}, output)
+with open(result_path, "w") as output:
+    json.dump({"status": "succeeded", "summary": "done", "artifacts": [], "data": {}}, output)
+"#,
+            )
+            .unwrap();
+            let mut settings = f.settings().unwrap();
+            let node = &mut settings.flows[0].nodes[0];
+            node.agent = agent.into();
+            node.access = access.into();
+            let node_id = node.id.clone();
+            f.save_settings(settings).unwrap();
+            let id = f
+                .enqueue(TriggerEvent::issue(
+                    "acme/repo",
+                    41,
+                    "[AI] workspace directory",
+                    "alice",
+                    "",
+                ))
+                .unwrap()
+                .unwrap();
+            f.start();
+            let detail = terminal(&f, &id).await;
+            f.shutdown().await;
+            assert_eq!(detail.run.status, "succeeded", "{agent}/{access}");
+            let launch: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    dir.path()
+                        .join("data/sessions")
+                        .join(&id)
+                        .join(format!("{node_id}.result.json.launch.json")),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let workspace = dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("data/workspaces")
+                .join(&id);
+            assert_eq!(
+                launch["cwd"],
+                workspace.to_string_lossy().as_ref(),
+                "{agent}/{access}: process must run in its workspace"
+            );
+            assert_eq!(
+                launch["pwd"],
+                workspace.to_string_lossy().as_ref(),
+                "{agent}/{access}: logical directory must match its workspace"
+            );
+        }
+    }
 }
 #[tokio::test]
 #[cfg(unix)]

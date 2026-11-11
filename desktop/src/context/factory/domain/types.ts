@@ -5,12 +5,15 @@ export interface AgentModel {
   name: string;
   efforts: string[];
 }
-export interface FlowNode {
-  id: string;
-  name: string;
+export interface AgentConfig {
   agent: Agent;
   model: string;
   effort: string;
+}
+export interface FlowNode extends AgentConfig {
+  id: string;
+  name: string;
+  token_overrides?: Record<string, AgentConfig>;
   access: "read" | "write";
   prompt: string;
   result_schema: unknown;

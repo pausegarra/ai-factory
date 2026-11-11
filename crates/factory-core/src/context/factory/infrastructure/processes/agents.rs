@@ -499,7 +499,9 @@ async fn execute_node(
         &settings.commands.opencode
     };
     let mut cmd = Command::new(resolve_command(command));
+    // OpenCode resolves its session directory from PWD before checking process.cwd().
     cmd.current_dir(workspace)
+        .env("PWD", workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

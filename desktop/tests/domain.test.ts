@@ -25,6 +25,17 @@ const flow = (): Flow => ({
   nodes: [node("plan"), node("build", ["plan"])],
 });
 describe("workflow editing", () => {
+  it("validates optional per-token agent configurations", () => {
+    const value = flow();
+    value.nodes[0].token_overrides = { work: { agent: "opencode", model: "", effort: "high" } };
+    expect(validateFlow(value).join(" ")).toMatch(/choose a model.*token work/i);
+    value.nodes[0].token_overrides.work.model = "provider/model";
+    expect(validateFlow(value)).toEqual([]);
+    value.nodes[0].token_overrides.work = { agent: "opencode", model: "", effort: "" };
+    expect(validateFlow(value)).toEqual([]);
+    value.nodes[0].token_overrides["../invalid"] = { agent: "codex", model: "", effort: "" };
+    expect(validateFlow(value).join(" ")).toMatch(/invalid token override/i);
+  });
   it("rejects cycle when connecting a descendant to an ancestor", () => {
     expect(() => connectNodes(flow(), "build", "plan")).toThrow(/cycle/i);
   });

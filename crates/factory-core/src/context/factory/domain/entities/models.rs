@@ -1,7 +1,7 @@
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -51,6 +51,14 @@ pub struct Flow {
     pub nodes: Vec<FlowNode>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentConfig {
+    pub agent: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FlowNode {
     pub id: String,
     pub name: String,
@@ -59,6 +67,8 @@ pub struct FlowNode {
     pub model: String,
     #[serde(default)]
     pub effort: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub token_overrides: BTreeMap<String, AgentConfig>,
     pub access: String,
     pub prompt: String,
     #[serde(default = "empty_schema")]
@@ -96,6 +106,7 @@ impl Default for Settings {
                     agent: "codex".into(),
                     model: String::new(),
                     effort: String::new(),
+                    token_overrides: BTreeMap::new(),
                     access: access.into(),
                     prompt: prompt.into(),
                     result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}})}else{empty_schema()},
@@ -196,6 +207,23 @@ impl Settings {
     }
 }
 impl Flow {
+    /// Freeze effective agent settings for each node using the event actor's profile.
+    pub fn for_actor(&self, actor: &str, profiles: &[TokenProfile]) -> Self {
+        let profile = profiles
+            .iter()
+            .find(|p| p.account.eq_ignore_ascii_case(actor));
+        let mut flow = self.clone();
+        for node in &mut flow.nodes {
+            if let Some(config) = profile.and_then(|p| node.token_overrides.get(&p.id)) {
+                node.agent = config.agent.clone();
+                node.model = config.model.clone();
+                node.effort = config.effort.clone();
+            }
+            node.token_overrides.clear();
+        }
+        flow
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=64).contains(&self.max_parallel),
@@ -211,19 +239,16 @@ impl Flow {
                 safe_id(&n.id) && ids.insert(n.id.clone()),
                 "Invalid or duplicate node ID"
             );
-            ensure!(
-                ["codex", "opencode"].contains(&n.agent.as_str()),
-                "Unsupported agent"
-            );
+            validate_agent_config(&n.agent, &n.model, &n.effort)?;
+            for (profile, config) in &n.token_overrides {
+                ensure!(safe_id(profile), "Invalid token override profile ID");
+                validate_agent_config(&config.agent, &config.model, &config.effort)?;
+            }
             ensure!(
                 ["read", "write"].contains(&n.access.as_str()),
                 "Invalid node access"
             );
             ensure!(!n.prompt.trim().is_empty(), "Prompt required");
-            ensure!(
-                n.effort.is_empty() || !n.model.is_empty(),
-                "Effort requires model"
-            );
             ensure!(
                 n.position.x.is_finite() && n.position.y.is_finite(),
                 "Invalid node position"
@@ -250,6 +275,14 @@ impl Flow {
             }
         }
     }
+}
+fn validate_agent_config(agent: &str, model: &str, effort: &str) -> Result<()> {
+    ensure!(["codex", "opencode"].contains(&agent), "Unsupported agent");
+    ensure!(
+        effort.is_empty() || !model.trim().is_empty(),
+        "Effort requires model"
+    );
+    Ok(())
 }
 pub fn safe_id(s: &str) -> bool {
     !s.is_empty()

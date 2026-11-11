@@ -75,6 +75,16 @@ if path.contains("/comments?"){return(200,json!([{"id":7,"body":" OK ","user":{"
 if path=="/repos/acme/repo/pulls/5"{let mut p=pr();if state.lock().unwrap().0 {p["head"]["sha"]=json!("cccccccccccccccccccccccccccccccccccccccc")}return(200,p)}panic!("unexpected {path}")}).await;
     let dir = tempfile::tempdir().unwrap();
     let f = setup(dir.path().into(), &base);
+    let mut settings = f.settings().unwrap();
+    settings.flows[1].nodes[0].token_overrides.insert(
+        "alice".into(),
+        AgentConfig {
+            agent: "opencode".into(),
+            model: "provider/approval".into(),
+            effort: "deep".into(),
+        },
+    );
+    f.save_settings(settings).unwrap();
     let source = f
         .enqueue(TriggerEvent::issue(
             "acme/repo",
@@ -90,6 +100,16 @@ if path=="/repos/acme/repo/pulls/5"{let mut p=pr();if state.lock().unwrap().0 {p
         .unwrap();
     f.poll_now().await.unwrap();
     assert_eq!(f.snapshot().unwrap().metrics.total, 2);
+    let approval = f
+        .snapshot()
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|run| run.trigger_id == "pr_approved")
+        .unwrap();
+    let approval = f.run_detail(&approval.id).unwrap();
+    assert_eq!(approval.nodes[0].agent, "opencode");
+    assert_eq!(approval.flow.nodes[0].model, "provider/approval");
     f.poll_now().await.unwrap();
     assert_eq!(f.snapshot().unwrap().metrics.total, 2);
     mode.lock().unwrap().0 = true;
@@ -112,10 +132,21 @@ if path.starts_with("/search/"){let m=*state.lock().unwrap();if m==2{return(503,
     let mut s = f.settings().unwrap();
     s.authors.clear();
     s.reviewers = vec!["alice".into()];
+    s.flows[2].nodes[0].token_overrides.insert(
+        "alice".into(),
+        AgentConfig {
+            agent: "opencode".into(),
+            model: "provider/review".into(),
+            effort: "fast".into(),
+        },
+    );
     f.save_settings(s).unwrap();
     f.poll_now().await.unwrap();
     f.poll_now().await.unwrap();
     assert_eq!(f.snapshot().unwrap().metrics.total, 1);
+    let review = f.run_detail(&f.snapshot().unwrap().runs[0].id).unwrap();
+    assert_eq!(review.nodes[0].agent, "opencode");
+    assert_eq!(review.flow.nodes[0].model, "provider/review");
     *mode.lock().unwrap() = 2;
     assert!(f.poll_now().await.is_err());
     *mode.lock().unwrap() = 0;

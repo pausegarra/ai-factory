@@ -200,7 +200,8 @@ impl Factory {
         if !flow.enabled {
             return Ok(None);
         }
-        let id = self.store.insert(&e, flow, 1, true)?;
+        let flow = flow.for_actor(&e.actor, &s.token_profiles);
+        let id = self.store.insert(&e, &flow, 1, true)?;
         if let Some(id) = &id {
             self.emit("run_created", Some(id), None);
             self.wake.notify_one();
@@ -222,7 +223,8 @@ impl Factory {
         if !flow.enabled {
             return Ok(None);
         }
-        let id = self.store.insert_approval(&e, flow, comments, approved)?;
+        let flow = flow.for_actor(&e.actor, &s.token_profiles);
+        let id = self.store.insert_approval(&e, &flow, comments, approved)?;
         if let Some(id) = &id {
             self.emit("run_created", Some(id), None);
             self.wake.notify_one();
@@ -294,10 +296,11 @@ impl Factory {
             .flows
             .iter()
             .find(|f| f.id == d.flow.id)
-            .context("Flow missing")?;
+            .context("Flow missing")?
+            .for_actor(&d.event.actor, &settings.token_profiles);
         let id = self
             .store
-            .insert(&d.event, f, d.run.attempt + 1, false)?
+            .insert(&d.event, &f, d.run.attempt + 1, false)?
             .unwrap();
         self.emit("run_created", Some(&id), None);
         self.wake.notify_one();

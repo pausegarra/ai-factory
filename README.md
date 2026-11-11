@@ -109,7 +109,7 @@ cargo fmt --all -- --check
 npm run build
 ```
 
-[Desktop builds](.github/workflows/desktop.yml) checks and packages on native hosts: Windows x64 NSIS, macOS Apple Silicon app/DMG, and Ubuntu x64 deb/AppImage. GitHub Actions keeps installer artifacts on each run. Local bundles live under `target/release/bundle`, or `target/<target>/release/bundle` for an explicit target. Public signed distribution requires your own signing credentials.
+Build installers locally on native hosts: Windows x64 NSIS, macOS Apple Silicon app/DMG, and Ubuntu x64 deb/AppImage. Local bundles live under `target/release/bundle`, or `target/<target>/release/bundle` for an explicit target. Public signed distribution requires your own signing credentials.
 
 The [Ubuntu Dockerfile](.ci/ubuntu-build.Dockerfile) prepares a reproducible Ubuntu 22.04 x64 build host for Docker-based verification from macOS. Engine tests use local HTTP fixtures and fake agent CLI processes; they do not publish to GitHub.
 

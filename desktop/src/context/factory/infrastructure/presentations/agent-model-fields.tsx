@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import type { AgentModel, FlowNode } from "../../domain/types";
+import type { AgentConfig, AgentModel } from "../../domain/types";
 import { factoryApi } from "../ipc/factory-api";
 import { Field } from "./ui";
 
 export function AgentModelFields({ node, command, onChange }: {
-  node: FlowNode;
+  node: AgentConfig;
   command: string;
-  onChange: (patch: Partial<FlowNode>) => void;
+  onChange: (patch: Partial<AgentConfig>) => void;
 }) {
   const key = `${node.agent}:${command}`;
   const [revision, setRevision] = useState(0);
