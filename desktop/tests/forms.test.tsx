@@ -176,3 +176,118 @@ it("selects models and efforts from the agent catalog and clears incompatible ch
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][0].flows[0].nodes[0]).toMatchObject({agent: "opencode", model: "provider/open-model", effort: "deep"});
 });
+
+it("saves independent agent configurations for every node and GitHub token", async () => {
+  const { within } = await import("@testing-library/react");
+  const value = settings();
+  value.token_profiles.push({ id: "personal", label: "Personal", account: "bob", has_token: true });
+  value.flows[0].nodes.push({ ...value.flows[0].nodes[0], id: "build", name: "Build", position: { x: 300, y: 0 } });
+  const save = vi.fn().mockResolvedValue(undefined);
+  const view = render(<FlowsPage settings={value} onSave={save} />);
+  const user = userEvent.setup();
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  const work = within(screen.getByRole("group", { name: "Work (@worker)" }));
+  const personal = within(screen.getByRole("group", { name: "Personal (@bob)" }));
+  expect((work.getByLabelText("Agent for Work") as HTMLSelectElement).value).toBe("");
+  expect(work.queryByLabelText("Model")).toBeNull();
+  await user.selectOptions(work.getByLabelText("Agent for Work"), "opencode");
+  await work.findByRole("option", { name: "Open model (provider/open-model)" });
+  await user.selectOptions(work.getByLabelText("Model"), "provider/open-model");
+  await user.selectOptions(work.getByLabelText("Effort"), "deep");
+  await user.selectOptions(personal.getByLabelText("Agent for Personal"), "codex");
+  await personal.findByRole("option", { name: "Codex A" });
+  await user.selectOptions(personal.getByLabelText("Model"), "codex-a");
+  await user.selectOptions(personal.getByLabelText("Effort"), "low");
+
+  fireEvent.click(screen.getByText("Build", { exact: true }));
+  const buildWork = within(screen.getByRole("group", { name: "Work (@worker)" }));
+  expect((buildWork.getByLabelText("Agent for Work") as HTMLSelectElement).value).toBe("");
+  await user.selectOptions(buildWork.getByLabelText("Agent for Work"), "codex");
+  await buildWork.findByRole("option", { name: "Codex B" });
+  await user.selectOptions(buildWork.getByLabelText("Model"), "codex-b");
+  await user.selectOptions(buildWork.getByLabelText("Effort"), "medium");
+  await user.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const saved = save.mock.calls[0][0];
+  expect(saved.flows[0].nodes[0].token_overrides).toEqual({
+    work: { agent: "opencode", model: "provider/open-model", effort: "deep" },
+    personal: { agent: "codex", model: "codex-a", effort: "low" },
+  });
+  expect(saved.flows[0].nodes[1].token_overrides).toEqual({
+    work: { agent: "codex", model: "codex-b", effort: "medium" },
+  });
+  expect(saved.flows[0].nodes.map((node: { agent: string; model: string; effort: string }) => [node.agent, node.model, node.effort])).toEqual([["codex", "", ""], ["codex", "", ""]]);
+
+  view.rerender(<FlowsPage settings={saved} onSave={save} />);
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  const restored = within(screen.getByRole("group", { name: "Work (@worker)" }));
+  expect((restored.getByLabelText("Model") as HTMLSelectElement).value).toBe("provider/open-model");
+  await user.selectOptions(restored.getByLabelText("Agent for Work"), "");
+  expect(restored.queryByLabelText("Model")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1][0].flows[0].nodes[0].token_overrides).toEqual({ personal: saved.flows[0].nodes[0].token_overrides.personal });
+  expect(save.mock.calls[1][0].flows[0].nodes[1].token_overrides).toEqual(saved.flows[0].nodes[1].token_overrides);
+});
+
+it("clears incompatible token choices without changing step defaults", async () => {
+  const { within } = await import("@testing-library/react");
+  const value = settings();
+  value.flows[0].nodes[0].model = "codex-b";
+  value.flows[0].nodes[0].effort = "medium";
+  value.flows[0].nodes[0].token_overrides = { work: { agent: "codex", model: "codex-a", effort: "high" } };
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(<FlowsPage settings={value} onSave={save} />);
+  const user = userEvent.setup();
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  const work = within(screen.getByRole("group", { name: "Work (@worker)" }));
+  await work.findByRole("option", { name: "Codex B" });
+  await user.selectOptions(work.getByLabelText("Model"), "codex-b");
+  expect((work.getByLabelText("Effort") as HTMLSelectElement).value).toBe("");
+  await user.selectOptions(work.getByLabelText("Effort"), "medium");
+  await user.selectOptions(work.getByLabelText("Agent for Work"), "opencode");
+  await work.findByRole("option", { name: "Open model (provider/open-model)" });
+  expect((work.getByLabelText("Model") as HTMLSelectElement).value).toBe("");
+  expect((work.getByLabelText("Effort") as HTMLSelectElement).value).toBe("");
+  await user.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  expect(save.mock.calls[0][0].flows[0].nodes[0]).toMatchObject({
+    agent: "codex", model: "codex-b", effort: "medium",
+    token_overrides: { work: { agent: "opencode", model: "", effort: "" } },
+  });
+});
+
+it("shows empty profile help and lets users remove inactive overrides", async () => {
+  const value = settings();
+  value.token_profiles = [];
+  value.flows[0].nodes[0].token_overrides = { removed: { agent: "codex", model: "codex-a", effort: "high" } };
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(<FlowsPage settings={value} onSave={save} />);
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  expect(screen.getByText(/Add GitHub token profiles in Settings/)).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Unavailable profile: removed" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Remove override for removed" }));
+  expect(screen.queryByRole("group", { name: "Unavailable profile: removed" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  expect(save.mock.calls[0][0].flows[0].nodes[0].token_overrides).toEqual({});
+});
+
+it.each(["constructor", "__proto__"])("stores overrides for profile ID %s without inherited object properties", async (id) => {
+  const { within } = await import("@testing-library/react");
+  const value = settings();
+  value.token_profiles[0].id = id;
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(<FlowsPage settings={value} onSave={save} />);
+  const user = userEvent.setup();
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  const work = within(screen.getByRole("group", { name: "Work (@worker)" }));
+  expect(work.queryByLabelText("Model")).toBeNull();
+  await user.selectOptions(work.getByLabelText("Agent for Work"), "opencode");
+  await work.findByRole("option", { name: "Open model (provider/open-model)" });
+  await user.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  const overrides = save.mock.calls[0][0].flows[0].nodes[0].token_overrides;
+  expect(Object.keys(overrides)).toEqual([id]);
+  expect(overrides[id]).toEqual({ agent: "opencode", model: "", effort: "" });
+});

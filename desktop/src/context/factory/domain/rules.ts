@@ -19,6 +19,14 @@ export function validateFlow(flow: Flow): string[] {
     if (!n.prompt.trim()) errors.push(`${n.name}: write a prompt.`);
     if (n.effort && !n.model.trim())
       errors.push(`${n.name}: choose a model to set effort.`);
+    for (const [profile, config] of Object.entries(n.token_overrides ?? {})) {
+      if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(profile) || profile === "." || profile === "..")
+        errors.push(`${n.name}: invalid token override profile identifier.`);
+      if (!["codex", "opencode"].includes(config.agent))
+        errors.push(`${n.name}: unsupported agent for token ${profile}.`);
+      if (config.effort && !config.model.trim())
+        errors.push(`${n.name}: choose a model to set effort for token ${profile}.`);
+    }
     if (
       !n.result_schema ||
       typeof n.result_schema !== "object" ||

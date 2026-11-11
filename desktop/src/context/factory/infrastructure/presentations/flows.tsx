@@ -28,6 +28,7 @@ import { TRIGGERS } from "../../domain/types";
 import { connectNodes, removeNode, validateFlow } from "../../domain/rules";
 import { Empty, Field, Notice, Toggle } from "./ui";
 import { AgentModelFields } from "./agent-model-fields";
+import { TokenAgentFields } from "./token-agent-fields";
 import { arrangeFlow, displayFlow, flowConnections, hasAutomaticLayout } from "../../application/flow-layout";
 type AgentNode = Node<{ step: FlowNode; index: number }, "agent">;
 function AgentBox({ data, selected }: NodeProps<AgentNode>) {
@@ -425,6 +426,7 @@ export function FlowsPage({
                   </select>
                 </Field>
                 <AgentModelFields node={node} command={settings.commands[node.agent]} onChange={updateNode} />
+                <TokenAgentFields node={node} profiles={settings.token_profiles} commands={settings.commands} onChange={updateNode} />
                 <Field label="Workspace access">
                   <select
                     value={node.access}
