@@ -23,11 +23,13 @@ Los resultados contienen `status`, `summary`, `artifacts` y `data`. Los estados 
 Los agentes solicitan acciones GitHub mediante `data`; el motor las valida y ejecuta con el token del actor:
 
 - `publish: {title, body, base}`: solo en `new_issue`, con resultado exitoso. Publica la rama del evento y crea o adopta su PR. El body debe cerrar la issue origen con `Closes #N`.
-- `merge: {method: "squash"}`: solo en `pr_approved`, con resultado exitoso y head SHA coincidente.
+- `merge: {method: "squash"}`: solo en `pr_approved`, con resultado exitoso y head SHA coincidente. Tras confirmar el merge elimina únicamente la rama remota source verificada del mismo repositorio, nunca la target ni la rama por defecto.
 - `review: {event, body}`: solo en `pr_review`. Acepta `APPROVE`, `REQUEST_CHANGES` o `COMMENT`; un resultado bloqueado no puede aprobar.
 - `comment: "texto"`: permite informar resultados exitosos o bloqueados.
 
 Las acciones se validan antes de mutar Git o GitHub. Los reintentos reconcilian PRs y merges existentes y conservan recibos para comentarios y reviews. La cancelación impide nuevas acciones y detiene los procesos de la sesión, incluidos sus descendientes. Un cierre inesperado marca runs inciertos como `interrupted`; el reintento explícito crea un intento nuevo con el workflow actual.
+
+La limpieza source forma parte de completar la acción merge existente, sin campos, permisos de agente, opciones o migraciones nuevas para workflows guardados. Se verifican de nuevo identidad de PR, source, target, rama por defecto y SHA aprobado de la referencia. No se borran ramas locales ni de forks y no se fuerzan protecciones. Una source ausente sólo cuenta como completada con acceso al repositorio y a referencias comprobado. Si el merge ya ocurrió y la limpieza falla, se informa fallo parcial, no se revierte el merge ni se ejecutan acciones posteriores como si hubiera éxito. El reintento explícito completa la limpieza sin repetir el merge. Si source cambió de SHA observable, se conserva; permanece la carrera residual entre última lectura y DELETE porque GitHub no ofrece borrado condicional por SHA.
 
 ## Aplicación y datos
 

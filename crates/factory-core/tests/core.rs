@@ -2,6 +2,39 @@ mod common;
 use factory_core::*;
 use serde_json::json;
 
+#[tokio::test]
+#[cfg(unix)]
+async fn read_only_agent_cannot_request_merge_or_cleanup() {
+    let (_dir, f) = fixture(
+        r#"cat >/dev/null
+printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{"merge":{"method":"squash"}}}' > "$AI_FACTORY_RESULT_PATH""#,
+        4,
+    );
+    let mut settings = f.settings().unwrap();
+    settings.flows[0].nodes[0].access = "read".into();
+    settings.flows[0].nodes[0].result_schema = json!({"type":"object"});
+    f.save_settings(settings).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            91,
+            "[AI] readonly",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let detail = terminal(&f, &id).await;
+    f.shutdown().await;
+    assert_eq!(detail.run.status, "failed");
+    let text = serde_json::to_string(&detail).unwrap();
+    assert!(
+        text.contains("Read-only node cannot publish, merge or comment"),
+        "{text}"
+    );
+}
+
 #[test]
 fn defaults_cover_three_triggers_and_concurrency() {
     let s = Settings::default();

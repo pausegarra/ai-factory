@@ -72,11 +72,13 @@ Valid statuses are `succeeded`, `blocked` and `failed`. `data` must satisfy the 
 Agents request GitHub operations through `data`; the engine performs REST calls with the actor token:
 
 - `publish: {title, body, base}` pushes the issue branch and creates or reuses its PR. The body must close the source issue using `Closes #N`.
-- `merge: {method: "squash"}` in an approved PR flow, guarded by its head SHA.
+- `merge: {method: "squash"}` in an approved PR flow, guarded by its head SHA. After confirming the merge, Factory deletes only the verified remote source branch in the same repository, never the target or default branch.
 - `review: {event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT", body}` in a review flow.
 - `comment: "text"` comments on the event.
 
 Factory validates every requested action before performing any mutation. Blocked results can report comments or request changes, but cannot publish, merge or approve. Retries reconcile existing PRs/merges and use durable receipts plus hidden markers for comments and reviews, including recovery after a lost API response. Cancellation is checked before new writes.
+
+Source-branch cleanup is part of completing the existing merge action; saved workflows need no new action or opt-in. Factory rechecks PR identity, target, default branch and the source reference's approved SHA before deletion. Fork cleanup and local-branch deletion are not supported, and branch protections are never bypassed. An already absent source is accepted only after verifying repository and reference access. If merge succeeds but cleanup fails, the action reports a partial failure without undoing the merge or running later actions as if cleanup succeeded. Use the existing explicit retry to finish cleanup without repeating the merge. A source branch that has visibly moved is preserved. GitHub deletion has no conditional SHA guard, so a concurrent push between the final read and deletion remains a limitation.
 
 Default flow prompts explain these contracts. No `gh` process is used by the desktop app.
 
