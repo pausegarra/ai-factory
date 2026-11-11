@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AI Factory",
+  "version": "0.2.0",
+  "identifier": "dev.aifactory.desktop",
+  "build": {
+    "beforeDevCommand": "npm --prefix desktop run dev -- --host 127.0.0.1 --port 1420",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm --prefix desktop run build",
+    "frontendDist": "../desktop/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AI Factory",
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1000,
+        "minHeight": 680,
+        "theme": "Dark",
+        "backgroundColor": "#181818"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Local GitHub workflow automation with CLI agents",
+    "longDescription": "AI Factory runs editable workflows for GitHub issues, PR approvals and review requests with Codex and OpenCode CLI agents.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
