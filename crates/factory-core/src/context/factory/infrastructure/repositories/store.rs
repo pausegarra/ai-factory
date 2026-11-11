@@ -92,6 +92,20 @@ impl Store {
         dedup: bool,
         approval: Option<(&[u64], bool)>,
     ) -> Result<Option<String>> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let id = Self::insert_in_tx(&tx, event, flow, attempt, dedup, approval)?;
+        tx.commit()?;
+        Ok(id)
+    }
+    pub(super) fn insert_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        event: &TriggerEvent,
+        flow: &Flow,
+        attempt: u32,
+        dedup: bool,
+        approval: Option<(&[u64], bool)>,
+    ) -> Result<Option<String>> {
         let id = uuid::Uuid::new_v4().to_string();
         let created = now();
         let run = Run {
@@ -112,8 +126,6 @@ impl Store {
             attempt,
             workspace: None,
         };
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
         if let Some((comments, approved)) = approval {
             let mut fresh = false;
             for id in comments {
@@ -138,7 +150,6 @@ impl Store {
                 params![event.event_id, id],
             )? == 0
         {
-            tx.commit()?;
             return Ok(None);
         }
         tx.execute(
@@ -169,7 +180,6 @@ impl Store {
                 params![id, n.id, serde_json::to_string(&state)?],
             )?;
         }
-        tx.commit()?;
         Ok(Some(id))
     }
     pub fn import_legacy(

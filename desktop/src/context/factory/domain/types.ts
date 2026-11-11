@@ -24,6 +24,7 @@ export interface Flow {
   id: Trigger;
   name: string;
   enabled: boolean;
+  profile_activation?: Record<string, boolean>;
   max_parallel?: number;
   nodes: FlowNode[];
 }

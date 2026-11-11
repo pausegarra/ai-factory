@@ -25,6 +25,9 @@ vi.mock("../src/context/factory/infrastructure/ipc/factory-api", () => ({
     snapshot: vi.fn(),
     detail: vi.fn(),
     logs: vi.fn(),
+    saveSettings: vi.fn(),
+    poll: vi.fn(),
+    retry: vi.fn(),
     subscribe: vi.fn(async (cb: (e: FactoryEvent) => void) => {
       mocked.listeners.add(cb);
       return () => mocked.listeners.delete(cb);
@@ -218,4 +221,90 @@ it("keeps workflow edits when navigation is cancelled", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
   expect(screen.queryByLabelText("Name")).toBeNull();
   expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
+});
+
+function activationSettings(): Settings {
+  const value = structuredClone(settings);
+  value.token_profiles = [{ id: "work", label: "Work", account: "alice", has_token: true }];
+  for (const flow of value.flows) {
+    flow.nodes = [{ id: "plan", name: "Plan", agent: "codex", model: "", effort: "", access: "read", prompt: "Plan", result_schema: {}, depends_on: [], position: { x: 80, y: 180 } }];
+  }
+  value.flows[1].profile_activation = { work: false };
+  return value;
+}
+
+it("roundtrips workflow activation through Settings saves without changing other triggers", async () => {
+  const value = activationSettings();
+  vi.mocked(factoryApi.settings).mockResolvedValue(value);
+  vi.mocked(factoryApi.snapshot).mockResolvedValue(snapshot);
+  vi.mocked(factoryApi.saveSettings).mockImplementation(async (next) => next);
+  render(<App />);
+  await screen.findByRole("heading", { name: "Factory overview." });
+  fireEvent.click(screen.getByRole("button", { name: "Workflows" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Enable new_issue for Work (@alice)" }));
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  });
+  await screen.findByText("Workflow saved. New tasks will use this version.");
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "owner" } });
+  // The notice can render before onDirtyChange's effect updates App. Flush the
+  // async save and its effect cascade before issuing the next navigation event.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  });
+  await screen.findByText("Settings saved.");
+  expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+  const saved = vi.mocked(factoryApi.saveSettings).mock.lastCall![0];
+  expect(saved.flows[0].profile_activation).toEqual({ work: false });
+  expect(saved.flows.slice(1)).toEqual(value.flows.slice(1));
+  fireEvent.click(screen.getByRole("button", { name: "Workflows" }));
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect((screen.getByRole("checkbox", { name: "Enable new_issue for Work (@alice)" }) as HTMLInputElement).checked).toBe(false);
+  expect(screen.getByText("Disabled for this account")).toBeTruthy();
+});
+
+it("blocks navigation and pending discard during workflow save but leaves Sync now available", async () => {
+  const value = activationSettings();
+  vi.mocked(factoryApi.settings).mockResolvedValue(value);
+  vi.mocked(factoryApi.snapshot).mockResolvedValue(snapshot);
+  vi.mocked(factoryApi.poll).mockResolvedValue(undefined);
+  let resolve!: (value: Settings) => void;
+  vi.mocked(factoryApi.saveSettings).mockImplementation(() => new Promise((done) => { resolve = done; }));
+  render(<App />);
+  await screen.findByRole("heading", { name: "Factory overview." });
+  fireEvent.click(screen.getByRole("button", { name: "Workflows" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Enable new_issue for Work (@alice)" }));
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(screen.getByRole("alertdialog")).toBeTruthy();
+  // Simulate already-pending navigation while an async save begins.
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  expect((screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Discard changes" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Keep editing" }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+  expect(screen.getByRole("heading", { name: "Workflows" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(screen.getByRole("heading", { name: "Workflows" })).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Sync now" }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  expect(factoryApi.poll).toHaveBeenCalled();
+  await act(async () => resolve({ ...value, flows: [{ ...value.flows[0], profile_activation: { work: false } }, ...value.flows.slice(1)] }));
+  await screen.findByText("Workflow saved. New tasks will use this version.");
+  expect((screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
+});
+
+it("shows activation rejection from retry without changing run detail", async () => {
+  const detail: RunDetail = { run: { ...run, status: "failed" }, flow: settings.flows[0], event: {}, nodes: [] };
+  vi.mocked(factoryApi.detail).mockResolvedValue(detail);
+  vi.mocked(factoryApi.retry).mockRejectedValue(new Error("Workflow new_issue for @alice is disabled globally"));
+  const select = vi.fn();
+  render(<RunDetailPage id="run1" onBack={() => {}} onSelect={select} />);
+  fireEvent.click(await screen.findByRole("button", { name: /Retry/ }));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Workflow new_issue for @alice is disabled globally"));
+  expect(screen.getByRole("heading", { name: run.title })).toBeTruthy();
+  expect(select).not.toHaveBeenCalled();
 });
