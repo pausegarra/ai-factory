@@ -1,0 +1,947 @@
+mod common;
+use factory_core::*;
+use serde_json::json;
+
+#[test]
+fn defaults_cover_three_triggers_and_concurrency() {
+    let s = Settings::default();
+    assert_eq!(s.max_concurrent, 4);
+    assert_eq!(s.flows.len(), 3);
+    s.validate().unwrap();
+}
+#[test]
+fn graph_rejects_cycles_unknown_dependencies_and_bad_schemas() {
+    let mut s = Settings::default();
+    s.flows[0].nodes[0].depends_on = vec!["missing".into()];
+    assert!(s.validate().is_err());
+    s.flows[0].nodes[0].depends_on = vec![s.flows[0].nodes[0].id.clone()];
+    assert!(s.validate().is_err());
+    s.flows[0].nodes[0].depends_on.clear();
+    s.flows[0].nodes[0].result_schema = json!({"type":"nonsense"});
+    assert!(s.validate().is_err());
+}
+#[tokio::test]
+async fn durable_queue_dedup_redaction_and_immediate_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open(dir.path().into()).unwrap();
+    let mut s = f.settings().unwrap();
+    s.token_profiles.push(TokenProfile {
+        id: "one".into(),
+        label: "Primary".into(),
+        account: "alice".into(),
+        token: Some("secret-example".into()),
+        has_token: false,
+    });
+    f.save_settings(s).unwrap();
+    assert!(!serde_json::to_string(&f.settings().unwrap())
+        .unwrap()
+        .contains("secret-example"));
+    let mut rx = f.subscribe();
+    let event = TriggerEvent::issue("acme/repo", 1, "[AI] test", "alice", "");
+    let id = f.enqueue(event.clone()).unwrap().unwrap();
+    assert_eq!(rx.recv().await.unwrap().kind, "run_created");
+    assert!(f.enqueue(event).unwrap().is_none());
+    assert_eq!(f.snapshot().unwrap().runs[0].status, "queued");
+    drop(f);
+    let f = common::open(dir.path().into()).unwrap();
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "queued");
+    assert!(f.settings().unwrap().token_profiles[0].has_token);
+}
+#[test]
+fn restart_interrupts_running_but_retains_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open(dir.path().into()).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            2,
+            "[AI] test",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.set_run_status(&id, "running", None).unwrap();
+    drop(f);
+    let f = common::open(dir.path().into()).unwrap();
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "interrupted");
+    assert_ne!(f.retry(&id).unwrap(), id);
+}
+
+#[cfg(unix)]
+fn fixture(script: &str, limit: usize) -> (tempfile::TempDir, std::sync::Arc<Factory>) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&source)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let cli = dir.path().join("fake-agent");
+    std::fs::write(&cli, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0; 8192];
+            let Ok(n) = stream.read(&mut buf) else {
+                continue;
+            };
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let body = if request.starts_with("GET /user ") {
+                serde_json::json!({"login":"alice"})
+            } else {
+                serde_json::json!({"state":"open","title":"[AI] work","user":{"login":"alice"}})
+            }
+            .to_string();
+            let _=write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+        }
+    });
+    let f = common::open_with_api(dir.path().join("data"), &base).unwrap();
+    let mut s = f.settings().unwrap();
+    s.commands.codex = cli.to_string_lossy().into();
+    s.commands.opencode = s.commands.codex.clone();
+    s.commands.git = common::remote_git(dir.path(), &source)
+        .to_string_lossy()
+        .into();
+    s.max_concurrent = limit;
+    s.owners = vec!["acme".into()];
+    s.authors = vec!["alice".into()];
+    s.token_profiles.push(TokenProfile {
+        id: "alice".into(),
+        label: "Alice".into(),
+        account: "alice".into(),
+        token: Some("dummy-token".into()),
+        has_token: false,
+    });
+    s.flows[1].enabled = false;
+    s.flows[2].enabled = false;
+    s.projects.push(Project {
+        id: "repo".into(),
+        repository: "acme/repo".into(),
+        source_path: source.to_string_lossy().into(),
+    });
+    s.flows[0].nodes.truncate(1);
+    s.flows[0].nodes[0].depends_on.clear();
+    f.save_settings(s).unwrap();
+    (dir, f)
+}
+#[cfg(unix)]
+async fn terminal(f: &Factory, id: &str) -> RunDetail {
+    for _ in 0..200 {
+        let d = f.run_detail(id).unwrap();
+        if !["queued", "running"].contains(&d.run.status.as_str()) {
+            return d;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("run did not finish")
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn cli_result_logs_and_workspace_are_real_and_private() {
+    let (_dir,f)=fixture("cat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"session-1\"}'\necho log-line >&2\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"",4);
+    let mut rx = f.subscribe();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            10,
+            "[AI] work",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let d = terminal(&f, &id).await;
+    assert_eq!(d.run.status, "succeeded", "{:?}", d.run.error);
+    assert_eq!(d.nodes[0].session_id.as_deref(), Some("session-1"));
+    assert!(d.run.workspace.is_none());
+    assert!(f.logs(&id, "spec", 0).unwrap().text.contains("log-line"));
+    let mut seen = false;
+    while let Ok(e) = rx.try_recv() {
+        seen |= e.kind == "log";
+    }
+    assert!(seen);
+    f.shutdown().await;
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn remote_clones_are_temporary_and_each_retry_gets_its_own_directory() {
+    let (dir, f) = fixture(
+        r#"cat >/dev/null
+test -d .git || exit 71
+pwd > "$AI_FACTORY_MEMORY_DIR/workspace-path"
+git remote get-url origin > "$AI_FACTORY_MEMORY_DIR/origin"
+printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#,
+        4,
+    );
+    let mut settings = f.settings().unwrap();
+    settings.projects.clear();
+    f.save_settings(settings).unwrap();
+    let first = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            101,
+            "[AI] work",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    assert_eq!(terminal(&f, &first).await.run.status, "succeeded");
+    let second = f.retry(&first).unwrap();
+    assert_eq!(terminal(&f, &second).await.run.status, "succeeded");
+    f.shutdown().await;
+    for id in [&first, &second] {
+        let expected = dir
+            .path()
+            .join("data")
+            .canonicalize()
+            .unwrap()
+            .join("workspaces")
+            .join(id);
+        let memory = dir.path().join("data/memory/acme/repo/runs").join(id);
+        assert_eq!(
+            std::fs::read_to_string(memory.join("workspace-path"))
+                .unwrap()
+                .trim(),
+            expected.to_str().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(memory.join("origin"))
+                .unwrap()
+                .trim(),
+            "https://github.com/acme/repo.git"
+        );
+        assert!(!expected.exists());
+        assert!(f.run_detail(id).unwrap().run.workspace.is_none());
+    }
+    let clones = std::fs::read_to_string(dir.path().join("clone-args.log")).unwrap();
+    assert_eq!(
+        clones.matches("https://github.com/acme/repo.git").count(),
+        2
+    );
+    assert!(dir.path().join("source/.git").exists());
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn every_agent_role_receives_unattended_instructions_and_noninteractive_launch() {
+    for agent in ["codex", "opencode"] {
+        let (dir, f) = fixture(
+            r#"cat > "${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt"
+printf '%s\n' "$@" > "${AI_FACTORY_RESULT_PATH%.result.json}.args.txt"
+printf '%s' "$OPENCODE_CONFIG_CONTENT" > "${AI_FACTORY_RESULT_PATH%.result.json}.config.json"
+printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#,
+            4,
+        );
+        let mut settings = f.settings().unwrap();
+        let template = settings.flows[0].nodes[0].clone();
+        settings.flows[0].nodes = ["spec", "planner", "builder", "reviewer"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| {
+                let mut node = template.clone();
+                node.id = role.into();
+                node.agent = agent.into();
+                node.access = if role == "reviewer" { "read" } else { "write" }.into();
+                node.prompt = format!("Act as {role}. Ask the user to approve before continuing.");
+                node.depends_on = if index == 0 {
+                    vec![]
+                } else {
+                    vec![["spec", "planner", "builder"][index - 1].into()]
+                };
+                node
+            })
+            .collect();
+        f.save_settings(settings).unwrap();
+        let id = f
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                40,
+                "[AI] unattended",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        f.start();
+        let detail = terminal(&f, &id).await;
+        f.shutdown().await;
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{agent}: {:?}",
+            detail.nodes
+        );
+        for role in ["spec", "planner", "builder", "reviewer"] {
+            let session = dir.path().join("data/sessions").join(&id);
+            let prompt =
+                std::fs::read_to_string(session.join(format!("{role}.stdin.txt"))).unwrap();
+            assert!(
+                prompt.contains("Do not ask the user questions or request approval"),
+                "{agent}/{role}: missing unattended contract"
+            );
+            assert!(prompt.contains("downstream workflow steps"));
+            assert!(prompt.contains("skills"));
+            assert!(prompt.contains("status=blocked"));
+            assert!(prompt.contains("Do not expand the assigned role"));
+            assert!(prompt.contains(
+                "Never modify source repository or files outside authorized workspace/memory"
+            ));
+            assert!(
+                prompt
+                    .find("AI Factory unattended execution contract")
+                    .unwrap()
+                    > prompt.find("Ask the user to approve").unwrap()
+            );
+            let args = std::fs::read_to_string(session.join(format!("{role}.args.txt"))).unwrap();
+            if agent == "codex" {
+                assert!(args.contains("approval_policy=\"never\""));
+                assert!(args.contains(if role == "reviewer" {
+                    "read-only"
+                } else {
+                    "workspace-write"
+                }));
+            } else {
+                assert!(args.contains("--auto"));
+                let config: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(session.join(format!("{role}.config.json"))).unwrap(),
+                )
+                .unwrap();
+                for permission in [
+                    &config["permission"],
+                    &config["agent"]["ai-factory"]["permission"],
+                ] {
+                    assert_eq!(permission["question"], "deny");
+                    assert_eq!(permission["external_directory"]["*"], "deny");
+                    if role == "reviewer" {
+                        assert_eq!(permission["*"], "deny");
+                    }
+                }
+            }
+        }
+    }
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn concurrency_limit_and_cancellation_stop_processes() {
+    let (_dir, f) = fixture("cat >/dev/null\necho launched\nsleep 10", 2);
+    let mut ids = vec![];
+    for n in 1..=3 {
+        ids.push(
+            f.enqueue(TriggerEvent::issue(
+                "acme/repo",
+                n,
+                "[AI] work",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    f.start();
+    for _ in 0..100 {
+        if f.snapshot().unwrap().metrics.running == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let s = f.snapshot().unwrap();
+    assert_eq!(s.metrics.running, 2);
+    assert_eq!(s.metrics.queued, 1);
+    f.cancel(&ids[0]).unwrap();
+    assert_eq!(terminal(&f, &ids[0]).await.run.status, "cancelled");
+    f.shutdown().await;
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn blocked_result_skips_descendants() {
+    let (_dir,f)=fixture("cat >/dev/null\necho '{\"status\":\"succeeded\",\"summary\":\"bad approval\",\"artifacts\":[],\"data\":{\"approved\":false}}' > \"$AI_FACTORY_RESULT_PATH\"",4);
+    let mut s = f.settings().unwrap();
+    let mut child = s.flows[0].nodes[0].clone();
+    child.id = "child".into();
+    child.depends_on = vec!["spec".into()];
+    s.flows[0].nodes.push(child);
+    f.save_settings(s).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            1,
+            "[AI] work",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let d = terminal(&f, &id).await;
+    assert_eq!(d.run.status, "failed");
+    assert_eq!(d.nodes[1].status, "skipped");
+    f.shutdown().await;
+}
+#[test]
+fn terminal_cancellation_cannot_be_overwritten_by_late_worker_status() {
+    let root = tempfile::tempdir().unwrap();
+    let f = common::open(root.path().into()).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            11,
+            "[AI] work",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.cancel(&id).unwrap();
+    f.set_run_status(&id, "running", None).unwrap();
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "cancelled");
+    f.set_run_status(&id, "succeeded", None).unwrap();
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "cancelled");
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn opencode_uses_private_server_and_path_scoped_memory_permissions() {
+    let (_dir,f)=fixture("cat >/dev/null\ncase \"$*\" in *--standalone*) ;; *) exit 44;; esac\ncase \"$OPENCODE_CONFIG_CONTENT\" in *external_directory*allow*) ;; *) exit 45;; esac\necho '{\"type\":\"text\",\"part\":{\"text\":\"{\\\"status\\\":\\\"succeeded\\\",\\\"summary\\\":\\\"done\\\",\\\"artifacts\\\":[],\\\"data\\\":{}}\"}}'",4);
+    let mut s = f.settings().unwrap();
+    s.flows[0].nodes[0].agent = "opencode".into();
+    f.save_settings(s).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            19,
+            "[AI] OpenCode",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let d = terminal(&f, &id).await;
+    assert_eq!(d.run.status, "succeeded", "{:?} {:?}", d.run.error, d.nodes);
+    f.shutdown().await;
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn codex_strict_transport_decodes_custom_data_before_validation() {
+    let (_dir,f)=fixture("cat >/dev/null\necho '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data_json\":\"{\\\"approved\\\":true}\"}' > \"$AI_FACTORY_RESULT_PATH\"",4);
+    let mut s = f.settings().unwrap();
+    s.flows[0].nodes[0].result_schema = serde_json::json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}});
+    f.save_settings(s).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            20,
+            "[AI] schema",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let d = terminal(&f, &id).await;
+    assert_eq!(d.run.status, "succeeded", "{:?}", d.nodes);
+    assert_eq!(
+        d.nodes[0].result.as_ref().unwrap()["data"]["approved"],
+        true
+    );
+    f.shutdown().await;
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn jobs_isolate_mutable_memory_and_git_identity_matches_actor() {
+    let (_dir,f)=fixture("cat >/dev/null\necho identity:$GIT_AUTHOR_NAME:$GIT_COMMITTER_NAME\necho memory:$AI_FACTORY_MEMORY_DIR\necho '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"",4);
+    let mut ids = vec![];
+    for n in 30..32 {
+        ids.push(
+            f.enqueue(TriggerEvent::issue(
+                "acme/repo",
+                n,
+                "[AI] memory",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    f.start();
+    for id in &ids {
+        assert_eq!(terminal(&f, id).await.run.status, "succeeded");
+    }
+    let logs: Vec<_> = ids
+        .iter()
+        .map(|id| f.logs(id, "spec", 0).unwrap().text)
+        .collect();
+    assert!(logs[0].contains("identity:alice:alice"), "{}", logs[0]);
+    let paths: Vec<_> = logs
+        .iter()
+        .map(|l| {
+            l.lines()
+                .find(|l| l.starts_with("memory:"))
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_ne!(paths[0], paths[1]);
+    f.shutdown().await;
+}
+#[test]
+fn application_data_directory_has_one_scheduler_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = common::open(dir.path().into()).unwrap();
+    assert!(common::open(dir.path().into()).is_err());
+    drop(first);
+    assert!(common::open(dir.path().into()).is_ok());
+}
+#[test]
+fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
+    let root = tempfile::tempdir().unwrap();
+    let f = common::open(root.path().into()).unwrap();
+    let mut s = f.settings().unwrap();
+    s.owners = vec!["Acme".into(), "acme".into()];
+    s.authors = vec!["Alice".into()];
+    s.token_profiles.push(TokenProfile {
+        id: "actor".into(),
+        label: "Alice".into(),
+        account: "Alice".into(),
+        token: Some("token-test".into()),
+        has_token: false,
+    });
+    let s = f.save_settings(s).unwrap();
+    assert_eq!(s.owners, vec!["acme"]);
+    assert_eq!(s.authors, vec!["alice"]);
+    assert_eq!(s.token_profiles[0].account, "alice");
+    let mut s = s;
+    s.token_profiles[0].token = Some(String::new());
+    assert!(f.save_settings(s).unwrap().token_profiles[0].has_token);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
+    let (_dir, f) = fixture("cat >/dev/null\nsleep 30 &\necho CHILD:$!\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"", 4);
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            90,
+            "[AI] work",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let d = f.run_detail(&id).unwrap();
+            if d.run.status == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    // Always cancel/clean up the fixture, including on the regression path.
+    let text = f.logs(&id, "spec", 0).unwrap().text;
+    let pid: i32 = text
+        .lines()
+        .find_map(|l| l.strip_prefix("CHILD:"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut alive = true;
+    for _ in 0..100 {
+        alive = unsafe { libc::kill(pid, 0) } == 0;
+        #[cfg(target_os = "linux")]
+        if std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+            s.rsplit_once(')')
+                .is_some_and(|(_, tail)| tail.trim_start().starts_with('Z'))
+        }) {
+            alive = false; // Terminated orphan awaiting the container init's reap.
+        }
+        if !alive {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    if done.is_err() {
+        let _ = f.cancel(&id);
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    f.shutdown().await;
+    assert!(
+        done.is_ok(),
+        "CLI exited but inherited output pipes blocked completion"
+    );
+    assert!(!alive, "descendant survived its CLI session");
+}
+
+#[test]
+fn queued_snapshot_is_immutable_and_retry_uses_current_workflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open(dir.path().into()).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            101,
+            "[AI] snapshot",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    let original = f.run_detail(&id).unwrap().flow.nodes[0].prompt.clone();
+    let mut settings = f.settings().unwrap();
+    settings.flows[0].nodes[0].prompt = "Updated instructions".into();
+    f.save_settings(settings).unwrap();
+    assert_eq!(f.run_detail(&id).unwrap().flow.nodes[0].prompt, original);
+    f.set_run_status(&id, "failed", None).unwrap();
+    let retry = f.retry(&id).unwrap();
+    assert_eq!(
+        f.run_detail(&retry).unwrap().flow.nodes[0].prompt,
+        "Updated instructions"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn independent_writer_nodes_never_overlap_in_one_workspace() {
+    let (_dir, f) = fixture("cat >/dev/null\nmkdir .writer-active || exit 17\nsleep 0.1\nrmdir .writer-active\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"", 4);
+    let mut settings = f.settings().unwrap();
+    let mut second = settings.flows[0].nodes[0].clone();
+    second.id = "second".into();
+    settings.flows[0].nodes.push(second);
+    f.save_settings(settings).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            102,
+            "[AI] writers",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let d = terminal(&f, &id).await;
+    f.shutdown().await;
+    assert_eq!(d.run.status, "succeeded", "{:?}", d.nodes);
+    assert_eq!(d.nodes.len(), 2);
+    assert!(d.nodes.iter().all(|n| n.status == "succeeded"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn real_cli_artifact_contract_checks_contents_and_authorized_paths() {
+    use sha2::{Digest, Sha256};
+    let good_hash = format!("{:x}", Sha256::digest(b"evidence"));
+    for (setup, hash, expected) in [
+        (
+            "printf evidence > report.txt",
+            good_hash.as_str(),
+            "succeeded",
+        ),
+        ("printf evidence > report.txt", "wrong", "failed"),
+        ("ln -s /etc/hosts report.txt", good_hash.as_str(), "failed"),
+    ] {
+        let result = serde_json::json!({"status":"succeeded","summary":"done","artifacts":[{"path":"report.txt","sha256":hash,"kind":"report"}],"data":{}});
+        let script = format!(
+            "cat >/dev/null\n{setup}\nprintf '%s' '{result}' > \"$AI_FACTORY_RESULT_PATH\""
+        );
+        let (_dir, f) = fixture(&script, 4);
+        let id = f
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                103,
+                "[AI] artifacts",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        f.start();
+        let d = terminal(&f, &id).await;
+        f.shutdown().await;
+        assert_eq!(d.run.status, expected, "{:?}", d.nodes);
+        assert!(f.run_detail(&id).unwrap().run.workspace.is_none());
+        assert!(!_dir.path().join("data/workspaces").join(&id).exists());
+        if expected == "succeeded" {
+            let path = d.nodes[0].result.as_ref().unwrap()["artifacts"][0]["path"]
+                .as_str()
+                .unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), b"evidence");
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn failed_blocked_and_timed_out_runs_remove_the_clone() {
+    for status in ["failed", "blocked", "timeout"] {
+        let script = if status == "timeout" {
+            "cat >/dev/null\nsleep 30".into()
+        } else {
+            format!("cat >/dev/null\nprintf '%s' '{{\"status\":\"{status}\",\"summary\":\"fixture\",\"artifacts\":[],\"data\":{{}}}}' > \"$AI_FACTORY_RESULT_PATH\"")
+        };
+        let (dir, f) = fixture(&script, 4);
+        if status == "timeout" {
+            let mut s = f.settings().unwrap();
+            s.node_timeout_seconds = 1;
+            f.save_settings(s).unwrap();
+        }
+        let id = f
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                170,
+                "[AI] cleanup",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        f.start();
+        let detail = terminal(&f, &id).await;
+        f.shutdown().await;
+        assert_eq!(
+            detail.run.status,
+            if status == "timeout" {
+                "failed"
+            } else {
+                status
+            },
+            "{:?}",
+            detail.nodes
+        );
+        assert!(detail.run.workspace.is_none());
+        assert!(!dir.path().join("data/workspaces").join(id).exists());
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn partially_failed_clone_is_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, f) = fixture("cat >/dev/null", 4);
+    let git = dir.path().join("failed-git");
+    std::fs::write(&git, "#!/bin/sh\nfor arg do last=\"$arg\"; done\nmkdir -p \"$last\"\nprintf partial > \"$last/partial\"\nexit 42\n").unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut settings = f.settings().unwrap();
+    settings.commands.git = git.to_string_lossy().into();
+    f.save_settings(settings).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            171,
+            "[AI] cleanup",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let detail = terminal(&f, &id).await;
+    f.shutdown().await;
+    assert_eq!(detail.run.status, "failed");
+    assert!(detail.run.workspace.is_none());
+    assert!(!dir.path().join("data/workspaces").join(id).exists());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn archived_artifacts_remain_in_failed_node_results_after_action_rejection() {
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(b"evidence"));
+    let value = serde_json::json!({"status":"succeeded","summary":"report ready","artifacts":[{"path":"report.txt","sha256":hash,"kind":"report"}],"data":{"publish":{"title":"fixture","body":"missing issue reference","base":"main"}}});
+    let script = format!("cat >/dev/null\nprintf evidence > report.txt\nprintf '%s' '{value}' > \"$AI_FACTORY_RESULT_PATH\"");
+    let (dir, f) = fixture(&script, 4);
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            173,
+            "[AI] evidence",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    let detail = terminal(&f, &id).await;
+    f.shutdown().await;
+    assert_eq!(detail.run.status, "failed");
+    let result = detail.nodes[0]
+        .result
+        .as_ref()
+        .expect("validated artifacts must survive action failure");
+    assert_eq!(result["status"], "failed");
+    let path = result["artifacts"][0]["path"].as_str().unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"evidence");
+    assert!(!dir.path().join("data/workspaces").join(&id).exists());
+    let recorded: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            dir.path()
+                .join("data/sessions")
+                .join(&id)
+                .join("spec.result.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recorded["artifacts"][0]["path"], path);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn cancellation_during_clone_kills_git_children_before_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, f) = fixture("cat >/dev/null", 4);
+    let git = dir.path().join("slow-git");
+    let marker = dir.path().join("git-child");
+    std::fs::write(&git, format!("#!/bin/sh\nfor arg do last=\"$arg\"; done\nmkdir -p \"$last\"\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n", marker.display())).unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut settings = f.settings().unwrap();
+    settings.commands.git = git.to_string_lossy().into();
+    f.save_settings(settings).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            172,
+            "[AI] cleanup",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.start();
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let pid: i32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+    f.cancel(&id).unwrap();
+    for _ in 0..200 {
+        if f.run_detail(&id).unwrap().run.workspace.is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    f.shutdown().await;
+    assert!(f.run_detail(&id).unwrap().run.workspace.is_none());
+    assert!(!dir.path().join("data/workspaces").join(id).exists());
+    for _ in 0..100 {
+        if unsafe { libc::kill(pid, 0) } == -1 {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+            s.rsplit_once(')')
+                .is_some_and(|(_, state)| state.trim_start().starts_with('Z'))
+        }) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("Git descendant survived cancellation");
+}
+
+#[test]
+fn restart_removes_only_known_finished_workspaces_and_preserves_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open(dir.path().into()).unwrap();
+    let interrupted = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            180,
+            "[AI] fixture",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    let queued = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            181,
+            "[AI] fixture",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.set_run_status(&interrupted, "running", None).unwrap();
+    for name in [&interrupted, &queued, "manual-folder"] {
+        std::fs::create_dir(dir.path().join("workspaces").join(name)).unwrap();
+    }
+    let session = dir.path().join("sessions").join(&interrupted);
+    std::fs::create_dir(&session).unwrap();
+    std::fs::write(session.join("spec.log"), "history").unwrap();
+    drop(f);
+    let f = common::open(dir.path().into()).unwrap();
+    assert_eq!(
+        f.run_detail(&interrupted).unwrap().run.status,
+        "interrupted"
+    );
+    assert!(!dir.path().join("workspaces").join(interrupted).exists());
+    assert!(dir.path().join("workspaces").join(queued).exists());
+    assert!(dir.path().join("workspaces/manual-folder").exists());
+    assert_eq!(
+        std::fs::read_to_string(session.join("spec.log")).unwrap(),
+        "history"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_recovery_removes_links_without_touching_external_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("keep"), "untouched").unwrap();
+    let f = common::open(dir.path().into()).unwrap();
+    let id = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            182,
+            "[AI] fixture",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    f.set_run_status(&id, "failed", None).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("workspaces").join(&id)).unwrap();
+    drop(f);
+    let _f = common::open(dir.path().into()).unwrap();
+    assert!(!dir.path().join("workspaces").join(id).exists());
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("keep")).unwrap(),
+        "untouched"
+    );
+}

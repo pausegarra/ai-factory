@@ -1,0 +1,14 @@
+dist/
+*.sqlite3*
+node_modules/
+desktop/dist/
+target/
+src-tauri/gen/
+test-results/
+playwright-report/
+docs/
+.env
+.env.*
+.DS_Store
+*.tsbuildinfo
+/crates/*/Cargo.lock
