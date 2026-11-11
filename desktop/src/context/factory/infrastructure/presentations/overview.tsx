@@ -30,7 +30,6 @@ export function OverviewPage({
 }) {
   const configured =
     settings.token_profiles.some((t) => t.has_token) &&
-    settings.projects.length > 0 &&
     settings.owners.length > 0;
   const { metrics } = snapshot;
   const active = snapshot.runs.filter((r) =>
@@ -105,7 +104,7 @@ export function OverviewPage({
           <div>
             <span className="eyebrow">START WITH THE ESSENTIALS</span>
             <h2>Set up your first production line</h2>
-            <p>Connect GitHub, add a project and put your agents to work.</p>
+            <p>Connect GitHub, configure permissions and put your agents to work.</p>
             <div className="setup-checklist">
               <span
                 className={
@@ -114,10 +113,6 @@ export function OverviewPage({
               >
                 <CheckCircle size={16} />
                 GitHub account
-              </span>
-              <span className={settings.projects.length ? "done" : ""}>
-                <CheckCircle size={16} />
-                Local project
               </span>
               <span className={settings.owners.length ? "done" : ""}>
                 <CheckCircle size={16} />

@@ -34,6 +34,7 @@ vi.mock("../src/context/factory/infrastructure/ipc/factory-api", () => ({
 import { factoryApi } from "../src/context/factory/infrastructure/ipc/factory-api";
 import { App } from "../src/context/factory/infrastructure/presentations/app";
 import { RunDetailPage } from "../src/context/factory/infrastructure/presentations/runs";
+import { OverviewPage } from "../src/context/factory/infrastructure/presentations/overview";
 beforeAll(() => {
   globalThis.ResizeObserver = class {
     observe() {}
@@ -99,6 +100,38 @@ const snapshot: Snapshot = {
     app_data_dir: "/data",
   },
 };
+it("considers setup complete with GitHub credentials and owners without a local project", () => {
+  render(
+    <OverviewPage
+      snapshot={snapshot}
+      settings={{
+        ...settings,
+        owners: ["owner"],
+        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: true }],
+      }}
+      onPage={() => {}}
+      onRun={() => {}}
+    />,
+  );
+  expect(screen.queryByRole("heading", { name: "Set up your first production line" })).toBeNull();
+});
+it.each(["token", "owner"])("keeps setup guidance when %s is missing without requesting a local project", (missing) => {
+  render(
+    <OverviewPage
+      snapshot={snapshot}
+      settings={{
+        ...settings,
+        owners: missing === "owner" ? [] : ["owner"],
+        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: missing !== "token" }],
+      }}
+      onPage={() => {}}
+      onRun={() => {}}
+    />,
+  );
+  expect(screen.getByRole("heading", { name: "Set up your first production line" })).toBeTruthy();
+  expect(screen.queryByText("Local project")).toBeNull();
+  expect(screen.queryByText(/add a project/i)).toBeNull();
+});
 it("shows a newly enqueued run from an event without refresh or polling", async () => {
   vi.mocked(factoryApi.settings).mockResolvedValue(settings);
   vi.mocked(factoryApi.snapshot).mockResolvedValue(snapshot);
