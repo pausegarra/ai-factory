@@ -1,5 +1,8 @@
 #![cfg(unix)]
+#[path = "common/actions_http.rs"]
+mod actions_http;
 mod common;
+use actions_http::{Reply, Script, Step};
 use factory_core::{context::factory::infrastructure::rest_clients::github::Github, *};
 use serde_json::{json, Value};
 use std::{
@@ -79,7 +82,12 @@ fn event(trigger: &str) -> TriggerEvent {
     e
 }
 fn pr(e: &TriggerEvent, branch: &str, sha: &str) -> Value {
-    json!({"number":5,"title":"PR","body":"Closes #1","html_url":"https://github.com/acme/repo/pull/5","state":"open","merged":false,"merged_at":null,"base":{"repo":{"full_name":"acme/repo"}},"head":{"sha":sha,"ref":branch},"user":{"login":e.actor}})
+    json!({"number":5,"title":"PR","body":"Closes #1",
+        "html_url":"https://github.com/acme/repo/pull/5","state":"open",
+        "merged":false,"merged_at":null,
+        "base":{"ref":"main","repo":{"full_name":"acme/repo"}},
+        "head":{"sha":sha,"ref":branch,"repo":{"full_name":"acme/repo"}},
+        "user":{"login":e.actor}})
 }
 fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
     let dir = tempfile::tempdir().unwrap();
@@ -97,6 +105,61 @@ fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
 }
 fn result(data: Value) -> Value {
     json!({"status":"succeeded","summary":"done","artifacts":[],"data":data})
+}
+
+#[tokio::test]
+async fn request_accepts_empty_204_and_keeps_json_contract() {
+    let script = Script::start(vec![
+        Step::new("DELETE", "/empty", Reply::Raw(204, vec![])),
+        Step::new("GET", "/json", Reply::Json(200, json!({"ok":true}))),
+        Step::new("POST", "/created", Reply::Json(201, json!({"id":1}))),
+        Step::new("GET", "/bad-json", Reply::Raw(200, b"broken".to_vec())),
+        Step::new("GET", "/empty-200", Reply::Raw(200, vec![])),
+        Step::new(
+            "GET",
+            "/denied",
+            Reply::Json(403, json!({"message":"alice-token"})),
+        ),
+    ])
+    .await;
+    let api = Github::with_base("alice-token", &script.base).unwrap();
+    assert_eq!(
+        api.request(reqwest::Method::DELETE, "/empty", None)
+            .await
+            .unwrap(),
+        Value::Null
+    );
+    assert_eq!(
+        api.request(reqwest::Method::GET, "/json", None)
+            .await
+            .unwrap(),
+        json!({"ok":true})
+    );
+    assert_eq!(
+        api.request(reqwest::Method::POST, "/created", None)
+            .await
+            .unwrap(),
+        json!({"id":1})
+    );
+    assert!(api
+        .request(reqwest::Method::GET, "/bad-json", None)
+        .await
+        .is_err());
+    assert!(api
+        .request(reqwest::Method::GET, "/empty-200", None)
+        .await
+        .is_err());
+    let error = api
+        .request(reqwest::Method::GET, "/denied", None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("403"));
+    assert!(!format!("{error:#}").contains("alice-token"));
+    assert!(api
+        .request(reqwest::Method::GET, "//elsewhere", None)
+        .await
+        .is_err());
+    script.assert_done();
 }
 fn git(path: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
@@ -139,40 +202,123 @@ fn workspace(root: &Path, e: &TriggerEvent) -> (PathBuf, String, String) {
     (path, branch, sha)
 }
 
-#[tokio::test]
-async fn merge_reconciles_already_merged_pull_request_without_second_write() {
-    let writes = Arc::new(AtomicUsize::new(0));
-    let w = writes.clone();
-    let e = event("pr_approved");
-    let served = e.clone();
-    let base = server(move |method, path, _| {
-        if path == "/user" {
-            return (200, json!({"login":"alice"}));
-        }
-        if method == "PUT" {
-            w.fetch_add(1, Ordering::SeqCst);
-            return (405, json!({"message":"already merged"}));
-        }
-        let mut p = pr(&served, "feature", &served.head_sha);
-        p["state"] = json!("closed");
-        p["merged"] = json!(true);
-        p["merged_at"] = json!("2026-11-01T00:00:00Z");
-        (200, p)
-    })
-    .await;
-    let (dir, f) = factory(&base);
-    let api = Github::with_base("alice-token", &base).unwrap();
+const PR_PATH: &str = "/repos/acme/repo/pulls/5";
+// Strict scripts reject every unexpected write, including target/default DELETEs.
+const REPO_PATH: &str = "/repos/acme/repo";
+const MERGE_PATH: &str = "/repos/acme/repo/pulls/5/merge";
+const SOURCE_GET: &str = "/repos/acme/repo/git/ref/heads/feature";
+const SOURCE_DELETE: &str = "/repos/acme/repo/git/refs/heads/feature";
+
+fn repo_value(default: &str) -> Value {
+    json!({"full_name":"acme/repo", "default_branch":default})
+}
+fn reference(branch: &str, sha: &str) -> Value {
+    json!({"ref":format!("refs/heads/{branch}"),"object":{"type":"commit","sha":sha}})
+}
+fn merged_pr(mut pr: Value) -> Value {
+    pr["state"] = json!("closed");
+    pr["merged"] = json!(true);
+    pr["merged_at"] = json!("2026-11-11T18:00:00Z");
+    pr
+}
+fn preflight(pr: Value, default: &str) -> Vec<Step> {
+    vec![
+        Step::new("GET", "/user", Reply::Json(200, json!({"login":"alice"}))),
+        Step::new("GET", PR_PATH, Reply::Json(200, pr)),
+        Step::new("GET", REPO_PATH, Reply::Json(200, repo_value(default))),
+    ]
+}
+fn confirmed(pr: Value, default: &str) -> Vec<Step> {
+    vec![
+        Step::new("GET", PR_PATH, Reply::Json(200, pr)),
+        Step::new("GET", REPO_PATH, Reply::Json(200, repo_value(default))),
+    ]
+}
+fn absence_witness() -> Vec<Step> {
+    vec![
+        Step::new("GET", REPO_PATH, Reply::Json(200, repo_value("main"))),
+        Step::new(
+            "GET",
+            "/repos/acme/repo/git/ref/heads/main",
+            Reply::Json(200, reference("main", &"b".repeat(40))),
+        ),
+    ]
+}
+async fn merge_attempt(
+    api: &Github,
+    f: &Factory,
+    e: &TriggerEvent,
+    root: &Path,
+    run: &str,
+) -> factory_core::Result<()> {
     api.publish_actions(
-        &f,
-        &e,
-        "attempt-2",
+        f,
+        e,
+        run,
         "merge",
-        dir.path(),
+        root,
         &result(json!({"merge":{"method":"squash"}})),
     )
     .await
-    .unwrap();
-    assert_eq!(writes.load(Ordering::SeqCst), 0);
+}
+async fn execute_merge(e: &TriggerEvent, steps: Vec<Step>) -> (factory_core::Result<()>, Script) {
+    let script = Script::start(steps).await;
+    let (dir, f) = factory(&script.base);
+    let api = Github::with_base("alice-token", &script.base).unwrap();
+    let outcome = merge_attempt(&api, &f, e, dir.path(), "test-attempt").await;
+    (outcome, script)
+}
+
+#[tokio::test]
+async fn merge_deletes_only_source_after_confirmation_for_each_target() {
+    for target in ["main", "develop"] {
+        let e = event("pr_approved");
+        let mut open = pr(&e, "feature", &e.head_sha);
+        open["base"]["ref"] = json!(target);
+        let mut steps = preflight(open.clone(), "main");
+        steps.push(
+            Step::new("PUT", MERGE_PATH, Reply::Json(200, json!({"merged":true})))
+                .body(json!({"merge_method":"squash","sha":e.head_sha})),
+        );
+        steps.extend(confirmed(merged_pr(open), "main"));
+        steps.push(Step::new(
+            "GET",
+            SOURCE_GET,
+            Reply::Json(200, reference("feature", &e.head_sha)),
+        ));
+        steps.push(Step::new("DELETE", SOURCE_DELETE, Reply::Raw(204, vec![])));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        outcome.unwrap();
+        script.assert_done();
+        assert_eq!(
+            script.writes(),
+            vec![
+                ("PUT".into(), MERGE_PATH.into()),
+                ("DELETE".into(), SOURCE_DELETE.into())
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_reconciles_already_merged_pull_request_without_second_merge() {
+    let e = event("pr_approved");
+    let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+    let mut steps = preflight(closed.clone(), "main");
+    steps.extend(confirmed(closed, "main"));
+    steps.push(Step::new(
+        "GET",
+        SOURCE_GET,
+        Reply::Json(200, reference("feature", &e.head_sha)),
+    ));
+    steps.push(Step::new("DELETE", SOURCE_DELETE, Reply::Raw(204, vec![])));
+    let (outcome, script) = execute_merge(&e, steps).await;
+    outcome.unwrap();
+    script.assert_done();
+    assert_eq!(
+        script.writes(),
+        vec![("DELETE".into(), SOURCE_DELETE.into())]
+    );
 }
 
 #[tokio::test]
@@ -404,4 +550,662 @@ async fn cancelled_run_cannot_comment_after_identity_read() {
         .await
         .is_err());
     assert_eq!(writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn merge_rejects_unsafe_metadata_before_any_mutation() {
+    let e = event("pr_approved");
+    let good = pr(&e, "feature", &e.head_sha);
+    let mut cases: Vec<(&str, Value, Value)> = vec![];
+    for pointer in ["/head/repo/full_name", "/head/ref", "/base/ref"] {
+        let mut p = good.clone();
+        *p.pointer_mut(pointer).unwrap() = Value::Null;
+        cases.push((pointer, p, repo_value("main")));
+    }
+    for (label, pointer, value) in [
+        ("same-source-target", "/base/ref", json!("feature")),
+        ("source-default", "/head/ref", json!("main")),
+        ("fork", "/head/repo/full_name", json!("other/repo")),
+        ("different-head", "/head/sha", json!("b".repeat(40))),
+    ] {
+        let mut p = good.clone();
+        *p.pointer_mut(pointer).unwrap() = value;
+        if label == "source-default" {
+            p["base"]["ref"] = json!("develop");
+        }
+        cases.push((label, p, repo_value("main")));
+    }
+    cases.push((
+        "missing-default",
+        good.clone(),
+        json!({"full_name":"acme/repo"}),
+    ));
+    cases.push((
+        "wrong-repo-response",
+        good.clone(),
+        json!({"full_name":"other/repo","default_branch":"main"}),
+    ));
+    cases.push(("invalid-default", good.clone(), repo_value("../main")));
+    for (label, p, repo) in cases {
+        let mut steps = preflight(p, "main");
+        steps[2] = Step::new("GET", REPO_PATH, Reply::Json(200, repo));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        assert!(outcome.is_err(), "{label}");
+        script.assert_done();
+        assert!(script.writes().is_empty(), "{label}");
+    }
+    for (pointer, value) in [
+        ("/base/repo/full_name", Value::Null),
+        ("/base/repo/full_name", json!("other/repo")),
+        ("/number", json!(6)),
+        ("/html_url", json!("https://github.com/other/repo/pull/5")),
+        ("/head/sha", json!("invalid")),
+    ] {
+        let mut p = good.clone();
+        *p.pointer_mut(pointer).unwrap() = value;
+        let mut steps = preflight(p, "main");
+        steps.truncate(2);
+        let (outcome, script) = execute_merge(&e, steps).await;
+        assert!(outcome.is_err(), "{pointer}");
+        script.assert_done();
+        assert!(script.writes().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn merge_rejects_invalid_branch_names_without_normalizing() {
+    for branch in [
+        "",
+        "@",
+        "HEAD",
+        "-feature",
+        "feature.",
+        "feature..x",
+        "feature@{1}",
+        "/feature",
+        "feature/",
+        "feature//x",
+        ".feature",
+        "feature/.x",
+        "feature.lock",
+        "a/x.lock",
+        "a b",
+        "a~b",
+        "a^b",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        "a\\b",
+        "a\nb",
+        "a\u{007f}b",
+        "../refs/tags/v1",
+    ] {
+        for side in ["head", "base"] {
+            let e = event("pr_approved");
+            let mut p = pr(&e, "feature", &e.head_sha);
+            p[side]["ref"] = json!(branch);
+            let (outcome, script) = execute_merge(&e, preflight(p, "main")).await;
+            assert!(outcome.is_err(), "{side}: {branch:?}");
+            script.assert_done();
+            assert!(script.writes().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn merge_errors_or_uncertainty_never_delete() {
+    for reply in [
+        Reply::Json(409, json!({})),
+        Reply::Json(422, json!({})),
+        Reply::Json(200, json!({"merged":false})),
+        Reply::Raw(200, b"broken".to_vec()),
+        Reply::Disconnect,
+    ] {
+        let e = event("pr_approved");
+        let mut steps = preflight(pr(&e, "feature", &e.head_sha), "main");
+        steps.push(Step::new("PUT", MERGE_PATH, reply));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        let error = outcome.unwrap_err();
+        assert!(format!("{error:#}").contains("merge") || format!("{error:#}").contains("Merge"));
+        script.assert_done();
+        assert_eq!(script.writes(), vec![("PUT".into(), MERGE_PATH.into())]);
+    }
+    let e = event("pr_approved");
+    let mut p = pr(&e, "feature", &e.head_sha);
+    p["state"] = json!("closed");
+    let (outcome, script) = execute_merge(&e, preflight(p, "main")).await;
+    assert!(outcome.is_err());
+    script.assert_done();
+    assert!(script.writes().is_empty());
+}
+
+#[tokio::test]
+async fn merge_preserves_source_on_changed_identity_or_unconfirmed_fresh_state() {
+    let e = event("pr_approved");
+    let open = pr(&e, "feature", &e.head_sha);
+    for (pointer, value, repo_read) in [
+        ("/head/ref", json!("other"), true),
+        ("/base/ref", json!("develop"), true),
+        ("/head/repo/full_name", json!("other/repo"), true),
+        ("/head/sha", json!("b".repeat(40)), true),
+        ("/merged", json!(false), false),
+    ] {
+        let mut after = merged_pr(open.clone());
+        *after.pointer_mut(pointer).unwrap() = value;
+        let mut steps = preflight(open.clone(), "main");
+        steps.push(Step::new(
+            "PUT",
+            MERGE_PATH,
+            Reply::Json(200, json!({"merged":true})),
+        ));
+        let mut after_steps = confirmed(after, "main");
+        if !repo_read {
+            after_steps.truncate(1);
+        }
+        steps.extend(after_steps);
+        let (outcome, script) = execute_merge(&e, steps).await;
+        assert!(outcome.unwrap_err().to_string().contains("cleanup pending"));
+        script.assert_done();
+        assert_eq!(script.writes(), vec![("PUT".into(), MERGE_PATH.into())]);
+    }
+}
+
+#[tokio::test]
+async fn merge_rejects_moved_or_mismatched_source_reference() {
+    let e = event("pr_approved");
+    let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+    for value in [
+        reference("feature", &"b".repeat(40)),
+        reference("feature-extra", &e.head_sha),
+        json!([reference("feature", &e.head_sha)]),
+        json!({"ref":"refs/tags/feature","object":{"type":"tag","sha":e.head_sha}}),
+        json!({"ref":"refs/heads/feature","object":{"type":"commit","sha":"bad"}}),
+    ] {
+        let mut steps = preflight(closed.clone(), "main");
+        steps.extend(confirmed(closed.clone(), "main"));
+        steps.push(Step::new("GET", SOURCE_GET, Reply::Json(200, value)));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        assert!(outcome.unwrap_err().to_string().contains("cleanup pending"));
+        script.assert_done();
+        assert!(script.writes().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn merge_keeps_branch_case_and_encodes_source_without_changing_namespace() {
+    for (branch, encoded) in [
+        ("ai-factory/2-abc123", "ai-factory/2-abc123"),
+        ("Feature", "Feature"),
+        ("Main", "Main"),
+        ("feature%2Fother", "feature%252Fother"),
+        ("feature#1+é", "feature%231%2B%C3%A9"),
+        ("tags/v1", "tags/v1"),
+    ] {
+        let e = event("pr_approved");
+        let mut closed = merged_pr(pr(&e, branch, &e.head_sha));
+        if branch == "Feature" {
+            closed["base"]["ref"] = json!("feature");
+        }
+        closed["head"]["repo"]["full_name"] = json!("ACME/Repo");
+        closed["base"]["repo"]["full_name"] = json!("Acme/REPO");
+        let get = format!("/repos/acme/repo/git/ref/heads/{encoded}");
+        let delete = format!("/repos/acme/repo/git/refs/heads/{encoded}");
+        let mut steps = preflight(closed.clone(), "main");
+        steps.extend(confirmed(closed, "main"));
+        steps.push(Step::new(
+            "GET",
+            &get,
+            Reply::Json(200, reference(branch, &e.head_sha)),
+        ));
+        steps.push(Step::new("DELETE", &delete, Reply::Raw(204, vec![])));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        outcome.unwrap();
+        script.assert_done();
+        assert_eq!(script.writes(), vec![("DELETE".into(), delete)]);
+    }
+}
+
+#[tokio::test]
+async fn merge_requires_actor_and_default_repository_verification() {
+    let e = event("pr_approved");
+    let (outcome, script) = execute_merge(
+        &e,
+        vec![Step::new(
+            "GET",
+            "/user",
+            Reply::Json(200, json!({"login":"mallory"})),
+        )],
+    )
+    .await;
+    assert!(outcome.is_err());
+    script.assert_done();
+    assert!(script.writes().is_empty());
+    for status in [401, 403, 404, 409, 500] {
+        let mut steps = preflight(pr(&e, "feature", &e.head_sha), "main");
+        steps[2] = Step::new("GET", REPO_PATH, Reply::Json(status, json!({})));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        assert!(outcome.is_err());
+        script.assert_done();
+        assert!(script.writes().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn merge_preserves_source_when_default_changes_to_source_after_merge() {
+    let e = event("pr_approved");
+    let open = pr(&e, "feature", &e.head_sha);
+    let mut steps = preflight(open.clone(), "main");
+    steps.push(Step::new(
+        "PUT",
+        MERGE_PATH,
+        Reply::Json(200, json!({"merged":true})),
+    ));
+    steps.extend(confirmed(merged_pr(open), "feature"));
+    let (outcome, script) = execute_merge(&e, steps).await;
+    assert!(outcome.unwrap_err().to_string().contains("default branch"));
+    script.assert_done();
+    assert_eq!(script.writes(), vec![("PUT".into(), MERGE_PATH.into())]);
+}
+
+#[tokio::test]
+async fn merge_accepts_already_absent_source_only_with_reference_access_witness() {
+    let e = event("pr_approved");
+    let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+    let mut steps = preflight(closed.clone(), "main");
+    steps.extend(confirmed(closed, "main"));
+    steps.push(Step::new("GET", SOURCE_GET, Reply::Json(404, json!({}))));
+    steps.extend(absence_witness());
+    let (outcome, script) = execute_merge(&e, steps).await;
+    outcome.unwrap();
+    script.assert_done();
+    assert!(script.writes().is_empty());
+}
+
+#[tokio::test]
+async fn merge_does_not_treat_opaque_404_as_absent_branch() {
+    for repo_access in [false, true] {
+        let e = event("pr_approved");
+        let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+        let mut steps = preflight(closed.clone(), "main");
+        steps.extend(confirmed(closed, "main"));
+        steps.push(Step::new("GET", SOURCE_GET, Reply::Json(404, json!({}))));
+        steps.push(Step::new(
+            "GET",
+            REPO_PATH,
+            if repo_access {
+                Reply::Json(200, repo_value("main"))
+            } else {
+                Reply::Json(404, json!({}))
+            },
+        ));
+        if repo_access {
+            steps.push(Step::new(
+                "GET",
+                "/repos/acme/repo/git/ref/heads/main",
+                Reply::Json(404, json!({})),
+            ));
+        }
+        let (outcome, script) = execute_merge(&e, steps).await;
+        assert!(outcome.unwrap_err().to_string().contains("cleanup pending"));
+        script.assert_done();
+        assert!(script.writes().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn merge_delete_errors_fail_if_source_remains_and_never_leak_response_body() {
+    for status in [200, 401, 403, 404, 409, 422, 500] {
+        let e = event("pr_approved");
+        let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+        let mut steps = preflight(closed.clone(), "main");
+        steps.extend(confirmed(closed.clone(), "main"));
+        steps.push(Step::new(
+            "GET",
+            SOURCE_GET,
+            Reply::Json(200, reference("feature", &e.head_sha)),
+        ));
+        steps.push(Step::new(
+            "DELETE",
+            SOURCE_DELETE,
+            Reply::Json(status, json!({"message":"alice-token"})),
+        ));
+        steps.extend(confirmed(closed, "main"));
+        steps.push(Step::new(
+            "GET",
+            SOURCE_GET,
+            Reply::Json(200, reference("feature", &e.head_sha)),
+        ));
+        let (outcome, script) = execute_merge(&e, steps).await;
+        let error = format!("{:#}", outcome.unwrap_err());
+        assert!(error.contains("merged; cleanup pending"));
+        assert!(error.contains("feature") && error.contains("acme/repo#5"));
+        assert!(error.contains(&status.to_string()) && !error.contains("alice-token"));
+        script.assert_done();
+        assert_eq!(
+            script.writes(),
+            vec![("DELETE".into(), SOURCE_DELETE.into())]
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_delete_error_reconciles_only_after_confirmed_absence() {
+    for reply in [
+        Reply::Json(404, json!({})),
+        Reply::Json(422, json!({})),
+        Reply::Disconnect,
+    ] {
+        let e = event("pr_approved");
+        let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+        let mut steps = preflight(closed.clone(), "main");
+        steps.extend(confirmed(closed.clone(), "main"));
+        steps.push(Step::new(
+            "GET",
+            SOURCE_GET,
+            Reply::Json(200, reference("feature", &e.head_sha)),
+        ));
+        steps.push(Step::new("DELETE", SOURCE_DELETE, reply));
+        steps.extend(confirmed(closed, "main"));
+        steps.push(Step::new("GET", SOURCE_GET, Reply::Json(404, json!({}))));
+        steps.extend(absence_witness());
+        let (outcome, script) = execute_merge(&e, steps).await;
+        outcome.unwrap();
+        script.assert_done();
+        assert_eq!(
+            script.writes(),
+            vec![("DELETE".into(), SOURCE_DELETE.into())]
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_retry_completes_only_pending_work() {
+    for lost_merge in [false, true] {
+        let e = event("pr_approved");
+        let open = pr(&e, "feature", &e.head_sha);
+        let closed = merged_pr(open.clone());
+        let mut steps = preflight(open, "main");
+        steps.push(Step::new(
+            "PUT",
+            MERGE_PATH,
+            if lost_merge {
+                Reply::Disconnect
+            } else {
+                Reply::Json(200, json!({"merged":true}))
+            },
+        ));
+        if !lost_merge {
+            steps.extend(confirmed(closed.clone(), "main"));
+            steps.push(Step::new(
+                "GET",
+                SOURCE_GET,
+                Reply::Json(200, reference("feature", &e.head_sha)),
+            ));
+            steps.push(Step::new(
+                "DELETE",
+                SOURCE_DELETE,
+                Reply::Json(403, json!({})),
+            ));
+            steps.extend(confirmed(closed.clone(), "main"));
+            steps.push(Step::new(
+                "GET",
+                SOURCE_GET,
+                Reply::Json(200, reference("feature", &e.head_sha)),
+            ));
+        }
+        steps.extend(preflight(closed.clone(), "main"));
+        steps.extend(confirmed(closed, "main"));
+        steps.push(Step::new(
+            "GET",
+            SOURCE_GET,
+            Reply::Json(200, reference("feature", &e.head_sha)),
+        ));
+        steps.push(Step::new("DELETE", SOURCE_DELETE, Reply::Raw(204, vec![])));
+        let script = Script::start(steps).await;
+        let (dir, f) = factory(&script.base);
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        assert!(merge_attempt(&api, &f, &e, dir.path(), "attempt-1")
+            .await
+            .is_err());
+        merge_attempt(&api, &f, &e, dir.path(), "attempt-2")
+            .await
+            .unwrap();
+        script.assert_done();
+        assert_eq!(
+            script
+                .writes()
+                .iter()
+                .filter(|(method, _)| method == "PUT")
+                .count(),
+            1
+        );
+        assert_eq!(
+            script
+                .writes()
+                .iter()
+                .filter(|(method, _)| method == "DELETE")
+                .count(),
+            if lost_merge { 1 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_retry_recovers_lost_delete_with_uncertain_reconciliation_without_second_delete() {
+    let e = event("pr_approved");
+    let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+    let mut steps = preflight(closed.clone(), "main");
+    steps.extend(confirmed(closed.clone(), "main"));
+    steps.push(Step::new(
+        "GET",
+        SOURCE_GET,
+        Reply::Json(200, reference("feature", &e.head_sha)),
+    ));
+    steps.push(Step::new("DELETE", SOURCE_DELETE, Reply::Disconnect));
+    // DELETE took effect remotely; first reconciliation cannot read current PR.
+    steps.push(Step::new("GET", PR_PATH, Reply::Json(503, json!({}))));
+    steps.extend(preflight(closed.clone(), "main"));
+    steps.extend(confirmed(closed, "main"));
+    steps.push(Step::new("GET", SOURCE_GET, Reply::Json(404, json!({}))));
+    steps.extend(absence_witness());
+    let script = Script::start(steps).await;
+    let (dir, f) = factory(&script.base);
+    let api = Github::with_base("alice-token", &script.base).unwrap();
+    assert!(merge_attempt(&api, &f, &e, dir.path(), "attempt-1")
+        .await
+        .is_err());
+    merge_attempt(&api, &f, &e, dir.path(), "attempt-2")
+        .await
+        .unwrap();
+    script.assert_done();
+    assert_eq!(
+        script.writes(),
+        vec![("DELETE".into(), SOURCE_DELETE.into())]
+    );
+}
+
+#[tokio::test]
+async fn merge_cancel_before_put_or_before_delete_prevents_new_writes_and_retry_recovers() {
+    for after_merge in [false, true] {
+        let e = event("pr_approved");
+        let open = pr(&e, "feature", &e.head_sha);
+        let closed = merged_pr(open.clone());
+        let holder = Arc::new(Mutex::new(None::<(Arc<Factory>, String)>));
+        let hook_state = holder.clone();
+        let mut steps = preflight(open.clone(), "main");
+        if after_merge {
+            steps.push(Step::new(
+                "PUT",
+                MERGE_PATH,
+                Reply::Json(200, json!({"merged":true})),
+            ));
+            steps.extend(confirmed(closed.clone(), "main"));
+            steps.push(Step::new(
+                "GET",
+                SOURCE_GET,
+                Reply::Json(200, reference("feature", &e.head_sha)),
+            ));
+        }
+        // Cancel after last read, immediately before next mutation check.
+        let last = steps.pop().unwrap().then(move || {
+            let guard = hook_state.lock().unwrap();
+            let (f, id) = guard.as_ref().unwrap();
+            f.cancel(id).unwrap();
+        });
+        steps.push(last);
+        if after_merge {
+            steps.extend(preflight(closed.clone(), "main"));
+            steps.extend(confirmed(closed, "main"));
+        } else {
+            steps.extend(preflight(open.clone(), "main"));
+            steps.push(Step::new(
+                "PUT",
+                MERGE_PATH,
+                Reply::Json(200, json!({"merged":true})),
+            ));
+            steps.extend(confirmed(merged_pr(open), "main"));
+        }
+        steps.push(Step::new(
+            "GET",
+            SOURCE_GET,
+            Reply::Json(200, reference("feature", &e.head_sha)),
+        ));
+        steps.push(Step::new("DELETE", SOURCE_DELETE, Reply::Raw(204, vec![])));
+        let script = Script::start(steps).await;
+        let (dir, f) = factory(&script.base);
+        let id = f.enqueue(e.clone()).unwrap().unwrap();
+        *holder.lock().unwrap() = Some((f.clone(), id.clone()));
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        assert!(merge_attempt(&api, &f, &e, dir.path(), &id).await.is_err());
+        assert_eq!(f.run_detail(&id).unwrap().run.status, "cancelled");
+        assert_eq!(script.writes().len(), usize::from(after_merge));
+        let retry = f.retry(&id).unwrap();
+        merge_attempt(&api, &f, &e, dir.path(), &retry)
+            .await
+            .unwrap();
+        script.assert_done();
+        assert_eq!(
+            script
+                .writes()
+                .iter()
+                .filter(|(method, _)| method == "PUT")
+                .count(),
+            1
+        );
+        assert_eq!(
+            script
+                .writes()
+                .iter()
+                .filter(|(method, _)| method == "DELETE")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_cancel_on_put_response_prevents_source_delete() {
+    let e = event("pr_approved");
+    let holder = Arc::new(Mutex::new(None::<(Arc<Factory>, String)>));
+    let hook = holder.clone();
+    let mut steps = preflight(pr(&e, "feature", &e.head_sha), "main");
+    steps.push(
+        Step::new("PUT", MERGE_PATH, Reply::Json(200, json!({"merged":true}))).then(move || {
+            let guard = hook.lock().unwrap();
+            let (f, id) = guard.as_ref().unwrap();
+            f.cancel(id).unwrap();
+        }),
+    );
+    let script = Script::start(steps).await;
+    let (dir, f) = factory(&script.base);
+    let id = f.enqueue(e.clone()).unwrap().unwrap();
+    *holder.lock().unwrap() = Some((f.clone(), id.clone()));
+    let api = Github::with_base("alice-token", &script.base).unwrap();
+    assert!(merge_attempt(&api, &f, &e, dir.path(), &id).await.is_err());
+    script.assert_done();
+    assert_eq!(script.writes(), vec![("PUT".into(), MERGE_PATH.into())]);
+}
+
+#[tokio::test]
+async fn merge_cleanup_failure_prevents_later_comment() {
+    let e = event("pr_approved");
+    let closed = merged_pr(pr(&e, "feature", &e.head_sha));
+    let mut steps = preflight(closed.clone(), "main");
+    steps.extend(confirmed(closed, "main"));
+    steps.push(Step::new(
+        "GET",
+        SOURCE_GET,
+        Reply::Json(200, reference("feature", &"b".repeat(40))),
+    ));
+    let script = Script::start(steps).await;
+    let (dir, f) = factory(&script.base);
+    let api = Github::with_base("alice-token", &script.base).unwrap();
+    let error = api
+        .publish_actions(
+            &f,
+            &e,
+            "attempt",
+            "merge",
+            dir.path(),
+            &result(json!({"merge":{"method":"squash"},"comment":"Done"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("cleanup pending"));
+    script.assert_done();
+    assert!(script.writes().is_empty());
+}
+
+#[tokio::test]
+async fn merge_invalid_results_or_combined_actions_never_reach_http() {
+    for (trigger, status, data) in [
+        (
+            "pr_approved",
+            "failed",
+            json!({"merge":{"method":"squash"}}),
+        ),
+        (
+            "pr_approved",
+            "blocked",
+            json!({"merge":{"method":"squash"}}),
+        ),
+        (
+            "new_issue",
+            "succeeded",
+            json!({"merge":{"method":"squash"}}),
+        ),
+        (
+            "pr_review",
+            "succeeded",
+            json!({"merge":{"method":"squash"}}),
+        ),
+        (
+            "pr_approved",
+            "succeeded",
+            json!({"merge":{"method":"merge"}}),
+        ),
+        (
+            "pr_approved",
+            "succeeded",
+            json!({"merge":{"method":"squash"},"comment":""}),
+        ),
+        (
+            "pr_approved",
+            "succeeded",
+            json!({"merge":{"method":"squash"},"review":{"event":"APPROVE","body":"ok"}}),
+        ),
+    ] {
+        let script = Script::start(vec![]).await;
+        let (dir, f) = factory(&script.base);
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        let mut value = result(data);
+        value["status"] = json!(status);
+        assert!(api
+            .publish_actions(&f, &event(trigger), "attempt", "merge", dir.path(), &value)
+            .await
+            .is_err());
+        script.assert_done();
+        assert!(script.writes().is_empty());
+    }
 }

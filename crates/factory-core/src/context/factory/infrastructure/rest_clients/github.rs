@@ -4,6 +4,8 @@ use reqwest::{Client, Method};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+mod merge_cleanup;
+
 pub struct Github {
     client: Client,
     base: String,
@@ -23,7 +25,12 @@ impl Github {
             token: token.into(),
         })
     }
-    pub async fn request(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<reqwest::Response> {
         ensure!(
             path.starts_with('/') && !path.starts_with("//"),
             "Invalid API path"
@@ -37,7 +44,10 @@ impl Github {
         if let Some(b) = body {
             req = req.json(b)
         }
-        let r = req.send().await?;
+        Ok(req.send().await?)
+    }
+    pub async fn request(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+        let r = self.send(method, path, body).await?;
         let status = r.status();
         if !status.is_success() {
             bail!(
@@ -45,6 +55,9 @@ impl Github {
                 status.as_u16(),
                 path.split('?').next().unwrap_or(path)
             );
+        }
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(Value::Null);
         }
         Ok(r.json().await?)
     }
@@ -469,23 +482,7 @@ impl Github {
             factory.store.track_pr(&event.repository, n, run)?;
         }
         if action("merge").is_some() {
-            let current = self.pr(&event.repository, event.number).await?;
-            ensure!(
-                current["head"]["sha"] == event.head_sha,
-                "PR changed since approval"
-            );
-            if current["merged"] != true {
-                ensure!(current["state"] == "open", "PR is not open");
-                check_active()?;
-                let merged = self
-                    .request(
-                        Method::PUT,
-                        &format!("/repos/{}/pulls/{}/merge", event.repository, event.number),
-                        Some(&json!({"merge_method":"squash","sha":event.head_sha})),
-                    )
-                    .await?;
-                ensure!(merged["merged"] == true, "GitHub did not merge PR");
-            }
+            self.merge_and_cleanup(event, &check_active).await?;
         }
         for kind in ["review", "comment"] {
             let Some(value) = action(kind) else { continue };
