@@ -371,6 +371,70 @@ impl Store {
         )?;
         Ok(())
     }
+    /// This is the only transition from terminal nodes back to pending. Archive
+    /// evidence and feedback in the same transaction, without reviving cancelled runs.
+    pub(crate) fn requeue_review(
+        &self,
+        run: &str,
+        rework: &crate::context::factory::application::services::reviews::ReviewRework,
+    ) -> Result<bool> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let raw: String = tx.query_row("SELECT json FROM runs WHERE id=?1", [run], |r| r.get(0))?;
+        let state: Run = serde_json::from_str(&raw)?;
+        if state.status != "running" {
+            return Ok(false);
+        }
+        let previous: Vec<NodeRun> = {
+            let mut query = tx.prepare("SELECT json FROM nodes WHERE run_id=?1 ORDER BY rowid")?;
+            let rows = query.query_map([run], |r| r.get::<_, String>(0))?;
+            rows.map(|row| Ok(serde_json::from_str::<NodeRun>(&row?)?))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|n| rework.affected.contains(&n.id))
+                .collect()
+        };
+        ensure!(
+            previous.iter().all(|n| n.status != "running"),
+            "Cannot requeue active review work"
+        );
+        tx.execute(
+            "INSERT INTO observations VALUES(?1,?2)",
+            params![
+                format!("review-history:{run}:{}", uuid::Uuid::new_v4()),
+                serde_json::to_string(
+                    &serde_json::json!({"nodes":previous,"feedback":rework.feedback})
+                )?
+            ],
+        )?;
+        for mut node in previous {
+            if rework.authors.contains(&node.id) {
+                let feedback =
+                    serde_json::json!({"previous_result":node.result,"reviews":rework.feedback});
+                tx.execute("INSERT INTO observations VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json", params![
+                    format!("review-feedback:{run}:{}", node.id), serde_json::to_string(&feedback)?
+                ])?;
+            } else {
+                // A downstream author may have feedback from an obsolete round.
+                tx.execute(
+                    "DELETE FROM observations WHERE key=?1",
+                    [format!("review-feedback:{run}:{}", node.id)],
+                )?;
+            }
+            node.status = "pending".into();
+            node.started_at = None;
+            node.finished_at = None;
+            node.error = None;
+            node.result = None;
+            node.session_id = None;
+            tx.execute(
+                "UPDATE nodes SET json=?1 WHERE run_id=?2 AND node_id=?3",
+                params![serde_json::to_string(&node)?, run, node.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
     pub fn observation(&self, key: &str) -> Result<Option<serde_json::Value>> {
         let v: Option<String> = self
             .db
@@ -428,5 +492,54 @@ mod lifecycle_tests {
         let updated = store.nodes(&id).unwrap().remove(0);
         assert_eq!(updated.status, "cancelled");
         assert_eq!(updated.result, Some(partial));
+    }
+
+    #[test]
+    fn review_requeue_cannot_revive_cancelled_run_or_reset_active_work() {
+        use crate::context::factory::application::services::reviews::ReviewRework;
+        use std::collections::HashSet;
+        for cancelled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).unwrap();
+            let mut flow = Settings::default().flows.remove(0);
+            flow.nodes.truncate(1);
+            let id = store
+                .insert(
+                    &TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "alice", ""),
+                    &flow,
+                    1,
+                    true,
+                )
+                .unwrap()
+                .unwrap();
+            store.claim_queued(&id).unwrap();
+            let mut node = store.nodes(&id).unwrap().remove(0);
+            node.status = "running".into();
+            store.save_node(&id, &node).unwrap();
+            if cancelled {
+                let mut run = store.detail(&id).unwrap().run;
+                run.status = "cancelled".into();
+                store.save_run(&run).unwrap();
+            }
+            let rework = ReviewRework {
+                authors: HashSet::from([node.id.clone()]),
+                affected: HashSet::from([node.id.clone()]),
+                feedback: vec![],
+            };
+            let result = store.requeue_review(&id, &rework);
+            if cancelled {
+                assert!(!result.unwrap());
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(store.nodes(&id).unwrap()[0].status, "running");
+            let count: i64 = store
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "rejected reset must leave no history or feedback");
+        }
     }
 }

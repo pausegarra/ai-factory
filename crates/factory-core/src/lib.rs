@@ -14,6 +14,7 @@ pub mod context {
             }
             pub mod services {
                 pub mod factory;
+                pub(crate) mod reviews;
             }
         }
         pub mod infrastructure {
