@@ -1132,5 +1132,8 @@ fn workspace_recovery_removes_links_without_touching_external_content() {
     );
 }
 #[cfg(unix)]
+#[path = "core/result_repair.rs"]
+mod result_repair;
+#[cfg(unix)]
 #[path = "core/review_rework.rs"]
 mod review_rework;
