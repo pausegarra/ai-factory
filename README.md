@@ -61,9 +61,11 @@ artifacts, private memory and remaining managed workspace. Cancel queued or runn
 runs first, then wait for their processes and cleanup to finish. Confirm deletion
 from run details; there is no undo.
 
-GitHub resources, other attempts, shared import archives and minimal automation
-safety records are kept. Deleting history does not replay consumed events or remove
-verified PR provenance. Pending deletions show their run ID and a **Retry deletion**
+GitHub resources, other attempts, shared import archives, action receipts and
+verified PR provenance are kept. Deleting the last attempt for an event clears its
+deduplication mark, so eligible issues can run again on the next sync. While any
+attempt remains, including pending deletions, the mark prevents duplicate runs.
+Pending deletions show their run ID and a **Retry deletion**
 action; restarting Factory also resumes cleanup, never the workflow. Local deletion
 does not require a GitHub token or network access.
 
