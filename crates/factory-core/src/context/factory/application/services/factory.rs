@@ -1,3 +1,5 @@
+use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
+use crate::context::factory::infrastructure::filesystem::run_cleanup::LocalRunCleanup;
 use crate::context::factory::infrastructure::{
     processes::agents, repositories::store::Store, rest_clients::github::Github,
 };
@@ -26,6 +28,9 @@ pub struct Factory {
     pub(crate) active: Mutex<HashMap<String, CancellationToken>>,
     pub(crate) service: Mutex<ServiceStatus>,
     poll_lock: tokio::sync::Mutex<()>,
+    pub(crate) lifecycle_gate: Mutex<()>,
+    pub(crate) deletion_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
+    pub(crate) cleanup: Arc<dyn RunCleanup>,
 }
 impl Drop for Factory {
     fn drop(&mut self) {
@@ -65,8 +70,20 @@ impl Factory {
         fs2::FileExt::try_lock_exclusive(&process_lock)
             .context("AI Factory is already using this application data directory")?;
         let store = Store::open_with_credentials(&root, credentials)?;
+        let cleanup = Arc::new(LocalRunCleanup::open(&root)?);
+        for record in store.pending_deletions()? {
+            crate::context::factory::application::use_cases::delete_run::resume(
+                &store,
+                cleanup.as_ref(),
+                &record.public.run_id,
+            )?;
+        }
         let cleanup_errors =
-            crate::context::factory::infrastructure::processes::workspaces::recover(&root, &store)?;
+            crate::context::factory::infrastructure::processes::workspaces::recover(
+                &root,
+                &store,
+                cleanup.as_ref(),
+            )?;
         let (events, _) = broadcast::channel(4096);
         let status = ServiceStatus {
             running: false,
@@ -87,6 +104,9 @@ impl Factory {
             active: Mutex::new(HashMap::new()),
             service: Mutex::new(status),
             poll_lock: tokio::sync::Mutex::new(()),
+            lifecycle_gate: Mutex::new(()),
+            deletion_locks: Mutex::new(HashMap::new()),
+            cleanup,
         }))
     }
     pub fn settings(&self) -> Result<Settings> {
@@ -129,17 +149,25 @@ impl Factory {
         config_path: Option<PathBuf>,
         database_path: Option<PathBuf>,
     ) -> Result<ImportReport> {
-        let active = self.active.lock().unwrap();
+        let _gate = self.lifecycle_gate.lock().unwrap();
         ensure!(
-            active.is_empty(),
+            self.active.lock().unwrap().is_empty(),
             "Stop active runs before importing history"
         );
-        let batch = crate::context::factory::infrastructure::migration::legacy::read_legacy(
-            config_path.as_deref(),
-            database_path.as_deref(),
-            &self.root,
-            &self.store.settings()?,
-        )?;
+        let excluded = self
+            .store
+            .pending_deletions()?
+            .into_iter()
+            .map(|r| r.public.run_id)
+            .collect();
+        let batch =
+            crate::context::factory::infrastructure::migration::legacy::read_legacy_excluding(
+                config_path.as_deref(),
+                database_path.as_deref(),
+                &self.root,
+                &self.store.settings()?,
+                &excluded,
+            )?;
         let count = self.store.import_legacy(&batch)?;
         self.emit("history_imported", None, None);
         self.wake.notify_one();
@@ -162,7 +190,7 @@ impl Factory {
         });
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        let runs = self.store.runs()?;
+        let (runs, deletions) = self.store.snapshot_history()?;
         let mut metrics = Metrics {
             total: runs.len() as u64,
             ..Metrics::default()
@@ -179,6 +207,7 @@ impl Factory {
         }
         Ok(Snapshot {
             runs,
+            deletions,
             metrics,
             service: self.service.lock().unwrap().clone(),
         })
@@ -264,6 +293,10 @@ impl Factory {
         Ok(ids)
     }
     pub fn set_run_status(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
+        self.set_run_status_inner(id, status, error)
+    }
+    fn set_run_status_inner(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
         let mut r = self.store.detail(id)?.run;
         r.status = status.into();
         r.error = error;
@@ -295,6 +328,7 @@ impl Factory {
         Ok(())
     }
     pub fn cancel(&self, id: &str) -> Result<()> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
         let d = self.store.detail(id)?;
         ensure!(
             ["queued", "running"].contains(&d.run.status.as_str()),
@@ -303,7 +337,7 @@ impl Factory {
         if let Some(c) = self.active.lock().unwrap().get(id) {
             c.cancel();
         }
-        self.set_run_status(id, "cancelled", None)?;
+        self.set_run_status_inner(id, "cancelled", None)?;
         for mut n in d.nodes {
             if ["pending", "running"].contains(&n.status.as_str()) {
                 n.status = "cancelled".into();
@@ -315,6 +349,9 @@ impl Factory {
         Ok(())
     }
     pub fn retry(&self, id: &str) -> Result<String> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
+        // Pending deletions are hidden by detail; keep that check under the gate.
+        self.store.detail(id)?;
         let id = self.store.admit_retry(id)?;
         self.emit("run_created", Some(&id), None);
         self.wake.notify_one();
@@ -363,12 +400,36 @@ impl Factory {
         } else {
             (String::new(), 0, 0, 0)
         };
+        self.store.detail(run)?;
         Ok(LogChunk {
             text,
             offset,
             next_offset: next,
             eof: next == total && !["running", "pending"].contains(&n.status.as_str()),
         })
+    }
+    pub(crate) fn register_queued_worker(
+        &self,
+        id: &str,
+        capacity: usize,
+    ) -> Result<Option<CancellationToken>> {
+        let Ok(_gate) = self.lifecycle_gate.try_lock() else {
+            return Ok(None);
+        };
+        if !self
+            .store
+            .detail(id)
+            .is_ok_and(|d| d.run.status == "queued")
+        {
+            return Ok(None);
+        }
+        let mut active = self.active.lock().unwrap();
+        if active.len() >= capacity || active.contains_key(id) {
+            return Ok(None);
+        }
+        let cancel = CancellationToken::new();
+        active.insert(id.into(), cancel.clone());
+        Ok(Some(cancel))
     }
     pub fn start(self: &Arc<Self>) {
         if self.started.swap(true, Ordering::SeqCst) {
@@ -398,16 +459,9 @@ impl Factory {
                 }
                 if let Ok(runs) = f.store.runs() {
                     for r in runs.into_iter().rev().filter(|r| r.status == "queued") {
-                        let mut active = f.active.lock().unwrap();
-                        if active.len() >= s.max_concurrent {
-                            break;
-                        }
-                        if active.contains_key(&r.id) {
+                        let Ok(Some(c)) = f.register_queued_worker(&r.id, s.max_concurrent) else {
                             continue;
-                        }
-                        let c = CancellationToken::new();
-                        active.insert(r.id.clone(), c.clone());
-                        drop(active);
+                        };
                         let worker = f.clone();
                         tokio::spawn(async move {
                             let result = worker.execute(&r.id, c).await;
@@ -437,7 +491,10 @@ impl Factory {
                                     Some("Execution stopped before completion".into()),
                                 );
                             }
-                            worker.active.lock().unwrap().remove(&r.id);
+                            {
+                                let _gate = worker.lifecycle_gate.lock().unwrap();
+                                worker.active.lock().unwrap().remove(&r.id);
+                            }
                             worker.wake.notify_one();
                         });
                     }

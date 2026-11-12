@@ -49,8 +49,17 @@ pub struct LegacyImport {
     pub approval_comments: Vec<LegacyApprovalComment>,
     pub reviewer_requests: Vec<LegacyReviewerRequest>,
     pub registered_prs: Vec<LegacyRegisteredPr>,
+    pub pr_conflicts: Vec<LegacyPrConflict>,
     pub warnings: Vec<String>,
     pub archive_path: Option<String>,
+}
+
+/// Minimal safety evidence, independent of imported run content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyPrConflict {
+    pub repository: String,
+    pub number: u64,
+    pub source_run_id: String,
 }
 
 pub fn read_legacy(
@@ -58,6 +67,22 @@ pub fn read_legacy(
     database_path: Option<&Path>,
     app_data_dir: &Path,
     current: &Settings,
+) -> Result<LegacyImport> {
+    read_legacy_excluding(
+        config_path,
+        database_path,
+        app_data_dir,
+        current,
+        &HashSet::new(),
+    )
+}
+
+pub(crate) fn read_legacy_excluding(
+    config_path: Option<&Path>,
+    database_path: Option<&Path>,
+    app_data_dir: &Path,
+    current: &Settings,
+    excluded: &HashSet<String>,
 ) -> Result<LegacyImport> {
     ensure!(
         config_path.is_some() || database_path.is_some(),
@@ -73,6 +98,7 @@ pub fn read_legacy(
             app_data_dir,
             batch.settings.as_ref().unwrap_or(current).clone(),
             &mut batch,
+            excluded,
         )?;
     }
     let mut sources: HashMap<(String, u64), HashSet<String>> = HashMap::new();
@@ -86,6 +112,16 @@ pub fn read_legacy(
         .into_iter()
         .filter(|(_, sources)| sources.len() > 1)
         .map(|(identity, _)| identity)
+        .collect();
+    batch.pr_conflicts = batch
+        .registered_prs
+        .iter()
+        .filter(|pr| ambiguous.contains(&(pr.repository.clone(), pr.number)))
+        .map(|pr| LegacyPrConflict {
+            repository: pr.repository.clone(),
+            number: pr.number,
+            source_run_id: pr.source_run_id.clone(),
+        })
         .collect();
     batch
         .registered_prs
@@ -527,6 +563,7 @@ fn read_database(
     app_data_dir: &Path,
     settings: Settings,
     batch: &mut LegacyImport,
+    excluded: &HashSet<String>,
 ) -> Result<()> {
     let path = path.canonicalize().context("Legacy database not found")?;
     let conn = Connection::open_with_flags(
@@ -559,6 +596,14 @@ fn read_database(
         batch.consumed_events.push(key.into());
         batch.consumed_events.push(event.event_id.clone());
         let id = run_id(key);
+        // Safety provenance is shared operational metadata. Collect it even when
+        // deletion excludes this run's history and every file-copy operation.
+        collect_pr_provenance(task, workflow, &event, &id, batch);
+        // Check before even the first session/artifact copy. SQL filtering alone
+        // cannot protect files while a durable deletion is in progress.
+        if excluded.contains(&id) {
+            continue;
+        }
         let related_nodes: Vec<_> = nodes
             .iter()
             .filter(|n| text(n, "workflow_key") == key)
@@ -730,42 +775,6 @@ fn read_database(
             log_text: log,
             raw,
         });
-        if event.trigger_id == "new_issue" {
-            if let Some(workflow) = workflow {
-                if let Some(prs) = document(workflow, "pull_requests").as_array() {
-                    for pr in prs {
-                        let repo = text(pr, "repository").to_lowercase();
-                        let url = text(pr, "url");
-                        let number = pr
-                            .get("number")
-                            .and_then(Value::as_u64)
-                            .or_else(|| url.rsplit('/').next().and_then(|s| s.parse().ok()))
-                            .unwrap_or(0);
-                        if number > 0
-                            && repo == event.repository
-                            && url.eq_ignore_ascii_case(&format!(
-                                "https://github.com/{repo}/pull/{number}"
-                            ))
-                            && optional(pr, "source_key").is_none_or(|s| s == key)
-                        {
-                            batch.registered_prs.push(LegacyRegisteredPr {
-                                repository: repo,
-                                number,
-                                url: url.into(),
-                                head_sha: text(pr, "head_sha").into(),
-                                source_key: key.into(),
-                                source_run_id: id.clone(),
-                                source_issue: event.clone(),
-                            });
-                        } else {
-                            batch
-                                .warnings
-                                .push(format!("Skipped invalid legacy PR provenance for {key}"));
-                        }
-                    }
-                }
-            }
-        }
     }
     let trigger_events = rows(&conn, "trigger_events")?;
     let approval_comments = rows(&conn, "pr_approval_comments")?;
@@ -817,6 +826,51 @@ fn read_database(
     batch.archive_path = Some(target.to_string_lossy().to_string());
     conn.execute_batch("ROLLBACK")?;
     Ok(())
+}
+
+fn collect_pr_provenance(
+    task: &Value,
+    workflow: Option<&Value>,
+    event: &TriggerEvent,
+    id: &str,
+    batch: &mut LegacyImport,
+) {
+    if event.trigger_id != "new_issue" {
+        return;
+    }
+    let key = text(task, "key");
+    if let Some(workflow) = workflow {
+        if let Some(prs) = document(workflow, "pull_requests").as_array() {
+            for pr in prs {
+                let repo = text(pr, "repository").to_lowercase();
+                let url = text(pr, "url");
+                let number = pr
+                    .get("number")
+                    .and_then(Value::as_u64)
+                    .or_else(|| url.rsplit('/').next().and_then(|s| s.parse().ok()))
+                    .unwrap_or(0);
+                if number > 0
+                    && repo == event.repository
+                    && url.eq_ignore_ascii_case(&format!("https://github.com/{repo}/pull/{number}"))
+                    && optional(pr, "source_key").is_none_or(|s| s == key)
+                {
+                    batch.registered_prs.push(LegacyRegisteredPr {
+                        repository: repo,
+                        number,
+                        url: url.into(),
+                        head_sha: text(pr, "head_sha").into(),
+                        source_key: key.into(),
+                        source_run_id: id.into(),
+                        source_issue: event.clone(),
+                    });
+                } else {
+                    batch
+                        .warnings
+                        .push(format!("Skipped invalid legacy PR provenance for {key}"));
+                }
+            }
+        }
+    }
 }
 
 fn copy_file(

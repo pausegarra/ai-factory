@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowClockwise,
   ArrowUpRight,
@@ -32,6 +32,18 @@ export function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const selected = useRef(selectedRun);
+  selected.current = selectedRun;
+  const initiated = useRef(new Set<string>());
+  const [notice, setNotice] = useState("");
+  function unavailable(id: string, deleted = false) {
+    if (selected.current === id) {
+      selected.current = null;
+      setSelectedRun(null); setPage("runs");
+      setNotice(deleted || initiated.current.has(id) ? "Run deleted." : "This run is no longer available.");
+    }
+    initiated.current.delete(id);
+  }
   const [hasUnsaved, setHasUnsaved] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [pendingPage, setPendingPage] = useState<string | null>(null);
@@ -42,19 +54,24 @@ export function App() {
       {
         listen: (cb) =>
           factoryApi.subscribe((e) => {
+            if (e.kind === "run_deleted" && e.run_id) unavailable(e.run_id);
             if (e.kind !== "log") cb();
           }),
         load: async () => {
+          const selection = selected.current;
           const [settings, snapshot] = await Promise.all([
             factoryApi.settings(),
             factoryApi.snapshot(),
           ]);
-          return { settings, snapshot };
+          return { settings, snapshot, selection };
         },
       },
       (data) => {
         setSettings(data.settings);
         setSnapshot(data.snapshot);
+        if (data.selection && selected.current === data.selection &&
+          !data.snapshot.runs.some(r => r.id === data.selection) &&
+          !data.snapshot.deletions.some(d => d.run_id === data.selection)) unavailable(data.selection);
         setError("");
       },
       (e) => setError(String(e)),
@@ -205,6 +222,7 @@ export function App() {
               </button>
             </Notice>
           )}
+          {notice && <p role="status">{notice}</p>}
           {snapshot?.service.last_error && (
             <Notice>GitHub sync failed: {snapshot.service.last_error}</Notice>
           )}
@@ -225,6 +243,10 @@ export function App() {
               id={selectedRun}
               onBack={() => setSelectedRun(null)}
               onSelect={setSelectedRun}
+              onDeletionStarted={id => { initiated.current.add(id); }}
+              onDeletionSettled={id => { initiated.current.delete(id); setReload(x => x + 1); }}
+              onDeleted={id => { unavailable(id, true); setReload(x => x + 1); }}
+              onUnavailable={id => { unavailable(id); setReload(x => x + 1); }}
             />
           ) : page === "overview" ? (
             <OverviewPage

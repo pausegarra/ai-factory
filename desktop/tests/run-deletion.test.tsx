@@ -1,0 +1,40 @@
+import { afterEach, it, expect, vi } from "vitest";
+import { render, screen, within, cleanup, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { DeleteRunDialog } from "../src/context/factory/infrastructure/presentations/delete-run-dialog";
+afterEach(cleanup);
+const run = { id: "run-1", title: "[AI] Remove history", repository: "owner/repo", number: 4, attempt: 2 };
+it("cancels confirmation without invoking delete and focuses Cancel", async () => {
+  const user = userEvent.setup();
+  const cancel = vi.fn();
+  const confirm = vi.fn();
+  render(<DeleteRunDialog run={run} busy={false} onCancel={cancel} onConfirm={confirm} />);
+  const dialog = screen.getByRole("alertdialog", { name: "Delete run?" });
+  expect(dialog.textContent).toContain(run.id);
+  expect(dialog.textContent).toContain("This cannot be undone.");
+  expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
+  await user.keyboard("{Escape}");
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(confirm).not.toHaveBeenCalled();
+});
+it("traps focus in both directions and restores opener on cancellation", async () => {
+  const user = userEvent.setup();
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
+  const view = render(<DeleteRunDialog run={run} busy={false} onCancel={() => {}} onConfirm={() => {}} />);
+  await user.tab({ shift: true });
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Delete run" }));
+  await user.tab();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+  view.unmount();
+  expect(document.activeElement).toBe(opener);
+  opener.remove();
+});
+it("blocks cancellation and duplicate submission while busy", () => {
+  const cancel = vi.fn(); const confirm = vi.fn();
+  render(<DeleteRunDialog run={run} busy onCancel={cancel} onConfirm={confirm} />);
+  fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
+  fireEvent.click(screen.getByRole("button", { name: "Deleting..." }));
+  expect(cancel).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+});

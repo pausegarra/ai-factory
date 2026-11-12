@@ -19,16 +19,16 @@ impl Store {
         Self::open_with_credentials(root, Arc::new(crate::context::factory::infrastructure::security::native_credentials::NativeCredentials))
     }
     pub fn open_with_credentials(root: &Path, credentials: Arc<dyn Credentials>) -> Result<Self> {
-        let db = Connection::open(root.join("factory.sqlite3"))?;
+        let mut db = Connection::open(root.join("factory.sqlite3"))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;
    CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,event_id TEXT NOT NULL,json TEXT NOT NULL,event TEXT NOT NULL,flow TEXT NOT NULL,created_at TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS dedup (event_id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS nodes (run_id TEXT NOT NULL,node_id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(run_id,node_id));
    CREATE TABLE IF NOT EXISTS observations (key TEXT PRIMARY KEY,json TEXT NOT NULL);
-   CREATE TABLE IF NOT EXISTS tracked_prs (repository TEXT NOT NULL,number INTEGER NOT NULL,source_run TEXT NOT NULL,PRIMARY KEY(repository,number,source_run));
    CREATE TABLE IF NOT EXISTS credential_refs (profile_id TEXT PRIMARY KEY,account TEXT NOT NULL,reference TEXT NOT NULL UNIQUE);
    CREATE TABLE IF NOT EXISTS credential_gc (reference TEXT PRIMARY KEY);")?;
+        super::run_deletions::migrate(&mut db)?;
         let s = Self {
             db: Mutex::new(db),
             credentials,
@@ -191,6 +191,7 @@ impl Store {
         for row in &batch.runs {
             let d = &row.detail;
             let r = &d.run;
+            if tx.query_row("SELECT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=?1)",[&r.id],|r|r.get::<_,bool>(0))? {continue;}
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO runs VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
@@ -257,47 +258,38 @@ impl Store {
             tx.execute("INSERT INTO observations VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json",params![key,serde_json::to_string(&value)?])?;
         }
         for pr in &batch.registered_prs {
-            tx.execute(
-                "INSERT OR IGNORE INTO tracked_prs VALUES(?1,?2,?3)",
-                params![pr.repository, i64::try_from(pr.number)?, pr.source_run_id],
-            )?;
+            super::pr_origins::project(tx,&pr.repository,pr.number,&pr.source_run_id,Some(&pr.source_issue))?;
+        }
+        for conflict in &batch.pr_conflicts {
+            super::pr_origins::project(tx,&conflict.repository,conflict.number,&conflict.source_run_id,None)?;
         }
         Ok(imported)
         })
     }
     pub fn runs(&self) -> Result<Vec<Run>> {
         let db = self.db.lock().unwrap();
-        let mut q = db.prepare("SELECT json FROM runs ORDER BY created_at DESC,id DESC")?;
+        let mut q = db.prepare("SELECT json FROM runs WHERE NOT EXISTS(SELECT 1 FROM run_deletions d WHERE d.run_id=runs.id) ORDER BY created_at DESC,id DESC")?;
         let rows = q.query_map([], |r| r.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
     pub fn nodes(&self, id: &str) -> Result<Vec<NodeRun>> {
         let db = self.db.lock().unwrap();
-        let mut q = db.prepare("SELECT json FROM nodes WHERE run_id=?1 ORDER BY rowid")?;
+        let mut q = db.prepare("SELECT json FROM nodes WHERE run_id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions d WHERE d.run_id=nodes.run_id) ORDER BY rowid")?;
         let rows = q.query_map([id], |r| r.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
     pub fn detail(&self, id: &str) -> Result<RunDetail> {
-        let db = self.db.lock().unwrap();
-        let row: (String, String, String) = db
-            .query_row("SELECT json,event,flow FROM runs WHERE id=?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
-            .optional()?
-            .context("Run not found")?;
-        drop(db);
-        Ok(RunDetail {
-            run: serde_json::from_str(&row.0)?,
-            event: serde_json::from_str(&row.1)?,
-            flow: serde_json::from_str(&row.2)?,
-            nodes: self.nodes(id)?,
-        })
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let detail = super::run_deletions::detail_db(&tx, id)?;
+        tx.commit()?;
+        Ok(detail)
     }
     pub fn claim_queued(&self, id: &str) -> Result<bool> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let raw: Option<String> = tx
-            .query_row("SELECT json FROM runs WHERE id=?1", [id], |r| r.get(0))
+            .query_row("SELECT json FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)", [id], |r| r.get(0))
             .optional()?;
         let Some(raw) = raw else { return Ok(false) };
         let mut r: Run = serde_json::from_str(&raw)?;
@@ -314,9 +306,10 @@ impl Store {
         Ok(true)
     }
     pub fn save_run(&self, r: &Run) -> Result<()> {
-        let db = self.db.lock().unwrap();
+        let mut connection = self.db.lock().unwrap();
+        let db = connection.transaction()?;
         let raw: Option<String> = db
-            .query_row("SELECT json FROM runs WHERE id=?1", [&r.id], |r| r.get(0))
+            .query_row("SELECT json FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)", [&r.id], |r| r.get(0))
             .optional()?;
         let previous: Run = serde_json::from_str(&raw.context("Run not found")?)?;
         if !["queued", "running"].contains(&previous.status.as_str()) && r.status != previous.status
@@ -333,12 +326,13 @@ impl Store {
             )? == 1,
             "Run not found"
         );
+        db.commit()?;
         Ok(())
     }
     pub(crate) fn set_workspace(&self, id: &str, workspace: Option<&str>) -> Result<()> {
         ensure!(
             self.db.lock().unwrap().execute(
-                "UPDATE runs SET json=json_set(json,'$.workspace',?2) WHERE id=?1",
+                "UPDATE runs SET json=json_set(json,'$.workspace',?2) WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)",
                 params![id, workspace]
             )? == 1,
             "Run not found"
@@ -351,12 +345,21 @@ impl Store {
         node: &str,
         result: &serde_json::Value,
     ) -> Result<()> {
-        ensure!(self.db.lock().unwrap().execute("UPDATE nodes SET json=json_set(json,'$.result',json(?3)) WHERE run_id=?1 AND node_id=?2", params![run, node, serde_json::to_string(result)?])? == 1, "Node not found");
+        ensure!(self.db.lock().unwrap().execute("UPDATE nodes SET json=json_set(json,'$.result',json(?3)) WHERE run_id=?1 AND node_id=?2 AND EXISTS(SELECT 1 FROM runs WHERE id=nodes.run_id) AND NOT EXISTS(SELECT 1 FROM run_deletions d WHERE d.run_id=nodes.run_id)", params![run, node, serde_json::to_string(result)?])? == 1, "Node not found or deleting");
         Ok(())
     }
     pub fn save_node(&self, run: &str, n: &NodeRun) -> Result<()> {
         let mut n = n.clone();
-        let db = self.db.lock().unwrap();
+        let mut connection = self.db.lock().unwrap();
+        let db = connection.transaction()?;
+        ensure!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id))",
+                [run],
+                |r| r.get::<_, bool>(0)
+            )?,
+            "Run not found or deleting"
+        );
         let raw: Option<String> = db
             .query_row(
                 "SELECT json FROM nodes WHERE run_id=?1 AND node_id=?2",
@@ -375,10 +378,14 @@ impl Store {
                 n.result = previous.result;
             }
         }
-        db.execute(
-            "UPDATE nodes SET json=?1 WHERE run_id=?2 AND node_id=?3",
-            params![serde_json::to_string(&n)?, run, n.id],
-        )?;
+        ensure!(
+            db.execute(
+                "UPDATE nodes SET json=?1 WHERE run_id=?2 AND node_id=?3",
+                params![serde_json::to_string(&n)?, run, n.id],
+            )? == 1,
+            "Node not found"
+        );
+        db.commit()?;
         Ok(())
     }
     /// This is the only transition from terminal nodes back to pending. Archive
@@ -390,7 +397,7 @@ impl Store {
     ) -> Result<bool> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        let raw: String = tx.query_row("SELECT json FROM runs WHERE id=?1", [run], |r| r.get(0))?;
+        let raw: String = tx.query_row("SELECT json FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)", [run], |r| r.get(0))?;
         let state: Run = serde_json::from_str(&raw)?;
         if state.status != "running" {
             return Ok(false);
@@ -457,23 +464,24 @@ impl Store {
         Ok(v.map(|s| serde_json::from_str(&s)).transpose()?)
     }
     pub fn observe(&self, key: &str, value: &serde_json::Value) -> Result<()> {
-        self.db.lock().unwrap().execute("INSERT INTO observations VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json",params![key,serde_json::to_string(value)?])?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let owner = key
+            .strip_prefix("identity:")
+            .or_else(|| {
+                key.strip_prefix("review-feedback:")
+                    .and_then(|s| s.split(':').next())
+            })
+            .or_else(|| {
+                key.strip_prefix("review-history:")
+                    .and_then(|s| s.split(':').next())
+            });
+        if let Some(id) = owner {
+            ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id))",[id],|r|r.get::<_,bool>(0))?,"Run not found or deleting");
+        }
+        tx.execute("INSERT INTO observations VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json",params![key,serde_json::to_string(value)?])?;
+        tx.commit()?;
         Ok(())
-    }
-    pub fn track_pr(&self, repo: &str, number: u64, source_run: &str) -> Result<()> {
-        self.db.lock().unwrap().execute(
-            "INSERT OR IGNORE INTO tracked_prs VALUES(?1,?2,?3)",
-            params![repo, i64::try_from(number)?, source_run],
-        )?;
-        Ok(())
-    }
-    pub fn tracked_prs(&self) -> Result<Vec<(String, u64, String)>> {
-        let db = self.db.lock().unwrap();
-        let mut q=db.prepare("SELECT t.repository,t.number,MIN(t.source_run) FROM tracked_prs t JOIN runs r ON r.id=t.source_run GROUP BY t.repository,t.number HAVING COUNT(DISTINCT r.event_id)=1")?;
-        let rows = q.query_map([], |r| {
-            Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 }
 

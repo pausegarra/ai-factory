@@ -95,9 +95,11 @@ if path=="/repos/acme/repo/pulls/5"{let mut p=pr();if state.lock().unwrap().0 {p
         ))
         .unwrap()
         .unwrap();
-    let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
-    db.execute("INSERT INTO tracked_prs VALUES('acme/repo',5,?1)", [source])
-        .unwrap();
+    let store = factory_core::context::factory::infrastructure::repositories::store::Store::open(
+        dir.path(),
+    )
+    .unwrap();
+    store.track_pr("acme/repo", 5, &source).unwrap();
     f.poll_now().await.unwrap();
     assert_eq!(f.snapshot().unwrap().metrics.total, 2);
     let approval = f
@@ -108,6 +110,14 @@ if path=="/repos/acme/repo/pulls/5"{let mut p=pr();if state.lock().unwrap().0 {p
         .find(|run| run.trigger_id == "pr_approved")
         .unwrap();
     let approval = f.run_detail(&approval.id).unwrap();
+    assert!(approval.event.payload.get("source_run").is_none());
+    assert_eq!(
+        approval.event.payload["source_issue"]
+            .as_object()
+            .unwrap()
+            .len(),
+        6
+    );
     assert_eq!(approval.nodes[0].agent, "opencode");
     assert_eq!(approval.flow.nodes[0].model, "provider/approval");
     f.poll_now().await.unwrap();
@@ -157,4 +167,76 @@ if path.starts_with("/search/"){let m=*state.lock().unwrap();if m==2{return(503,
     *mode.lock().unwrap() = 0;
     f.poll_now().await.unwrap();
     assert_eq!(f.snapshot().unwrap().metrics.total, 2);
+}
+
+#[tokio::test]
+async fn deleted_source_origin_polls_without_history_and_revalidates_authorization() {
+    for mode in [
+        "valid",
+        "actor_revoked",
+        "owner_revoked",
+        "wrong_token",
+        "changed_author",
+        "old_head",
+    ] {
+        let base=server(move |path,_| {
+            if path=="/user" {return (200,json!({"login":if mode=="wrong_token" {"mallory"} else {"alice"}}));}
+            if path=="/repos/acme/repo/pulls/5" {let mut p=pr();if mode=="changed_author" {p["user"]["login"]=json!("mallory");}return (200,p);}
+            if path.contains("/reviews?") {return (200,json!([{"state":"APPROVED","commit_id":if mode=="old_head" {"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} else {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]));}
+            if path.contains("/comments?") {return (200,json!([]));}
+            panic!("unexpected {mode}: {path}");
+        }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let f = setup(dir.path().into(), &base);
+        let source = f
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                1,
+                "[AI] origin",
+                "alice",
+                "private-body",
+            ))
+            .unwrap()
+            .unwrap();
+        let store =
+            factory_core::context::factory::infrastructure::repositories::store::Store::open(
+                dir.path(),
+            )
+            .unwrap();
+        store.track_pr("acme/repo", 5, &source).unwrap();
+        // Model finalized local deletion: operational origin must not read any source row.
+        let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+        db.execute("DELETE FROM nodes WHERE run_id=?1", [&source])
+            .unwrap();
+        db.execute("DELETE FROM runs WHERE id=?1", [&source])
+            .unwrap();
+        let mut s = f.settings().unwrap();
+        s.flows[0].enabled = false;
+        if mode == "actor_revoked" {
+            s.authors.clear();
+        }
+        if mode == "owner_revoked" {
+            s.owners = vec!["other-owner".into()];
+        }
+        f.save_settings(s).unwrap();
+        let result = f.poll_now().await;
+        assert_eq!(
+            result.is_ok(),
+            matches!(mode, "valid" | "old_head"),
+            "{mode}: {result:?}"
+        );
+        assert_eq!(
+            f.snapshot().unwrap().runs.len(),
+            usize::from(mode == "valid"),
+            "{mode}"
+        );
+        if mode == "valid" {
+            let run = &f.snapshot().unwrap().runs[0];
+            let detail = f.run_detail(&run.id).unwrap();
+            assert!(detail.event.payload.get("source_run").is_none());
+            let text = detail.event.payload["source_issue"].to_string();
+            assert!(!text.contains("private-body"));
+            assert!(!text.contains(&source));
+        }
+    }
 }

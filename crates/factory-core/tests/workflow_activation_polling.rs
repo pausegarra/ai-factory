@@ -2,6 +2,7 @@
 mod activation_http;
 mod common;
 use activation_http::Server;
+use factory_core::context::factory::infrastructure::repositories::store::Store;
 use factory_core::*;
 use serde_json::{json, Value};
 use std::{
@@ -110,8 +111,9 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                         ))
                         .unwrap()
                         .unwrap();
-                    db(dir.path())
-                        .execute("INSERT INTO tracked_prs VALUES('acme/repo',5,?1)", [source])
+                    Store::open(dir.path())
+                        .unwrap()
+                        .track_pr("acme/repo", 5, &source)
                         .unwrap();
                     let mut s = f.settings().unwrap();
                     s.authors = vec!["alice".into()];
@@ -232,11 +234,9 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
                     ))
                     .unwrap()
                     .unwrap();
-                db(dir.path())
-                    .execute(
-                        "INSERT INTO tracked_prs VALUES('acme/repo',?1,?2)",
-                        rusqlite::params![if actor == "alice" { 6 } else { 5 }, id],
-                    )
+                Store::open(dir.path())
+                    .unwrap()
+                    .track_pr("acme/repo", if actor == "alice" { 6 } else { 5 }, &id)
                     .unwrap();
             }
             let mut s = f.settings().unwrap();

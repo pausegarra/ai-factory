@@ -106,6 +106,31 @@ fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
 fn result(data: Value) -> Value {
     json!({"status":"succeeded","summary":"done","artifacts":[],"data":data})
 }
+// Action fixtures must own a live durable run; missing runs now fail closed.
+fn seed_run(f: &Factory, e: &TriggerEvent, id: &str) {
+    let root = f.snapshot().unwrap().service.app_data_dir;
+    let db = rusqlite::Connection::open(Path::new(&root).join("factory.sqlite3")).unwrap();
+    let flow = f
+        .settings()
+        .unwrap()
+        .flows
+        .into_iter()
+        .find(|flow| flow.id == e.trigger_id)
+        .unwrap();
+    let run = json!({"id":id,"event_id":e.event_id,"trigger_id":e.trigger_id,"repository":e.repository,"number":e.number,"title":e.title,"actor":e.actor,"url":e.url,"status":"queued","current_step":null,"created_at":now(),"started_at":null,"finished_at":null,"error":null,"attempt":1,"workspace":null});
+    db.execute(
+        "INSERT OR IGNORE INTO runs VALUES(?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![
+            id,
+            e.event_id,
+            run.to_string(),
+            serde_json::to_string(e).unwrap(),
+            serde_json::to_string(&flow).unwrap(),
+            now()
+        ],
+    )
+    .unwrap();
+}
 
 #[tokio::test]
 async fn request_accepts_empty_204_and_keeps_json_contract() {
@@ -251,6 +276,7 @@ async fn merge_attempt(
     root: &Path,
     run: &str,
 ) -> factory_core::Result<()> {
+    seed_run(f, e, run);
     api.publish_actions(
         f,
         e,
@@ -375,6 +401,8 @@ async fn comment_recovers_accepted_write_after_lost_response_without_duplicate()
     let api = Github::with_base("alice-token", &base).unwrap();
     let e = event("new_issue");
     let r = result(json!({"comment":"Build finished"}));
+    seed_run(&f, &e, "attempt-1");
+    seed_run(&f, &e, "attempt-2");
     assert!(api
         .publish_actions(&f, &e, "attempt-1", "report", dir.path(), &r)
         .await
@@ -383,6 +411,7 @@ async fn comment_recovers_accepted_write_after_lost_response_without_duplicate()
         .await
         .unwrap();
     assert_eq!(writes.load(Ordering::SeqCst), 1);
+    assert_compact_receipts(&f, 12);
 }
 
 #[tokio::test]
@@ -401,6 +430,7 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
     let mut r = result(json!({"review":{"event":"REQUEST_CHANGES","body":"Fix bug"}}));
     let id = admit_then_disable(&f, &e);
     r["status"] = json!("blocked");
+    seed_run(&f, &e, "attempt-2");
     api.publish_actions(&f, &e, &id, "review", dir.path(), &r)
         .await
         .unwrap();
@@ -408,6 +438,113 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
         .await
         .unwrap();
     assert_eq!(writes.load(Ordering::SeqCst), 1);
+    assert_compact_receipts(&f, 9);
+}
+
+fn assert_compact_receipts(f: &Factory, remote_id: u64) {
+    let root = f.snapshot().unwrap().service.app_data_dir;
+    let db = rusqlite::Connection::open(Path::new(&root).join("factory.sqlite3")).unwrap();
+    let raw: String = db
+        .query_row(
+            "SELECT json FROM observations WHERE substr(key,1,7)='action:'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        json!({"completed":true,"remote_id":remote_id})
+    );
+}
+
+#[tokio::test]
+async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_surviving_retry() {
+    for trigger in ["new_issue", "pr_review"] {
+        let e = event(trigger);
+        let review = trigger == "pr_review";
+        let path = if review {
+            "/repos/acme/repo/pulls/5/reviews"
+        } else {
+            "/repos/acme/repo/issues/1/comments"
+        };
+        let mut steps = vec![Step::new(
+            "GET",
+            "/user",
+            Reply::Json(200, json!({"login":"alice"})),
+        )];
+        if review {
+            steps.push(Step::new(
+                "GET",
+                PR_PATH,
+                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
+            ));
+        }
+        steps.push(Step::new(
+            "GET",
+            &format!("{path}?per_page=100&page=1"),
+            Reply::Json(200, json!([])),
+        ));
+        steps.push(Step::new(
+            "POST",
+            path,
+            Reply::Json(201, json!({"id":71,"body":"private response body","user":{"login":"alice"},"extra":"not retained"})),
+        ));
+        // Receipt short-circuits all reconciliation and POSTs on surviving attempt.
+        steps.push(Step::new(
+            "GET",
+            "/user",
+            Reply::Json(200, json!({"login":"alice"})),
+        ));
+        let script = Script::start(steps).await;
+        let (dir, f) = factory(&script.base);
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        let first = f.enqueue(e.clone()).unwrap().unwrap();
+        let r = result(if review {
+            json!({"review":{"event":"COMMENT","body":"private review body"}})
+        } else {
+            json!({"comment":"private comment body"})
+        });
+        api.publish_actions(&f, &e, &first, "report", dir.path(), &r)
+            .await
+            .unwrap();
+        assert_compact_receipts(&f, 71);
+        f.cancel(&first).unwrap();
+        let second = f.retry(&first).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(f.run_detail(&second).unwrap().run.attempt, 2);
+        assert_eq!(f.run_detail(&second).unwrap().event.event_id, e.event_id);
+        assert!(matches!(
+            f.delete_run(&first).unwrap(),
+            DeleteRunOutcome::Deleted { .. }
+        ));
+        assert!(f.run_detail(&first).is_err());
+        assert_compact_receipts(&f, 71);
+        api.publish_actions(&f, &e, &second, "report", dir.path(), &r)
+            .await
+            .unwrap();
+        assert_compact_receipts(&f, 71);
+        script.assert_done();
+        assert_eq!(script.writes(), vec![("POST".into(), path.into())]);
+    }
+}
+
+#[tokio::test]
+async fn missing_run_cannot_start_remote_action() {
+    let script = Script::start(vec![]).await;
+    let (dir, f) = factory(&script.base);
+    let api = Github::with_base("alice-token", &script.base).unwrap();
+    assert!(api
+        .publish_actions(
+            &f,
+            &event("new_issue"),
+            "missing",
+            "node",
+            dir.path(),
+            &result(json!({"comment":"must not publish"}))
+        )
+        .await
+        .is_err());
+    script.assert_done();
 }
 
 #[tokio::test]
@@ -500,6 +637,7 @@ async fn publish_uses_repository_default_instead_of_agent_base_or_main_fallback(
         .await;
         let (_app, f) = factory(&script.base);
         let api = Github::with_base("alice-token", &script.base).unwrap();
+        seed_run(&f, &e, "attempt");
         let mut publish = json!({"title":"PR","body":"Closes #1"});
         if let Some(requested) = requested {
             publish["base"] = json!(requested);
@@ -561,6 +699,7 @@ async fn publish_requires_verified_default_before_pushing_or_creating_pr() {
         .await;
         let (_app, f) = factory(&script.base);
         let api = Github::with_base("alice-token", &script.base).unwrap();
+        seed_run(&f, &e, "attempt");
         let error = api
             .publish_actions(
                 &f,
@@ -1285,6 +1424,7 @@ async fn merge_cleanup_failure_prevents_later_comment() {
     let script = Script::start(steps).await;
     let (dir, f) = factory(&script.base);
     let api = Github::with_base("alice-token", &script.base).unwrap();
+    seed_run(&f, &e, "attempt");
     let error = api
         .publish_actions(
             &f,
