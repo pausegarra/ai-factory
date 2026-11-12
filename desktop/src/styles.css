@@ -2690,3 +2690,94 @@ select {
   padding: 0;
   min-width: 0;
 }
+
+.run-log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 24px;
+}
+.log-panel,
+.run-log-viewport,
+.run-log-entry,
+.run-log-block {
+  min-width: 0;
+}
+.run-log-viewport {
+  white-space: normal;
+  overflow-anchor: none;
+}
+.run-log-entry {
+  margin: 0 0 12px;
+}
+.run-log-entry-plain {
+  margin-bottom: 0;
+}
+.run-log-label,
+.run-log-block-label,
+.run-log-metadata,
+.run-log-omitted {
+  display: block;
+}
+.run-log-label,
+.run-log-block-label {
+  font: 600 12px/16px Geist, sans-serif;
+  margin-bottom: 4px;
+}
+.run-log-metadata,
+.run-log-omitted {
+  font: 400 12px/16px Geist, sans-serif;
+  color: #a6a6a4;
+}
+.run-log-block {
+  margin-top: 4px;
+}
+.run-log-entry-plain .run-log-block {
+  margin-top: 0;
+}
+.run-log-block pre,
+.run-log-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.run-log-text pre {
+  font: 400 14px/20px Geist, sans-serif;
+}
+.run-log-code pre,
+.run-log-raw {
+  font: 400 12px/20px monospace;
+}
+.run-log-block .text-button,
+.run-log-result > .text-button {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.run-log-spacer {
+  white-space: pre;
+  font: 400 12px/20px monospace;
+}
+.run-log-empty {
+  margin: 0;
+}
+.run-log-entry-error .run-log-label {
+  color: #e4b48f;
+}
+.run-log-toolbar .selected {
+  background: #313131;
+}
+.run-log-toolbar button:focus-visible,
+.run-log-viewport button:focus-visible {
+  outline: 2px solid #e4b48f;
+  outline-offset: 2px;
+}
+.run-log-toolbar button:hover,
+.run-log-viewport button:hover {
+  background: #272727;
+}
+.run-log-toolbar button:active,
+.run-log-viewport button:active {
+  transform: translateY(1px);
+}
