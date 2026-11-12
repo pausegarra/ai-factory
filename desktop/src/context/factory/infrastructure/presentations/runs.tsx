@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Ref } from "react";
 import {
   ArrowClockwise,
   ArrowLeft,
@@ -86,9 +86,11 @@ export function RunTable({
 export function RunsPage({
   snapshot,
   onSelect,
+  headingRef,
 }: {
   snapshot: Snapshot;
   onSelect: (id: string) => void;
+  headingRef?: Ref<HTMLHeadingElement>;
 }) {
   const [view, setView] = useState("active");
   const [query, setQuery] = useState("");
@@ -112,7 +114,7 @@ export function RunsPage({
       <div className="page-title">
         <div>
           <span className="eyebrow">OPERATIONS CENTER</span>
-          <h1>Runs</h1>
+          <h1 ref={headingRef} tabIndex={-1}>Runs</h1>
           <p>Every task, every step. All in real time.</p>
         </div>
         <span className="live-label">

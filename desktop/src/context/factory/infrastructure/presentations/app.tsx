@@ -20,6 +20,11 @@ import { RunsPage, RunDetailPage } from "./runs";
 import { FlowsPage } from "./flows";
 import { SettingsPage } from "./settings";
 import { Notice } from "./ui";
+type RunSelection = { id: string; revision: number };
+type RunFeedback = {
+  tone: "success" | "info";
+  message: "Run deleted." | "This run is no longer available.";
+};
 const nav = [
   { id: "overview", label: "Overview", icon: ChartBar },
   { id: "runs", label: "Runs", icon: Lightning },
@@ -31,18 +36,45 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
-  const [selectedRun, setSelectedRun] = useState<string | null>(null);
-  const selected = useRef(selectedRun);
-  selected.current = selectedRun;
-  const initiated = useRef(new Set<string>());
-  const [notice, setNotice] = useState("");
-  function unavailable(id: string, deleted = false) {
-    if (selected.current === id) {
-      selected.current = null;
-      setSelectedRun(null); setPage("runs");
-      setNotice(deleted || initiated.current.has(id) ? "Run deleted." : "This run is no longer available.");
-    }
-    initiated.current.delete(id);
+  const [selection, setSelection] = useState<RunSelection | null>(null);
+  const selected = useRef<RunSelection | null>(null);
+  const sequence = useRef(0);
+  const initiated = useRef(new Set<RunSelection>());
+  const [notice, setNotice] = useState<RunFeedback | null>(null);
+  const runsHeading = useRef<HTMLHeadingElement>(null);
+  function dismissRunNotice() {
+    setNotice(null);
+    runsHeading.current?.focus();
+  }
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  function commitContext(value: string, next: RunSelection | null = null) {
+    selected.current = next;
+    initiated.current.clear();
+    setSelection(next);
+    setPage(value);
+    setNotice(null);
+  }
+  function selectRun(id: string) {
+    commitContext("runs", { id, revision: ++sequence.current });
+  }
+  function unavailable(
+    id: string,
+    deleted = false,
+    expected: RunSelection | null = selected.current,
+  ) {
+    if (!alive.current || !expected || selected.current !== expected || expected.id !== id) return;
+    const local = deleted || initiated.current.has(expected);
+    commitContext("runs");
+    setNotice(local
+      ? { tone: "success", message: "Run deleted." }
+      : { tone: "info", message: "This run is no longer available." });
+  }
+  function refreshAfterDeletion() {
+    if (alive.current) setReload(value => value + 1);
   }
   const [hasUnsaved, setHasUnsaved] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
@@ -70,8 +102,10 @@ export function App() {
         setSettings(data.settings);
         setSnapshot(data.snapshot);
         if (data.selection && selected.current === data.selection &&
-          !data.snapshot.runs.some(r => r.id === data.selection) &&
-          !data.snapshot.deletions.some(d => d.run_id === data.selection)) unavailable(data.selection);
+          !data.snapshot.runs.some(run => run.id === data.selection!.id) &&
+          !data.snapshot.deletions.some(item => item.run_id === data.selection!.id)) {
+          unavailable(data.selection.id, false, data.selection);
+        }
         setError("");
       },
       (e) => setError(String(e)),
@@ -91,8 +125,7 @@ export function App() {
       setPendingPage(value);
       return;
     }
-    setPage(value);
-    setSelectedRun(null);
+    commitContext(value);
   }
   async function poll() {
     setPolling(true);
@@ -223,7 +256,6 @@ export function App() {
               </button>
             </Notice>
           )}
-          {notice && <p role="status">{notice}</p>}
           {snapshot?.service.last_error && (
             <Notice>GitHub sync failed: {snapshot.service.last_error}</Notice>
           )}
@@ -238,29 +270,46 @@ export function App() {
               </div>
               <div className="skeleton h-96 mt-6" />
             </div>
-          ) : selectedRun ? (
+          ) : selection ? (
             <RunDetailPage
-              key={selectedRun}
-              id={selectedRun}
-              onBack={() => setSelectedRun(null)}
-              onSelect={setSelectedRun}
-              onDeletionStarted={id => { initiated.current.add(id); }}
-              onDeletionSettled={id => { initiated.current.delete(id); setReload(x => x + 1); }}
-              onDeleted={id => { unavailable(id, true); setReload(x => x + 1); }}
-              onUnavailable={id => { unavailable(id); setReload(x => x + 1); }}
+              key={`${selection.id}:${selection.revision}`}
+              id={selection.id}
+              onBack={() => commitContext("runs")}
+              onSelect={selectRun}
+              onDeletionStarted={id => {
+                if (alive.current && selected.current === selection && selection.id === id) {
+                  initiated.current.add(selection);
+                }
+              }}
+              onDeletionSettled={() => {
+                initiated.current.delete(selection);
+                refreshAfterDeletion();
+              }}
+              onDeleted={id => {
+                unavailable(id, true, selection);
+                refreshAfterDeletion();
+              }}
+              onUnavailable={id => {
+                unavailable(id, false, selection);
+                refreshAfterDeletion();
+              }}
             />
           ) : page === "overview" ? (
             <OverviewPage
               settings={settings}
               snapshot={snapshot}
               onPage={navigate}
-              onRun={(id) => {
-                setPage("runs");
-                setSelectedRun(id);
-              }}
+              onRun={selectRun}
             />
           ) : page === "runs" ? (
-            <RunsPage snapshot={snapshot} onSelect={setSelectedRun} />
+            <>
+              {notice && (
+                <Notice tone={notice.tone} close={dismissRunNotice}>
+                  {notice.message}
+                </Notice>
+              )}
+              <RunsPage snapshot={snapshot} onSelect={selectRun} headingRef={runsHeading} />
+            </>
           ) : page === "flows" ? (
             <FlowsPage
               settings={settings}
@@ -327,8 +376,7 @@ export function App() {
                 disabled={savingWorkflow}
                 onClick={() => {
                   if (savingWorkflow) return;
-                  setPage(pendingPage);
-                  setSelectedRun(null);
+                  commitContext(pendingPage);
                   setHasUnsaved(false);
                   setPendingPage(null);
                 }}
