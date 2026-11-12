@@ -13,7 +13,7 @@ struct MergeSource {
     sha: String,
 }
 
-fn valid_branch(branch: &str) -> bool {
+pub(super) fn valid_branch(branch: &str) -> bool {
     !branch.is_empty()
         && branch != "@"
         && branch != "HEAD"
@@ -29,7 +29,7 @@ fn valid_branch(branch: &str) -> bool {
             .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
-fn ref_path(repo: &str, branch: &str, delete: bool) -> String {
+pub(super) fn ref_path(repo: &str, branch: &str, delete: bool) -> String {
     let mut encoded = String::new();
     for byte in branch.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
@@ -75,7 +75,7 @@ fn parse_source(pr: &Value, event: &TriggerEvent, default: &str) -> Result<Merge
     })
 }
 
-fn reference_sha(value: &Value, branch: &str) -> Result<String> {
+pub(super) fn reference_sha(value: &Value, branch: &str) -> Result<String> {
     ensure!(
         value["ref"] == format!("refs/heads/{branch}"),
         "Reference identity mismatch"
