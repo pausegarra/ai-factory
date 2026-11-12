@@ -314,6 +314,7 @@ export function App() {
             <FlowsPage
               settings={settings}
               onSave={saveSettings}
+              onLoadSkills={factoryApi.installedSkills}
               onDirtyChange={setHasUnsaved}
               onBusyChange={setSavingWorkflow}
             />
@@ -363,7 +364,7 @@ export function App() {
               Save your changes before leaving, or discard them to open another
               page.
             </p>
-            <div>
+            <div className="dialog-actions">
               <button
                 autoFocus
                 className="button button-secondary"
