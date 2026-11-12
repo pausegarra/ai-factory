@@ -71,7 +71,7 @@ Valid statuses are `succeeded`, `blocked` and `failed`. `data` must satisfy the 
 
 Agents request GitHub operations through `data`; the engine performs REST calls with the actor token:
 
-- `publish: {title, body, base}` pushes the issue branch and creates or reuses its PR. The body must close the source issue using `Closes #N`.
+- `publish: {title, body}` pushes the issue branch and creates its PR against the repository's current default branch, resolved through GitHub before pushing. Legacy `base` values from agents are ignored. An existing matching PR is reused without retargeting it. The body must close the source issue using `Closes #N`.
 - `merge: {method: "squash"}` in an approved PR flow, guarded by its head SHA. After confirming the merge, Factory deletes only the verified remote source branch in the same repository, never the target or default branch.
 - `review: {event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT", body}` in a review flow.
 - `comment: "text"` comments on the event.
