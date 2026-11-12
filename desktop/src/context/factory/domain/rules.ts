@@ -111,8 +111,6 @@ export function validateSettings(s: Settings): string[] {
     errors.push("Concurrency must be an integer from 1 to 64.");
   if (!Number.isInteger(s.poll_interval_seconds) || s.poll_interval_seconds < 1)
     errors.push("Poll interval must be a positive integer.");
-  if (!Number.isInteger(s.node_timeout_seconds) || s.node_timeout_seconds < 1)
-    errors.push("Timeout must be a positive integer.");
   if (Object.values(s.commands).some((v) => !v.trim()))
     errors.push("Enter the CLI executable paths.");
   const accounts = new Set<string>();

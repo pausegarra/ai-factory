@@ -210,12 +210,6 @@ fn read_config(path: &Path, current: &Settings, warnings: &mut Vec<String>) -> R
     if let Some(n) = data["concurrency"].get("global").and_then(Value::as_u64) {
         settings.max_concurrent = usize::try_from(n)?;
     }
-    if let Some(n) = data["orchestration"]
-        .get("phase_timeout_seconds")
-        .and_then(Value::as_u64)
-    {
-        settings.node_timeout_seconds = n;
-    }
     for key in ["codex", "git", "opencode"] {
         if let Some(command) = data["commands"].get(key).and_then(Value::as_str) {
             match key {

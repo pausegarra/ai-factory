@@ -42,6 +42,56 @@ fn defaults_cover_three_triggers_and_concurrency() {
     assert_eq!(s.flows.len(), 3);
     s.validate().unwrap();
 }
+
+#[test]
+fn settings_ignore_and_drop_legacy_agent_timeout() {
+    for timeout in [0, 1, 3600] {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value["node_timeout_seconds"] = json!(timeout);
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        settings.validate().unwrap();
+        assert!(serde_json::to_value(settings)
+            .unwrap()
+            .get("node_timeout_seconds")
+            .is_none());
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn agents_complete_after_legacy_timeout_for_both_clis() {
+    for agent in ["codex", "opencode"] {
+        let (_dir, f) = fixture(
+            r#"cat >/dev/null
+sleep 2
+printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#,
+            4,
+        );
+        let mut value = serde_json::to_value(f.settings().unwrap()).unwrap();
+        value["node_timeout_seconds"] = json!(1);
+        value["flows"][0]["nodes"][0]["agent"] = json!(agent);
+        f.save_settings(serde_json::from_value(value).unwrap())
+            .unwrap();
+        let id = f
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                172,
+                "[AI] long task",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        f.start();
+        let detail = terminal(&f, &id).await;
+        f.shutdown().await;
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{agent}: {:?}",
+            detail.nodes
+        );
+    }
+}
 #[test]
 fn graph_rejects_cycles_unknown_dependencies_and_bad_schemas() {
     let mut s = Settings::default();
@@ -857,19 +907,10 @@ async fn real_cli_artifact_contract_checks_contents_and_authorized_paths() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn failed_blocked_and_timed_out_runs_remove_the_clone() {
-    for status in ["failed", "blocked", "timeout"] {
-        let script = if status == "timeout" {
-            "cat >/dev/null\nsleep 30".into()
-        } else {
-            format!("cat >/dev/null\nprintf '%s' '{{\"status\":\"{status}\",\"summary\":\"fixture\",\"artifacts\":[],\"data\":{{}}}}' > \"$AI_FACTORY_RESULT_PATH\"")
-        };
+async fn failed_and_blocked_runs_remove_the_clone() {
+    for status in ["failed", "blocked"] {
+        let script = format!("cat >/dev/null\nprintf '%s' '{{\"status\":\"{status}\",\"summary\":\"fixture\",\"artifacts\":[],\"data\":{{}}}}' > \"$AI_FACTORY_RESULT_PATH\"");
         let (dir, f) = fixture(&script, 4);
-        if status == "timeout" {
-            let mut s = f.settings().unwrap();
-            s.node_timeout_seconds = 1;
-            f.save_settings(s).unwrap();
-        }
         let id = f
             .enqueue(TriggerEvent::issue(
                 "acme/repo",
@@ -883,16 +924,7 @@ async fn failed_blocked_and_timed_out_runs_remove_the_clone() {
         f.start();
         let detail = terminal(&f, &id).await;
         f.shutdown().await;
-        assert_eq!(
-            detail.run.status,
-            if status == "timeout" {
-                "failed"
-            } else {
-                status
-            },
-            "{:?}",
-            detail.nodes
-        );
+        assert_eq!(detail.run.status, status, "{:?}", detail.nodes);
         assert!(detail.run.workspace.is_none());
         assert!(!dir.path().join("data/workspaces").join(id).exists());
     }
