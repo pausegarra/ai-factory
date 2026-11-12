@@ -32,6 +32,14 @@ if response.get('artifact'):
     artifact.write_text('original evidence')
     value['artifacts'] = [{'path': str(artifact), 'kind': 'report',
         'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest()}]
+    if response.get('patch'):
+        patch = artifact.with_name('implementation.patch')
+        patch.write_text('original patch')
+        value['artifacts'].append({'path': str(patch), 'kind': 'implementation_patch',
+            'sha256': hashlib.sha256(patch.read_bytes()).hexdigest()})
+    if response.get('legacy_type'):
+        for item in value['artifacts']:
+            item['type'] = item.pop('kind')
 if response.get('direct'):
     print(json.dumps(value))
 elif response.get('stdout'):
@@ -52,6 +60,45 @@ elif value is not None:
 
 fn valid_result() -> serde_json::Value {
     json!({"status":"succeeded","summary":"work complete","artifacts":[],"data":{"branch":"feature"}})
+}
+
+#[tokio::test]
+async fn repair_accepts_type_to_kind_rename_with_original_files_and_hashes() {
+    for agent in ["codex", "opencode"] {
+        let summary = "Implemented issue #8; native GUI persistence remains unverified.";
+        let data = json!({"native_smoke":{"status":"not_verified"}});
+        let (dir, factory) = repair_fixture(
+            agent,
+            &[
+                json!({"value":{"status":"partial","summary":summary,"artifacts":[],"data":data},"artifact":true,"patch":true,"legacy_type":true,"stdout":agent == "opencode"}),
+                json!({"value":{"status":"succeeded","summary":summary,"artifacts":[],"data":data},"artifact":true,"patch":true,"stdout":agent == "opencode"}),
+            ],
+        );
+        let (id, detail) = run_repair_fixture(&factory).await;
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{agent}: {:?}",
+            detail.nodes
+        );
+        assert_eq!(attempts(&dir, &id), 2);
+        let result = detail.nodes[0].result.as_ref().unwrap();
+        assert_eq!(result["summary"], summary);
+        assert_eq!(result["data"], data);
+        let artifacts = result["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 2);
+        for (artifact, expected) in artifacts
+            .iter()
+            .zip(["original evidence", "original patch"])
+        {
+            let path = std::path::Path::new(artifact["path"].as_str().unwrap());
+            let bytes = std::fs::read(path).unwrap();
+            assert_eq!(bytes, expected.as_bytes());
+            use sha2::{Digest, Sha256};
+            assert_eq!(artifact["sha256"], format!("{:x}", Sha256::digest(&bytes)));
+            assert!(artifact.get("type").is_none());
+            assert!(artifact["kind"].is_string());
+        }
+    }
 }
 
 async fn run_repair_fixture(factory: &std::sync::Arc<Factory>) -> (String, RunDetail) {
