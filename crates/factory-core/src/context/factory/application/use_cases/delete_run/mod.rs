@@ -189,10 +189,7 @@ mod tests {
                 "",
             ))?
             .unwrap();
-        f.active
-            .lock()
-            .unwrap()
-            .insert(id.clone(), tokio_util::sync::CancellationToken::new());
+        assert!(f.register_queued_worker(&id, 4)?.is_some());
         f.cancel(&id)?;
         assert!(f
             .delete_run(&id)

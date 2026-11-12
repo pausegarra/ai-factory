@@ -240,3 +240,105 @@ async fn deleted_source_origin_polls_without_history_and_revalidates_authorizati
         }
     }
 }
+
+#[tokio::test]
+async fn two_approval_signals_stay_durable_and_deduplicated() {
+    let base = server(|path, _| {
+        if path == "/user" {
+            return (200, json!({"login":"alice"}));
+        }
+        if path.starts_with("/search/") {
+            return (
+                200,
+                json!({"total_count":0,"incomplete_results":false,"items":[]}),
+            );
+        }
+        for number in [5, 6] {
+            if path == format!("/repos/acme/repo/pulls/{number}") {
+                let mut pull = pr();
+                pull["number"] = json!(number);
+                pull["html_url"] = json!(format!("https://github.com/acme/repo/pull/{number}"));
+                pull["head"]["ref"] = json!(format!("feature-{number}"));
+                return (200, pull);
+            }
+            if path.starts_with(&format!("/repos/acme/repo/pulls/{number}/reviews?")) {
+                return (
+                    200,
+                    json!([{"id":number,"state":"APPROVED","commit_id":"a".repeat(40)}]),
+                );
+            }
+            if path.starts_with(&format!("/repos/acme/repo/issues/{number}/comments?")) {
+                return (
+                    200,
+                    json!([{"id":700+number,"body":" OK ","user":{"login":"alice"}}]),
+                );
+            }
+        }
+        panic!("Unexpected fixture route {path}")
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let factory = setup(dir.path().into(), &base);
+    let store = factory_core::context::factory::infrastructure::repositories::store::Store::open_with_credentials(
+        dir.path(),
+        common::backend(dir.path()),
+    )
+    .unwrap();
+    for number in [5, 6] {
+        let source = factory
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                number + 100,
+                "[AI] source",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        factory.cancel(&source).unwrap();
+        store.track_pr("acme/repo", number, &source).unwrap();
+    }
+    drop(store);
+
+    factory.poll_now().await.unwrap();
+    let approvals: Vec<_> = factory
+        .snapshot()
+        .unwrap()
+        .runs
+        .into_iter()
+        .filter(|run| run.trigger_id == "pr_approved")
+        .collect();
+    assert_eq!(approvals.len(), 2);
+    assert!(approvals
+        .iter()
+        .all(|run| run.status == "queued" && run.started_at.is_none()));
+    let ids: std::collections::BTreeSet<_> = approvals.iter().map(|run| run.id.clone()).collect();
+
+    factory.poll_now().await.unwrap();
+    let after_poll: std::collections::BTreeSet<_> = factory
+        .snapshot()
+        .unwrap()
+        .runs
+        .into_iter()
+        .filter(|run| run.trigger_id == "pr_approved")
+        .map(|run| run.id)
+        .collect();
+    assert_eq!(ids, after_poll);
+    drop(factory);
+
+    let reopened = common::open_with_api(dir.path().into(), &base).unwrap();
+    reopened.poll_now().await.unwrap();
+    let restored: std::collections::BTreeSet<_> = reopened
+        .snapshot()
+        .unwrap()
+        .runs
+        .into_iter()
+        .filter(|run| run.trigger_id == "pr_approved")
+        .map(|run| {
+            assert_eq!(run.status, "queued");
+            assert!(run.started_at.is_none());
+            run.id
+        })
+        .collect();
+    assert_eq!(ids, restored);
+}
