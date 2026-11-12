@@ -92,7 +92,14 @@ if [ "$1" = clone ]; then
   case "$GIT_CONFIG_VALUE_0" in 'AUTHORIZATION: basic '*) ;; *) exit 63;; esac
   exec '{actual}' clone --no-hardlinks -- '{source}' "$last"
 fi
-if [ "$1" = fetch ]; then '{actual}' rev-parse HEAD > .git/FETCH_HEAD; exit $?; fi
+if [ "$1" = fetch ]; then
+  for arg do
+    case "$arg" in
+      *:refs/ai-factory/*) target="${{arg#*:}}"; exec '{actual}' update-ref "$target" HEAD;;
+    esac
+  done
+  '{actual}' rev-parse HEAD > .git/FETCH_HEAD; exit $?
+fi
 exec '{actual}' "$@"
 "#,
             root = root.display(),

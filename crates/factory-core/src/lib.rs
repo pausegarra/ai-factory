@@ -18,6 +18,7 @@ pub mod context {
             }
             pub mod dto {
                 pub mod agent_model;
+                pub(crate) mod pr_workspace;
             }
             pub mod services {
                 pub mod factory;
@@ -47,6 +48,7 @@ pub mod context {
             pub mod processes {
                 pub mod agent_models;
                 pub mod agents;
+                pub(crate) mod pr_workspace;
                 pub mod workspaces;
             }
         }

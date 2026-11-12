@@ -178,7 +178,7 @@ impl Store {
         );
         tx.execute("UPDATE dedup SET run_id='consumed' WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
-        tx.execute("DELETE FROM observations WHERE key=?1 OR substr(key,1,length(?2))=?2 OR substr(key,1,length(?3))=?3",params![format!("identity:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:")])?;
+        tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3) OR substr(key,1,length(?4))=?4 OR substr(key,1,length(?5))=?5",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:")])?;
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;
         tx.execute("DELETE FROM run_deletions WHERE run_id=?1", [id])?;
         tx.commit()?;
@@ -338,6 +338,14 @@ mod tests {
                 &serde_json::json!({"late":"writer"})
             )
             .is_err());
+        for prefix in ["pr-workspace", "pr-update"] {
+            assert!(store
+                .observe(
+                    &format!("{prefix}:{id}"),
+                    &serde_json::json!({"late":"writer"})
+                )
+                .is_err());
+        }
         let (runs, deletions) = store.snapshot_history()?;
         assert!(runs.is_empty());
         assert_eq!(deletions.len(), 1);
@@ -369,6 +377,8 @@ mod tests {
         let id = terminal(&store, 1, "failed")?;
         let keep = [
             format!("identity:{id}-neighbor"),
+            format!("pr-workspace:{id}-neighbor"),
+            format!("pr-update:{id}-neighbor"),
             format!("review-feedback:{id}-neighbor:n"),
             format!("review-history:{id}-neighbor:n"),
             "approval-comment:acme/repo#1:7".into(),
@@ -557,6 +567,8 @@ mod tests {
         store.save_run(&run)?;
         let owned = [
             format!("identity:{id}"),
+            format!("pr-workspace:{id}"),
+            format!("pr-update:{id}"),
             format!("review-feedback:{id}:builder"),
             format!("review-history:{id}:round1"),
         ];

@@ -4,6 +4,7 @@ use reqwest::{Client, Method};
 use serde_json::{json, Value};
 
 mod merge_cleanup;
+mod pr_updates;
 
 pub struct Github {
     client: Client,
@@ -321,6 +322,26 @@ impl Github {
         let data = &result["data"];
         let action = |name| data.get(name).filter(|v| !v.is_null());
         // Validate the entire request before any externally visible mutation.
+        if let Some(update) = action("update_pr") {
+            ensure!(
+                event.trigger_id == "pr_approved",
+                "Only approved flow can update PR"
+            );
+            ensure!(
+                result["status"] == "succeeded",
+                "Only succeeded results can update PR"
+            );
+            ensure!(
+                update.as_object().is_some_and(|v| v.is_empty()),
+                "update_pr must be an empty object; Factory selects the PR branch"
+            );
+            ensure!(
+                ["publish", "merge", "review", "comment"]
+                    .iter()
+                    .all(|k| action(k).is_none()),
+                "update_pr cannot be combined with other actions"
+            );
+        }
         if let Some(p) = action("publish") {
             ensure!(
                 event.trigger_id == "new_issue",
@@ -404,6 +425,10 @@ impl Github {
         check_active()?;
         self.verify_actor(&event.actor).await?;
         check_active()?;
+        if action("update_pr").is_some() {
+            self.update_pr(factory, event, run, workspace, &check_active)
+                .await?;
+        }
         if let Some(p) = action("publish") {
             let branch = super::super::processes::agents::git_output(
                 factory,
@@ -462,6 +487,13 @@ impl Github {
             factory.store.track_pr(&event.repository, n, run)?;
         }
         if action("merge").is_some() {
+            ensure!(
+                factory
+                    .store
+                    .observation(&format!("pr-update:{run}"))?
+                    .is_none(),
+                "PR updated during this run; new approval required before merge"
+            );
             self.merge_and_cleanup(event, &check_active).await?;
         }
         for kind in ["review", "comment"] {

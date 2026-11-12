@@ -468,6 +468,8 @@ impl Store {
         let tx = db.transaction()?;
         let owner = key
             .strip_prefix("identity:")
+            .or_else(|| key.strip_prefix("pr-workspace:"))
+            .or_else(|| key.strip_prefix("pr-update:"))
             .or_else(|| {
                 key.strip_prefix("review-feedback:")
                     .and_then(|s| s.split(':').next())

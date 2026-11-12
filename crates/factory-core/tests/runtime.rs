@@ -47,6 +47,7 @@ async fn fixture() -> (
         ],
     );
     let sha = git(&source, &["rev-parse", "HEAD"]);
+    let server_sha = sha.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -54,6 +55,7 @@ async fn fixture() -> (
             let Ok((mut socket, _)) = listener.accept().await else {
                 break;
             };
+            let sha = server_sha.clone();
             tokio::spawn(async move {
                 let mut raw = vec![0; 16384];
                 let count = socket.read(&mut raw).await.unwrap();
@@ -63,6 +65,11 @@ async fn fixture() -> (
                     json!({"login":"alice"})
                 } else if path.starts_with("/search/issues?") {
                     json!({"total_count":0,"incomplete_results":false,"items":[]})
+                } else if path == "/repos/acme/repo/git/ref/heads/main" {
+                    json!({"ref":"refs/heads/main","object":{"type":"commit","sha":sha}})
+                } else if path.starts_with("/repos/acme/repo/pulls/") {
+                    let number = path.rsplit('/').next().unwrap().parse::<u64>().unwrap();
+                    json!({"number":number,"state":"open","merged":false,"html_url":format!("https://github.com/acme/repo/pull/{number}"),"base":{"ref":"main","repo":{"full_name":"acme/repo"}},"head":{"ref":"feature","sha":sha,"repo":{"full_name":"acme/repo"}}})
                 } else {
                     let number = path
                         .rsplit('/')
