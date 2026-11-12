@@ -12,6 +12,7 @@ it("cancels confirmation without invoking delete and focuses Cancel", async () =
   const dialog = screen.getByRole("alertdialog", { name: "Delete run?" });
   expect(dialog.textContent).toContain(run.id);
   expect(dialog.textContent).toContain("This cannot be undone.");
+  expect(dialog.textContent).toContain("If no other attempts remain, eligible work can run again on the next sync.");
   expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
   await user.keyboard("{Escape}");
   expect(cancel).toHaveBeenCalledOnce();

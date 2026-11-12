@@ -35,7 +35,7 @@ fn failed_prepare_changes_neither_history_nor_files() -> Result<()> {
 }
 
 #[test]
-fn failed_final_commit_recovers_on_reopen_without_replaying_event() -> Result<()> {
+fn failed_final_commit_keeps_event_until_recovery_finishes_deletion() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
     let id = stopped(&f)?;
@@ -44,6 +44,15 @@ fn failed_final_commit_recovers_on_reopen_without_replaying_event() -> Result<()
     assert!(f.delete_run(&id).is_err());
     assert!(f.run_detail(&id).is_err());
     assert_eq!(f.snapshot()?.deletions.len(), 1);
+    assert!(f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            4,
+            "[AI] deletion",
+            "alice",
+            "body"
+        ))?
+        .is_none());
     db.execute_batch("DROP TRIGGER fail_final;")?;
     drop(db);
     drop(f);
@@ -58,7 +67,7 @@ fn failed_final_commit_recovers_on_reopen_without_replaying_event() -> Result<()
             "alice",
             "body"
         ))?
-        .is_none());
+        .is_some());
     f.delete_run(&id)?;
     Ok(())
 }

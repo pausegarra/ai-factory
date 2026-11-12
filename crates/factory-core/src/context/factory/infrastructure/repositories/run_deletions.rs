@@ -176,10 +176,18 @@ impl Store {
             record.targets.iter().all(|t| record.completed.contains(t)),
             "Cleanup targets incomplete"
         );
+        let event_id: String =
+            tx.query_row("SELECT event_id FROM runs WHERE id=?1", [id], |r| r.get(0))?;
         tx.execute("UPDATE dedup SET run_id='consumed' WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3) OR substr(key,1,length(?4))=?4 OR substr(key,1,length(?5))=?5",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:")])?;
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;
+        // Keep the event consumed while any attempt still owns it, including
+        // attempts whose cleanup is pending. Release it with the last deletion.
+        tx.execute(
+            "DELETE FROM dedup WHERE event_id=?1 AND NOT EXISTS(SELECT 1 FROM runs WHERE event_id=?1)",
+            [&event_id],
+        )?;
         tx.execute("DELETE FROM run_deletions WHERE run_id=?1", [id])?;
         tx.commit()?;
         Ok(())
