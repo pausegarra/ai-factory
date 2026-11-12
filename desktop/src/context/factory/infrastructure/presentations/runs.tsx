@@ -14,12 +14,13 @@ import {
 } from "@phosphor-icons/react";
 import type { Run, RunDetail, RunView, Snapshot } from "../../domain/types";
 import { TRIGGERS } from "../../domain/types";
+import type { LogViewMode } from "../../application/dto/run-log";
 import { factoryApi } from "../ipc/factory-api";
 import { orderRunSteps } from "../../application/run-step-order";
-import { LogReader } from "../../application/log-reader";
 import { LiveResource } from "../../application/live-resource";
 import { Badge, date, duration, Empty, Notice } from "./ui";
 import { DeleteRunDialog } from "./delete-run-dialog";
+import { RunLogOutput } from "./run-log-output";
 export function RunTable({
   runs,
   onSelect,
@@ -200,15 +201,7 @@ export function RunsPage({
     </>
   );
 }
-export function RunDetailPage({
-  id,
-  onBack,
-  onSelect,
-  onDeleted,
-  onUnavailable,
-  onDeletionStarted,
-  onDeletionSettled,
-}: {
+interface RunDetailPageProps {
   id: string;
   onBack: () => void;
   onSelect: (id: string) => void;
@@ -216,7 +209,21 @@ export function RunDetailPage({
   onUnavailable?: (id: string) => void;
   onDeletionStarted?: (id: string) => void;
   onDeletionSettled?: (id: string) => void;
-}) {
+}
+
+export function RunDetailPage(props: RunDetailPageProps) {
+  return <RunDetailContent key={props.id} {...props} />;
+}
+
+function RunDetailContent({
+  id,
+  onBack,
+  onSelect,
+  onDeleted,
+  onUnavailable,
+  onDeletionStarted,
+  onDeletionSettled,
+}: RunDetailPageProps) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [view, setView] = useState<RunView | null>(null);
   const [confirm, setConfirm] = useState(false);
@@ -229,10 +236,9 @@ export function RunDetailPage({
   const progress = useRef<HTMLParagraphElement>(null);
   const [error, setError] = useState("");
   const [nodeId, setNodeId] = useState("");
-  const [logs, setLogs] = useState("");
+  const [logView, setLogView] = useState<LogViewMode>("readable");
   const [busy, setBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
-  const logRef = useRef<HTMLPreElement>(null);
   const visibleNodes = useMemo(() => detail ? orderRunSteps(detail) : [], [detail]);
   useEffect(() => {
     mounted.current = true;
@@ -245,7 +251,7 @@ export function RunDetailPage({
         listen: (cb) =>
           factoryApi.subscribe((e) => {
             if (e.run_id === id && ["run_deleted", "run_deletion_pending", "run_deletion_failed"].includes(e.kind)) {
-              setDetail(null); setNodeId(""); setLogs(""); setConfirm(false);
+              setDetail(null); setNodeId(""); setConfirm(false);
               if (e.kind === "run_deleted" && !inFlight.current) callbacks.current.onUnavailable?.(id);
             }
             if (e.kind === "resync" || e.run_id === id) cb();
@@ -255,7 +261,7 @@ export function RunDetailPage({
       (next) => {
         setView(next);
         setDetail(next.state === "available" ? next.detail : null);
-        if (next.state !== "available") { setNodeId(""); setLogs(""); setConfirm(false); }
+        if (next.state !== "available") { setNodeId(""); setConfirm(false); }
         if (next.state === "missing" && !inFlight.current) callbacks.current.onUnavailable?.(id);
       },
       (e) => setError(String(e)),
@@ -272,34 +278,6 @@ export function RunDetailPage({
       return visibleNodes.find(node => node.id === currentId)?.id ?? visibleNodes[0]?.id ?? "";
     });
   }, [detail, visibleNodes]);
-  useEffect(() => {
-    setLogs("");
-    if (!nodeId || !detail) return;
-    const reader = new LogReader((offset) =>
-      factoryApi.logs(id, nodeId, offset),
-    );
-    const resource = new LiveResource(
-      {
-        listen: (cb) =>
-          factoryApi.subscribe((e) => {
-            if (
-              e.kind === "resync" ||
-              (e.run_id === id && (!e.node_id || e.node_id === nodeId))
-            )
-              cb();
-          }),
-        load: () => reader.read(),
-      },
-      setLogs,
-      () => { void detailResource.current?.refresh(); },
-    );
-    void resource.start();
-    return () => { reader.stop(); resource.stop(); };
-  }, [id, nodeId, !!detail]);
-  useEffect(() => {
-    if (autoScroll && logRef.current)
-      logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [logs, autoScroll]);
   async function action(kind: "cancel" | "retry") {
     setBusy(true);
     setError("");
@@ -321,7 +299,7 @@ export function RunDetailPage({
       const outcome = await factoryApi.deleteRun(id);
       if (outcome.state === "deleted") callbacks.current.onDeleted?.(id);
       else if (mounted.current) {
-        setView({ state: "deleting", deletion: outcome.deletion }); setDetail(null); setNodeId(""); setLogs("");
+          setView({ state: "deleting", deletion: outcome.deletion }); setDetail(null); setNodeId("");
       }
     } catch (e) {
       // A transport error does not establish whether the irreversible commit ran.
@@ -462,9 +440,15 @@ export function RunDetailPage({
             <span>{current?.session_id || "No session started"}</span>
           </div>
           {current?.error && <Notice>{current.error}</Notice>}
-          <pre className="log-output" ref={logRef}>
-            {logs || "Waiting for agent output…"}
-          </pre>
+          <RunLogOutput
+            key={JSON.stringify([id, current?.id ?? ""])}
+            runId={id}
+            nodeId={current?.id ?? ""}
+            mode={logView}
+            onModeChange={setLogView}
+            follow={autoScroll}
+            onReadError={() => { void detailResource.current?.refresh(); }}
+          />
           {current?.result != null && (
             <details className="result-details">
               <summary>Step result</summary>
