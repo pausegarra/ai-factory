@@ -134,6 +134,158 @@ it("blocks saving invalid schema text and keeps invalid draft on node selection"
   expect(screen.getByRole("alert").textContent).toMatch(/valid JSON/i);
 });
 
+const activationCheck = () => screen.getByRole("checkbox", { name: "Enable new_issue for Work (@worker)" }) as HTMLInputElement;
+const globalCheck = () => screen.getByRole("checkbox", { name: "Enable workflow globally for new_issue" }) as HTMLInputElement;
+
+it("keeps activation edits local, discards them and prevents dirty trigger switching", async () => {
+  const value = settings();
+  const dirty = vi.fn();
+  const save = vi.fn();
+  render(<FlowsPage settings={value} onSave={save} onDirtyChange={dirty} />);
+  fireEvent.click(activationCheck());
+  fireEvent.click(globalCheck());
+  expect(save).not.toHaveBeenCalled();
+  expect(value.flows[0].profile_activation).toBeUndefined();
+  expect(value.flows[0].enabled).toBe(true);
+  expect(dirty).toHaveBeenLastCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: /PR approved/ }));
+  expect(screen.getByRole("alert").textContent).toContain("Save or discard");
+  expect(activationCheck().checked).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+  expect(activationCheck().checked).toBe(true);
+  expect(globalCheck().checked).toBe(true);
+  expect(dirty).toHaveBeenLastCalledWith(false);
+  fireEvent.click(screen.getByRole("button", { name: /PR approved/ }));
+  expect(screen.getByRole("checkbox", { name: "Enable workflow globally for pr_approved" })).toBeTruthy();
+});
+
+it("saves activation for selected trigger and preserves latest other flows and node overrides", async () => {
+  const value = settings();
+  value.flows[0].nodes[0].token_overrides = { work: { agent: "codex", model: "model", effort: "" } };
+  const save = vi.fn().mockResolvedValue(undefined);
+  const view = render(<FlowsPage settings={value} onSave={save} />);
+  fireEvent.click(activationCheck());
+  const latest = structuredClone(value);
+  latest.flows[1].profile_activation = { work: false };
+  view.rerender(<FlowsPage settings={latest} onSave={save} />);
+  expect(activationCheck().checked).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].flows[0]).toEqual({ ...value.flows[0], profile_activation: { work: false } });
+  expect(save.mock.calls[0][0].flows.slice(1)).toEqual(latest.flows.slice(1));
+  await screen.findByText("Workflow saved. New tasks will use this version.");
+});
+
+it("retains activation draft after save failure and allows correction and retry", async () => {
+  const save = vi.fn().mockRejectedValueOnce(new Error("fixture save denied")).mockResolvedValue(undefined);
+  const dirty = vi.fn();
+  render(<FlowsPage settings={settings()} onSave={save} onDirtyChange={dirty} />);
+  fireEvent.click(activationCheck());
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("fixture save denied"));
+  expect(activationCheck().checked).toBe(false);
+  expect(dirty).toHaveBeenLastCalledWith(true);
+  expect(screen.queryByText("Workflow saved. New tasks will use this version.")).toBeNull();
+  fireEvent.click(globalCheck());
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1][0].flows[0]).toMatchObject({ enabled: false, profile_activation: { work: false } });
+});
+
+it("locks all native editor controls and draft mutations while save is pending", async () => {
+  let resolve!: () => void;
+  const save = vi.fn(() => new Promise<void>((done) => { resolve = done; }));
+  const busy = vi.fn();
+  const dirty = vi.fn();
+  render(<FlowsPage settings={settings()} onSave={save} onBusyChange={busy} onDirtyChange={dirty} />);
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  fireEvent.click(activationCheck());
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  await waitFor(() => expect(busy).toHaveBeenLastCalledWith(true));
+  const editor = screen.getByRole("group", { name: "Workflow editor" }) as HTMLFieldSetElement;
+  expect(editor.disabled).toBe(true);
+  expect(editor.getAttribute("aria-busy")).toBe("true");
+  expect((screen.getByRole("button", { name: "Saving…" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Discard" }) as HTMLButtonElement).disabled).toBe(true);
+  const user = userEvent.setup();
+  await user.click(globalCheck());
+  await user.click(activationCheck());
+  await user.click(screen.getByRole("button", { name: /PR approved/ }));
+  await user.click(screen.getByRole("button", { name: "Add step" }));
+  await user.click(screen.getByRole("button", { name: "Arrange flow" }));
+  await user.click(screen.getByRole("button", { name: "Delete step" }));
+  fireEvent.change(screen.getByLabelText("Result schema · JSON"), { target: { value: "{" } });
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "blocked" } });
+  fireEvent.click(screen.getByRole("button", { name: "Saving…" }));
+  expect(globalCheck().checked).toBe(true);
+  expect(activationCheck().checked).toBe(false);
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Plan");
+  expect((screen.getByLabelText("Result schema · JSON") as HTMLTextAreaElement).value).toContain('"type": "object"');
+  expect(save).toHaveBeenCalledTimes(1);
+  resolve();
+  await screen.findByText("Workflow saved. New tasks will use this version.");
+  expect(busy).toHaveBeenLastCalledWith(false);
+  expect(dirty).toHaveBeenLastCalledWith(false);
+});
+
+it("preserves schema and activation drafts on settings events, but reflects clean updates", () => {
+  const value = settings();
+  const save = vi.fn();
+  const view = render(<FlowsPage settings={value} onSave={save} />);
+  const latest = structuredClone(value);
+  latest.flows[0].profile_activation = { work: false };
+  view.rerender(<FlowsPage settings={latest} onSave={save} />);
+  expect(activationCheck().checked).toBe(false);
+  fireEvent.click(activationCheck());
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  fireEvent.change(screen.getByLabelText("Result schema · JSON"), { target: { value: "{" } });
+  view.rerender(<FlowsPage settings={value} onSave={save} />);
+  expect(activationCheck().checked).toBe(true);
+  expect((screen.getByLabelText("Result schema · JSON") as HTMLTextAreaElement).value).toBe("{");
+});
+
+it.each(["token", "poll interval"])("saves unrelated %s edits with a legacy dotted node ID and preserves activation", async (field) => {
+  const value = settings();
+  value.flows[0].nodes[0].id = "review.code";
+  value.flows[0].profile_activation = { work: false, removed: true };
+  value.flows[1].profile_activation = { work: true, removed: false };
+  const original = structuredClone(value);
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
+
+  fireEvent.change(screen.getByLabelText(field === "token" ? "Replace token" : "GitHub poll interval · seconds"), {
+    target: { value: field === "token" ? "replacement-fixture" : "30" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const saved = save.mock.calls[0][0] as Settings;
+  expect(saved.flows).toEqual(original.flows);
+  if (field === "token") expect(saved.token_profiles[0].token).toBe("replacement-fixture");
+  else expect(saved.poll_interval_seconds).toBe(30);
+  expect(value).toEqual(original);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("Settings validates latest activation metadata instead of stale draft flows", async () => {
+  const value = settings();
+  const save = vi.fn().mockResolvedValue(undefined);
+  const view = render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
+  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "owner" } });
+  const latest = structuredClone(value);
+  latest.flows[0].profile_activation = { work: false };
+  view.rerender(<SettingsPage settings={latest} onSave={save} appDir="/app" />);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0]).toMatchObject({ owners: ["owner"], flows: latest.flows });
+  latest.flows[0].profile_activation = { work: "bad" } as unknown as Record<string, boolean>;
+  view.rerender(<SettingsPage settings={structuredClone(latest)} onSave={save} appDir="/app" />);
+  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "other" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(screen.getByRole("alert").textContent).toMatch(/activation must contain booleans/);
+  expect(save).toHaveBeenCalledTimes(1);
+});
+
 it('requires a replacement token when changing an existing profile account', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(<SettingsPage settings={settings()} onSave={save} appDir="/app/data" />);

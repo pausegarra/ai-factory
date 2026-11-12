@@ -22,6 +22,7 @@ pub mod context {
                 pub mod legacy;
             }
             pub mod repositories {
+                pub(crate) mod admission;
                 pub mod secure_settings;
                 pub mod store;
             }

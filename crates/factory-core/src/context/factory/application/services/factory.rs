@@ -191,17 +191,7 @@ impl Factory {
             valid_repository(&e.repository) && e.number > 0 && valid_login(&e.actor),
             "Invalid event identity"
         );
-        let s = self.store.public_settings()?;
-        let flow = s
-            .flows
-            .iter()
-            .find(|f| f.id == e.trigger_id)
-            .context("Unknown trigger")?;
-        if !flow.enabled {
-            return Ok(None);
-        }
-        let flow = flow.for_actor(&e.actor, &s.token_profiles);
-        let id = self.store.insert(&e, &flow, 1, true)?;
+        let id = self.store.admit_event(&e)?;
         if let Some(id) = &id {
             self.emit("run_created", Some(id), None);
             self.wake.notify_one();
@@ -214,17 +204,11 @@ impl Factory {
         comments: &[u64],
         approved: bool,
     ) -> Result<Option<String>> {
-        let s = self.store.public_settings()?;
-        let flow = s
-            .flows
-            .iter()
-            .find(|f| f.id == "pr_approved")
-            .context("Approval flow missing")?;
-        if !flow.enabled {
-            return Ok(None);
-        }
-        let flow = flow.for_actor(&e.actor, &s.token_profiles);
-        let id = self.store.insert_approval(&e, &flow, comments, approved)?;
+        ensure!(
+            valid_repository(&e.repository) && e.number > 0 && valid_login(&e.actor),
+            "Invalid event identity"
+        );
+        let id = self.store.admit_approval(&e, comments, approved)?;
         if let Some(id) = &id {
             self.emit("run_created", Some(id), None);
             self.wake.notify_one();
@@ -233,6 +217,51 @@ impl Factory {
     }
     pub(crate) fn github(&self, token: &str) -> Result<Github> {
         Github::with_base(token, &self.github_base)
+    }
+    pub(crate) fn workflow_enabled_for(&self, trigger: &str, actor: &str) -> Result<bool> {
+        let settings = self.store.public_settings()?;
+        let flow = settings
+            .flows
+            .iter()
+            .find(|f| f.id == trigger)
+            .context("Unknown trigger")?;
+        Ok(flow.activation_for(actor, &settings.token_profiles) == ActivationState::Enabled)
+    }
+    pub(crate) fn enqueue_review_scan(
+        &self,
+        owner: &str,
+        reviewer: &str,
+        candidates: &[TriggerEvent],
+    ) -> Result<Vec<String>> {
+        ensure!(
+            valid_login(owner) && valid_login(reviewer),
+            "Invalid review scan identity"
+        );
+        for e in candidates {
+            ensure!(
+                e.trigger_id == "pr_review"
+                    && valid_repository(&e.repository)
+                    && e.number > 0
+                    && e.actor.eq_ignore_ascii_case(reviewer)
+                    && e.repository
+                        .split('/')
+                        .next()
+                        .is_some_and(|v| v.eq_ignore_ascii_case(owner)),
+                "Invalid review candidate identity"
+            );
+        }
+        let ids = self.store.admit_review_scan(
+            &owner.to_lowercase(),
+            &reviewer.to_lowercase(),
+            candidates,
+        )?;
+        for id in &ids {
+            self.emit("run_created", Some(id), None);
+        }
+        if !ids.is_empty() {
+            self.wake.notify_one();
+        }
+        Ok(ids)
     }
     pub fn set_run_status(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
         let mut r = self.store.detail(id)?.run;
@@ -286,22 +315,7 @@ impl Factory {
         Ok(())
     }
     pub fn retry(&self, id: &str) -> Result<String> {
-        let d = self.store.detail(id)?;
-        ensure!(
-            !["running", "queued"].contains(&d.run.status.as_str()),
-            "Cannot retry active run"
-        );
-        let settings = self.store.public_settings()?;
-        let f = settings
-            .flows
-            .iter()
-            .find(|f| f.id == d.flow.id)
-            .context("Flow missing")?
-            .for_actor(&d.event.actor, &settings.token_profiles);
-        let id = self
-            .store
-            .insert(&d.event, &f, d.run.attempt + 1, false)?
-            .unwrap();
+        let id = self.store.admit_retry(id)?;
         self.emit("run_created", Some(&id), None);
         self.wake.notify_one();
         Ok(id)

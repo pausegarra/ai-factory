@@ -14,7 +14,6 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   ArrowsOut,
-  Check,
   Code,
   FloppyDisk,
   GitBranch,
@@ -26,9 +25,10 @@ import {
 import type { Flow, FlowNode, Settings, Trigger } from "../../domain/types";
 import { TRIGGERS } from "../../domain/types";
 import { connectNodes, removeNode, validateFlow } from "../../domain/rules";
-import { Empty, Field, Notice, Toggle } from "./ui";
+import { Empty, Field, Notice } from "./ui";
 import { AgentModelFields } from "./agent-model-fields";
 import { TokenAgentFields } from "./token-agent-fields";
+import { WorkflowActivationFields } from "./workflow-activation-fields";
 import { arrangeFlow, displayFlow, flowConnections, hasAutomaticLayout } from "../../application/flow-layout";
 type AgentNode = Node<{ step: FlowNode; index: number }, "agent">;
 function AgentBox({ data, selected }: NodeProps<AgentNode>) {
@@ -68,10 +68,12 @@ export function FlowsPage({
   settings,
   onSave,
   onDirtyChange,
+  onBusyChange,
 }: {
   settings: Settings;
   onSave: (s: Settings) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [trigger, setTrigger] = useState<Trigger>("new_issue");
   const [draft, setDraft] = useState<Flow | null>(null);
@@ -94,12 +96,18 @@ export function FlowsPage({
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
   }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    onBusyChange?.(busy);
+    return () => onBusyChange?.(false);
+  }, [busy, onBusyChange]);
   function update(value: Flow) {
+    if (busy) return;
     latestFlow.current = value;
     setDraft(value);
     setSaved(false);
   }
   function updateTopology(next: Flow) {
+    if (busy) return;
     if (hasAutomaticLayout(latestFlow.current)) {
       update(arrangeFlow(next));
       setLayoutRevision((value) => value + 1);
@@ -107,6 +115,7 @@ export function FlowsPage({
     setSelectedEdges([]);
   }
   function arrange() {
+    if (busy) return;
     try {
       update(arrangeFlow(flow));
       setLayoutRevision((value) => value + 1);
@@ -114,6 +123,7 @@ export function FlowsPage({
     } catch (error) { setError((error as Error).message); }
   }
   function updateNode(patch: Partial<FlowNode>) {
+    if (busy) return;
     update({
       ...flow,
       nodes: flow.nodes.map((n) =>
@@ -122,6 +132,7 @@ export function FlowsPage({
     });
   }
   function select(id: string) {
+    if (busy) return;
     setSelectedEdges([]);
     setSelected(id);
     const n = flow.nodes.find((n) => n.id === id);
@@ -131,6 +142,7 @@ export function FlowsPage({
     setError("");
   }
   function switchTrigger(id: Trigger) {
+    if (busy) return;
     if (dirty && id !== trigger) {
       setError("Save or discard your changes before switching triggers.");
       return;
@@ -144,6 +156,7 @@ export function FlowsPage({
     setSaved(false);
   }
   function add() {
+    if (busy) return;
     const id = `step_${crypto.randomUUID().slice(0, 8)}`;
     const next: FlowNode = {
       id,
@@ -162,6 +175,7 @@ export function FlowsPage({
     setSchemaText(JSON.stringify(next.result_schema, null, 2));
   }
   function connect(c: Connection) {
+    if (busy) return;
     if (!c.source || !c.target) return;
     try {
       updateTopology(connectNodes(latestFlow.current, c.source, c.target));
@@ -171,6 +185,7 @@ export function FlowsPage({
     }
   }
   async function save() {
+    if (busy) return;
     for (const n of flow.nodes) {
       if (schemas[n.id] !== undefined) {
         try {
@@ -235,6 +250,7 @@ export function FlowsPage({
               className="button button-secondary"
               disabled={busy}
               onClick={() => {
+                if (busy) return;
                 setDraft(null);
                 setSchemas({});
                 setSelected("");
@@ -260,6 +276,7 @@ export function FlowsPage({
           Workflow saved. New tasks will use this version.
         </Notice>
       )}
+      <fieldset disabled={busy} className="flow-editor" aria-label="Workflow editor" aria-busy={busy}>
       <div className="trigger-tabs">
         {Object.entries(TRIGGERS).map(([id, t], i) => (
           <button
@@ -281,6 +298,7 @@ export function FlowsPage({
           </button>
         ))}
       </div>
+      <WorkflowActivationFields flow={flow} profiles={settings.token_profiles} onChange={update} />
       <section className={`panel flow-workspace ${node ? "inspecting" : ""}`}>
         <div className="flow-toolbar">
           <div>
@@ -311,8 +329,8 @@ export function FlowsPage({
                 edges={edges}
                 nodeTypes={nodeTypes}
                 onNodeClick={(_, n) => select(n.id)}
-                onPaneClick={() => { setSelected(""); setSelectedEdges([]); }}
-                onEdgeClick={() => setSelected("")}
+                onPaneClick={() => { if (busy) return; setSelected(""); setSelectedEdges([]); }}
+                onEdgeClick={() => { if (!busy) setSelected(""); }}
                 onConnect={connect}
                 isValidConnection={(connection) => {
                   if (!connection.source || !connection.target || !flow.nodes.some((n) => n.id === connection.source) || !flow.nodes.some((n) => n.id === connection.target)) return false;
@@ -320,6 +338,7 @@ export function FlowsPage({
                   try { connectNodes(flow, connection.source, connection.target); return true; } catch { return false; }
                 }}
                 onNodesChange={(changes) => {
+                  if (busy) return;
                   const current = latestFlow.current;
                   let next = current;
                   for (const change of changes) {
@@ -341,6 +360,7 @@ export function FlowsPage({
                   }
                 }}
                 onEdgesChange={(changes) => {
+                  if (busy) return;
                   setSelectedEdges((previous) => {
                     const next = new Set(previous);
                     for (const change of changes) {
@@ -398,7 +418,7 @@ export function FlowsPage({
                 <button
                   className="icon-button"
                   aria-label="Close inspector"
-                  onClick={() => setSelected("")}
+                  onClick={() => { if (!busy) setSelected(""); }}
                 >
                   <X size={18} />
                 </button>
@@ -456,6 +476,7 @@ export function FlowsPage({
                     rows={6}
                     value={schemaText}
                     onChange={(e) => {
+                      if (busy) return;
                       setSchemaText(e.target.value);
                       setSchemas((v) => ({ ...v, [selected]: e.target.value }));
                       setDraft(flow);
@@ -477,6 +498,7 @@ export function FlowsPage({
                 <button
                   className="button button-danger w-full"
                   onClick={() => {
+                    if (busy) return;
                     updateTopology(removeNode(flow, node.id));
                     setSelected("");
                   }}
@@ -503,20 +525,9 @@ export function FlowsPage({
               }
             />
           </label>
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={flow.enabled}
-              onChange={(e) => update({ ...flow, enabled: e.target.checked })}
-            />
-            Trigger enabled
-          </label>
         </div>
       </section>
-      <p className="footnote">
-        <Check size={14} />
-        Changes apply to new runs. Active tasks keep their original workflow.
-      </p>
+      </fieldset>
     </>
   );
 }

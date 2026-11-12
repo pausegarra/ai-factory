@@ -10,7 +10,7 @@ import {
   Trash,
 } from "@phosphor-icons/react";
 import type { Settings } from "../../domain/types";
-import { validateSettings } from "../../domain/rules";
+import { validateFlowActivation, validateSettings } from "../../domain/rules";
 import { factoryApi } from "../ipc/factory-api";
 import { LegacyImport } from "./legacy-import";
 import { Field, Notice, Toggle } from "./ui";
@@ -49,7 +49,8 @@ export function SettingsPage({
       has_token: settings.token_profiles.some((saved) => saved.id === profile.id && saved.account.toLowerCase() === profile.account.toLowerCase() && saved.has_token),
       token: profile.token?.trim() || undefined,
     }));
-    const errors = validateSettings({...draft, token_profiles});
+    const next = { ...draft, token_profiles, flows: settings.flows };
+    const errors = [...validateSettings(next), ...next.flows.flatMap(validateFlowActivation)];
     if (errors.length) {
       setError(errors.join(" "));
       return;
@@ -57,11 +58,6 @@ export function SettingsPage({
     setBusy(true);
     setError("");
     try {
-      const next = {
-        ...draft,
-        token_profiles,
-        flows: settings.flows,
-      };
       await onSave(next);
       setDraft({
         ...next,

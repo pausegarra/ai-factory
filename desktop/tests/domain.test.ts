@@ -4,6 +4,8 @@ import {
   connectNodes,
   removeNode,
   validateSettings,
+  activationStatus,
+  profilePreference,
 } from "../src/context/factory/domain/rules";
 import type { Flow, Settings } from "../src/context/factory/domain/types";
 const node = (id: string, depends_on: string[] = []) => ({
@@ -25,6 +27,29 @@ const flow = (): Flow => ({
   nodes: [node("plan"), node("build", ["plan"])],
 });
 describe("workflow editing", () => {
+  it.each([true, false])("gives global activation %s precedence over account preferences", (enabled) => {
+    for (const preference of [true, false]) {
+      const value = { ...flow(), enabled, profile_activation: { work: preference } };
+      expect(profilePreference(value, "work")).toBe(preference);
+      expect(activationStatus(value, "work")).toBe(!enabled ? "Disabled globally" : preference ? "Enabled" : "Disabled for this account");
+    }
+  });
+  it("defaults absent preferences and ignores inherited properties", () => {
+    const value = flow();
+    expect(profilePreference(value, "constructor")).toBe(true);
+    value.profile_activation = Object.create({ work: false });
+    expect(profilePreference(value, "work")).toBe(true);
+    value.profile_activation = JSON.parse('{"constructor":false,"__proto__":false}');
+    expect(profilePreference(value, "constructor")).toBe(false);
+    expect(profilePreference(value, "__proto__")).toBe(false);
+    expect(validateFlow(value)).toEqual([]);
+  });
+  it.each([null, [], false, "bad", { work: "false" }, { "../bad": false }, { ".": true }, { "..": false }, { "": true }])("rejects malformed activation map %j", (activation) => {
+    expect(validateFlow({ ...flow(), profile_activation: activation } as unknown as Flow).join(" ")).toMatch(/activation/i);
+  });
+  it("rejects non boolean global activation", () => {
+    expect(validateFlow({ ...flow(), enabled: "false" } as unknown as Flow)).toContain("Workflow activation must be a boolean.");
+  });
   it("validates optional per-token agent configurations", () => {
     const value = flow();
     value.nodes[0].token_overrides = { work: { agent: "opencode", model: "", effort: "high" } };

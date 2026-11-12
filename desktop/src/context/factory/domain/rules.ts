@@ -1,6 +1,32 @@
 import type { Flow, Settings } from "./types";
-export function validateFlow(flow: Flow): string[] {
+export type ActivationStatus = "Enabled" | "Disabled globally" | "Disabled for this account";
+export function profilePreference(flow: Flow, profileId: string): boolean {
+  const map = flow.profile_activation;
+  return map && Object.prototype.hasOwnProperty.call(map, profileId) ? map[profileId] : true;
+}
+export function activationStatus(flow: Flow, profileId: string): ActivationStatus {
+  if (!flow.enabled) return "Disabled globally";
+  return profilePreference(flow, profileId) ? "Enabled" : "Disabled for this account";
+}
+export function validateFlowActivation(flow: Flow): string[] {
   const errors: string[] = [];
+  if (typeof flow.enabled !== "boolean") errors.push("Workflow activation must be a boolean.");
+  const activation = flow.profile_activation;
+  if (activation !== undefined) {
+    if (!activation || typeof activation !== "object" || Array.isArray(activation)) {
+      errors.push("Workflow profile activation must be an object.");
+    } else {
+      for (const [id, enabled] of Object.entries(activation)) {
+        if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(id) || id === "." || id === "..")
+          errors.push("Invalid workflow activation profile identifier.");
+        if (typeof enabled !== "boolean") errors.push("Workflow profile activation must contain booleans.");
+      }
+    }
+  }
+  return errors;
+}
+export function validateFlow(flow: Flow): string[] {
+  const errors = validateFlowActivation(flow);
   const ids = new Set(flow.nodes.map((n) => n.id));
   if (
     flow.max_parallel !== undefined &&

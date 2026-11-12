@@ -59,6 +59,30 @@ triggers:
 }
 
 #[test]
+fn legacy_config_resets_profile_activation() {
+    let tmp = tempfile::tempdir().unwrap();
+    config(tmp.path());
+    let mut current = Settings::default();
+    for flow in &mut current.flows {
+        flow.profile_activation.insert("work".into(), false);
+        flow.profile_activation.insert("orphan".into(), false);
+    }
+    let batch = legacy::read_legacy(
+        Some(&tmp.path().join("config.yaml")),
+        None,
+        &tmp.path().join("app"),
+        &current,
+    )
+    .unwrap();
+    assert!(batch
+        .settings
+        .unwrap()
+        .flows
+        .iter()
+        .all(|f| f.profile_activation.is_empty()));
+}
+
+#[test]
 fn imports_mapping_nodes_yaml_anchors_and_relative_files_without_tokens() {
     let tmp = tempfile::tempdir().unwrap();
     config(tmp.path());
@@ -319,13 +343,52 @@ fn factory_ingests_legacy_history_idempotently_and_keeps_secrets_private() {
     drop(c);
     let root = tempfile::tempdir().unwrap();
     let f = common::open(root.path().into()).unwrap();
+    let mut settings = f.settings().unwrap();
+    settings.flows[0]
+        .profile_activation
+        .insert("orphan".into(), false);
+    f.save_settings(settings).unwrap();
+    let local = f
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            99,
+            "[AI] local",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    let before = serde_json::to_value(f.run_detail(&local).unwrap()).unwrap();
     let report = f.import_legacy(None, Some(database.clone())).unwrap();
     assert_eq!(report.runs_imported, 1);
     assert!(report.archive_path.is_some());
-    assert_eq!(f.snapshot().unwrap().metrics.total, 1);
+    assert_eq!(f.snapshot().unwrap().metrics.total, 2);
+    assert_eq!(
+        f.settings().unwrap().flows[0]
+            .profile_activation
+            .get("orphan"),
+        Some(&false)
+    );
+    assert_eq!(
+        serde_json::to_value(f.run_detail(&local).unwrap()).unwrap(),
+        before
+    );
+    let imported = f
+        .snapshot()
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|r| r.id != local)
+        .unwrap();
+    assert!(f
+        .run_detail(&imported.id)
+        .unwrap()
+        .flow
+        .profile_activation
+        .is_empty());
     let again = f.import_legacy(None, Some(database)).unwrap();
     assert_eq!(again.runs_imported, 0);
-    assert_eq!(f.snapshot().unwrap().metrics.total, 1);
+    assert_eq!(f.snapshot().unwrap().metrics.total, 2);
     assert!(f
         .enqueue(factory_core::TriggerEvent::issue(
             "acme/repo",

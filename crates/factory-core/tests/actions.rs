@@ -269,6 +269,22 @@ async fn execute_merge(e: &TriggerEvent, steps: Vec<Step>) -> (factory_core::Res
     (outcome, script)
 }
 
+fn admit_then_disable(f: &Factory, e: &TriggerEvent) -> String {
+    let id = f.enqueue(e.clone()).unwrap().unwrap();
+    let before = serde_json::to_value(f.run_detail(&id).unwrap()).unwrap();
+    let mut s = f.settings().unwrap();
+    for flow in &mut s.flows {
+        flow.enabled = false;
+        flow.profile_activation.insert("alice".into(), false);
+    }
+    f.save_settings(s).unwrap();
+    assert_eq!(
+        serde_json::to_value(f.run_detail(&id).unwrap()).unwrap(),
+        before
+    );
+    id
+}
+
 #[tokio::test]
 async fn merge_deletes_only_source_after_confirmation_for_each_target() {
     for target in ["main", "develop"] {
@@ -287,7 +303,11 @@ async fn merge_deletes_only_source_after_confirmation_for_each_target() {
             Reply::Json(200, reference("feature", &e.head_sha)),
         ));
         steps.push(Step::new("DELETE", SOURCE_DELETE, Reply::Raw(204, vec![])));
-        let (outcome, script) = execute_merge(&e, steps).await;
+        let script = Script::start(steps).await;
+        let (dir, f) = factory(&script.base);
+        let id = admit_then_disable(&f, &e);
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        let outcome = merge_attempt(&api, &f, &e, dir.path(), &id).await;
         outcome.unwrap();
         script.assert_done();
         assert_eq!(
@@ -379,8 +399,9 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
     let (dir, f) = factory(&base);
     let api = Github::with_base("alice-token", &base).unwrap();
     let mut r = result(json!({"review":{"event":"REQUEST_CHANGES","body":"Fix bug"}}));
+    let id = admit_then_disable(&f, &e);
     r["status"] = json!("blocked");
-    api.publish_actions(&f, &e, "attempt-1", "review", dir.path(), &r)
+    api.publish_actions(&f, &e, &id, "review", dir.path(), &r)
         .await
         .unwrap();
     api.publish_actions(&f, &e, "attempt-2", "review", dir.path(), &r)
@@ -426,10 +447,11 @@ async fn publish_adopts_matching_existing_stable_branch_before_any_push() {
     s.commands.git = git_path.to_string_lossy().into();
     f.save_settings(s).unwrap();
     let api = Github::with_base("alice-token", &base).unwrap();
+    let id = admit_then_disable(&f, &e);
     api.publish_actions(
         &f,
         &e,
-        "attempt-2",
+        &id,
         "publish",
         &ws,
         &result(json!({"publish":{"title":"PR","body":"Closes #1","base":"main"}})),

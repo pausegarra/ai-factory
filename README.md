@@ -36,6 +36,10 @@ On first launch after upgrading, existing plaintext tokens are written to the na
 
 Each trigger has its own editable DAG and enabled switch. Nodes wait for successful dependencies; blocked or failed nodes prevent descendants from executing. Writers are serialized within each run. Per-flow node parallelism is configurable. The default global limit is **4 runs**, shared by all triggers; additional tasks wait in SQLite.
 
+Workflows provides a global switch and a preference for each GitHub profile for the selected trigger. New runs are allowed only when both are enabled. Profiles without a saved preference are allowed by default; the global switch always wins. Save workflow applies the draft; Discard restores saved settings. These controls affect this installation, not GitHub Actions. Activation uses the issue author for new issues, the source issue author for approved PRs, and the requested reviewer for reviews.
+
+Preferences follow the stable profile ID, not its token value, account label or row position. Rotating a token preserves preferences. Removed profiles appear unavailable, with removable preferences; a new profile ID does not inherit an old exclusion. Activation still requires the existing allowlists, credentials, identity and permission checks.
+
 Model menus are loaded from the selected installed CLI. Codex supplies its available models and reasoning efforts; OpenCode 2 supplies enabled provider models and their variants. Refresh reloads the catalog. Changing agent clears model and effort; changing model clears effort. Discovery failures keep saved values visible and allow retry. An empty model keeps the CLI default.
 
 Dependencies are edited only on the canvas: drag a step’s output dot to another step’s input dot. Each connection is one dependency; select an arrow and press Delete to remove it. Parallel dependents display as separate branches. Arrange flow restores a dependency-based layout; manually moved node positions are preserved.
@@ -51,6 +55,10 @@ History, session logs, structured results and project memory stay outside tempor
 ## Live operations
 
 Overview and Runs show queued, active and historical tasks. Run details include step states, session identity, results and live logs, with cancel/retry actions. Rust emits Tauri events for creation, lifecycle changes and output. The UI subscribes before reading its initial snapshot and repeats reads if events arrive during a request. Event lag forces resynchronization.
+
+Disabling a workflow applies to new runs and explicit retries, including Sync now and periodic discovery. A disabled retry returns an error without creating an attempt. Already queued or running tasks continue with their immutable snapshots, including their own GitHub actions and review correction rounds. Use Cancel to stop an existing task.
+
+Disabled discovery skips the corresponding credential lookup and GitHub queries. It does not consume issues, approvals, OK comments or review request observations. Saving and final admission share a transaction boundary: if disabling is saved before admission, even an in-flight discovery response cannot consume the event. Read requests already in flight need not be cancelled. Reenabling discovers work that remains eligible; it does not replay closed work or reconstruct review withdrawal/rerequest transitions never observed while disabled. Existing deduplication and consumed approvals remain intact.
 
 Closing the window leaves Factory in the system tray. Choose **Quit AI Factory** from the tray to stop the engine and child processes. Startup at login uses each OS's native startup mechanism and opens in the background.
 
@@ -95,6 +103,8 @@ All app-owned data lives in the OS application data directory:
 This includes `factory.sqlite3`, settings, temporary workspaces, persistent project memory, prompts, results and session logs. Settings shows the exact path. Factory clones directly from GitHub and does not modify local repositories.
 
 Settings provides an explicit legacy YAML and/or SQLite import. The source database opens read-only. Available history, flow snapshots, logs, memory, PR provenance and trigger/comment/review deduplication are preserved. Legacy pending or active work is imported as interrupted for review before retrying. Imports are idempotent and report missing data with warnings and an archive of source tables. Tokens previously managed through `gh` must be added in Settings.
+
+Old settings without profile activation preferences allow profiles under their existing global switch. Importing legacy configuration resets those preferences to this default while respecting the imported global setting. Importing only history preserves current preferences and existing snapshots; historical snapshots are never backfilled with current preferences.
 
 The previous daemon and its Python dependencies have been removed. The importer is implemented entirely in Rust; importing old configuration or history does not require Python.
 
