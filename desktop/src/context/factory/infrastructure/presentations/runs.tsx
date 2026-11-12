@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   ArrowLeft,
@@ -15,6 +15,7 @@ import {
 import type { Run, RunDetail, RunView, Snapshot } from "../../domain/types";
 import { TRIGGERS } from "../../domain/types";
 import { factoryApi } from "../ipc/factory-api";
+import { orderRunSteps } from "../../application/run-step-order";
 import { LogReader } from "../../application/log-reader";
 import { LiveResource } from "../../application/live-resource";
 import { Badge, date, duration, Empty, Notice } from "./ui";
@@ -232,6 +233,7 @@ export function RunDetailPage({
   const [busy, setBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const logRef = useRef<HTMLPreElement>(null);
+  const visibleNodes = useMemo(() => detail ? orderRunSteps(detail) : [], [detail]);
   useEffect(() => {
     mounted.current = true;
     setDetail(null);
@@ -263,9 +265,13 @@ export function RunDetailPage({
     return () => { mounted.current = false; resource.stop(); };
   }, [id]);
   useEffect(() => {
-    if (detail && !detail.nodes.some((n) => n.id === nodeId))
-      setNodeId(detail.run.current_step || detail.nodes[0]?.id || "");
-  }, [detail, nodeId]);
+    if (!detail) return;
+    setNodeId(selectedId => {
+      if (visibleNodes.some(node => node.id === selectedId)) return selectedId;
+      const currentId = detail.run.current_step;
+      return visibleNodes.find(node => node.id === currentId)?.id ?? visibleNodes[0]?.id ?? "";
+    });
+  }, [detail, visibleNodes]);
   useEffect(() => {
     setLogs("");
     if (!nodeId || !detail) return;
@@ -358,6 +364,7 @@ export function RunDetailPage({
   const active = ["running", "queued"].includes(run.status);
   const eligible = ["succeeded", "failed", "blocked", "cancelled", "interrupted"].includes(run.status);
   const current = detail.nodes.find((n) => n.id === nodeId);
+  const uniqueNodeIds = new Set(visibleNodes.map(node => node.id)).size === visibleNodes.length;
   return (
     <>
       <button className="text-button mb-6" onClick={onBack}>
@@ -398,12 +405,12 @@ export function RunDetailPage({
         <section className="panel timeline">
           <div className="panel-heading">
             <h2>Workflow steps</h2>
-            <span className="muted">{detail.nodes.length}</span>
+            <span className="muted">{visibleNodes.length}</span>
           </div>
           <div className="timeline-list">
-            {detail.nodes.map((node, i) => (
+            {visibleNodes.map((node, i) => (
               <button
-                key={node.id}
+                key={uniqueNodeIds ? node.id : i}
                 className={`timeline-item ${node.id === nodeId ? "selected" : ""}`}
                 onClick={() => setNodeId(node.id)}
               >
