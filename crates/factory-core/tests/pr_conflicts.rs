@@ -40,6 +40,7 @@ struct Fixture {
     base_sha: String,
     remote: PathBuf,
     writes: Arc<Mutex<Vec<String>>>,
+    reads: Arc<Mutex<Vec<String>>>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -85,14 +86,19 @@ impl Fixture {
         let api_base = format!("http://{}", listener.local_addr().unwrap());
         let writes = Arc::new(Mutex::new(Vec::new()));
         let requests = writes.clone();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let read_requests = reads.clone();
         let repo = remote.clone();
         let flags = dir.path().to_path_buf();
+        let approved_head = head_sha.clone();
         let server = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let repo = repo.clone();
                 let requests = requests.clone();
+                let read_requests = read_requests.clone();
                 let stale_base = stale_base.clone();
                 let flags = flags.clone();
+                let approved_head = approved_head.clone();
                 tokio::spawn(async move {
                     let mut raw = vec![0; 65536];
                     let n = socket.read(&mut raw).await.unwrap();
@@ -109,6 +115,11 @@ impl Fixture {
                             && path == "/repos/acme/repo/pulls/5/merge"
                             && flags.join("allow-merge").exists()
                         {
+                            let advance = flags.join("advance-base-on-merge");
+                            if advance.exists() {
+                                let merged_sha = std::fs::read_to_string(advance).unwrap();
+                                git(&repo, &["update-ref", "refs/heads/main", merged_sha.trim()]);
+                            }
                             std::fs::write(flags.join("merged"), "").unwrap();
                             (200, json!({"merged":true}))
                         } else if method == "DELETE"
@@ -137,31 +148,62 @@ impl Fixture {
                             200,
                             json!({"full_name":"acme/repo","default_branch":default}),
                         )
-                    } else if path == "/repos/acme/repo/pulls/5" {
-                        let sha = git(&repo, &["rev-parse", "refs/heads/feature"]);
-                        let head_repo = if flags.join("fork").exists() {
+                    } else if path == "/repos/acme/repo/pulls/5"
+                        || path == "/repos/acme/repo/pulls/6"
+                    {
+                        read_requests.lock().unwrap().push(path.into());
+                        let second = path.ends_with("/6");
+                        let number = if second { 6 } else { 5 };
+                        let branch = if second { "feature-two" } else { "feature" };
+                        let reference = format!("refs/heads/{branch}");
+                        let output = std::process::Command::new("git")
+                            .current_dir(&repo)
+                            .args(["rev-parse", "--verify", &reference])
+                            .output()
+                            .unwrap();
+                        let sha = if output.status.success() {
+                            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+                        } else {
+                            assert!(
+                                !second && flags.join("merged").exists(),
+                                "Unmerged fixture PR lost its head reference"
+                            );
+                            approved_head.clone()
+                        };
+                        let head_repo = if !second && flags.join("fork").exists() {
                             "other/repo"
                         } else {
                             "acme/repo"
                         };
-                        let base_ref = if flags.join("source-is-target").exists() {
+                        let base_ref = if !second && flags.join("source-is-target").exists() {
                             "feature"
                         } else {
                             "main"
                         };
-                        let merged = flags.join("merged").exists();
+                        let merged = !second && flags.join("merged").exists();
                         (
                             200,
-                            json!({"number":5,"state":if merged {"closed"}else{"open"},"merged":merged,"title":"PR","html_url":"https://github.com/acme/repo/pull/5","user":{"login":"alice"},"base":{"ref":base_ref,"sha":stale_base,"repo":{"full_name":"acme/repo"}},"head":{"ref":"feature","sha":sha,"repo":{"full_name":head_repo}}}),
+                            json!({"number":number,"state":if merged {"closed"}else{"open"},"merged":merged,"title":"PR","html_url":format!("https://github.com/acme/repo/pull/{number}"),"user":{"login":"alice"},"base":{"ref":base_ref,"sha":stale_base,"repo":{"full_name":"acme/repo"}},"head":{"ref":branch,"sha":sha,"repo":{"full_name":head_repo}}}),
                         )
                     } else if let Some(branch) =
                         path.strip_prefix("/repos/acme/repo/git/ref/heads/")
                     {
-                        let sha = git(&repo, &["rev-parse", &format!("refs/heads/{branch}")]);
-                        (
-                            200,
-                            json!({"ref":format!("refs/heads/{branch}"),"object":{"type":"commit","sha":sha}}),
-                        )
+                        read_requests.lock().unwrap().push(path.into());
+                        let reference = format!("refs/heads/{branch}");
+                        let output = std::process::Command::new("git")
+                            .current_dir(&repo)
+                            .args(["rev-parse", "--verify", &reference])
+                            .output()
+                            .unwrap();
+                        if output.status.success() {
+                            let sha = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+                            (
+                                200,
+                                json!({"ref":reference,"object":{"type":"commit","sha":sha}}),
+                            )
+                        } else {
+                            (404, json!({"message":"Reference not found"}))
+                        }
                     } else {
                         (404, json!({"message":"Unknown fixture route"}))
                     };
@@ -237,6 +279,7 @@ sys.exit(code)
             base_sha,
             remote,
             writes,
+            reads,
             server,
         }
     }
@@ -261,6 +304,50 @@ printf '%s' '{{"status":"succeeded","summary":"local repair done","artifacts":[]
         );
     }
 
+    fn add_second_approval(&self) -> String {
+        let source = self.dir.path().join("source");
+        git(&source, &["checkout", "main"]);
+        git(
+            &source,
+            &[
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "feature",
+                "-m",
+                "fixture merge",
+            ],
+        );
+        let merged = git(&source, &["rev-parse", "HEAD"]);
+        git(
+            &self.remote,
+            &[
+                "fetch",
+                source.to_str().unwrap(),
+                "main:refs/fixture/merged",
+            ],
+        );
+        git(
+            &self.remote,
+            &["update-ref", "refs/heads/feature-two", &self.event.head_sha],
+        );
+        git(
+            &self.remote,
+            &["update-ref", "refs/pull/6/head", &self.event.head_sha],
+        );
+        std::fs::write(self.dir.path().join("advance-base-on-merge"), &merged).unwrap();
+        merged
+    }
+
+    fn second_event(&self) -> TriggerEvent {
+        let mut event = self.event.clone();
+        event.number = 6;
+        event.event_id = format!("approval:6:{}", event.head_sha);
+        event.url = "https://github.com/acme/repo/pull/6".into();
+        event
+    }
+
     async fn run(&self) -> RunDetail {
         let id = self.factory.enqueue(self.event.clone()).unwrap().unwrap();
         self.factory.start();
@@ -282,6 +369,43 @@ printf '%s' '{{"status":"succeeded","summary":"local repair done","artifacts":[]
         .await
         .unwrap()
     }
+}
+
+fn run_memory(fixture: &Fixture, id: &str) -> PathBuf {
+    fixture
+        .dir
+        .path()
+        .join("app/memory/acme/repo/runs")
+        .join(id)
+}
+
+async fn wait_for_started(fixture: &Fixture, id: &str) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !run_memory(fixture, id).join("started").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn blocked_approval_agent() -> &'static str {
+    r#"
+printf '%s' "$AI_FACTORY_PR_BASE_SHA" > "$AI_FACTORY_MEMORY_DIR/base"
+printf '%s' "$AI_FACTORY_PR_HEAD_SHA" > "$AI_FACTORY_MEMORY_DIR/head"
+git rev-parse refs/ai-factory/base > "$AI_FACTORY_MEMORY_DIR/base-ref"
+git rev-parse refs/ai-factory/head > "$AI_FACTORY_MEMORY_DIR/head-ref"
+touch "$AI_FACTORY_MEMORY_DIR/started"
+if [ "$AI_FACTORY_PR_HEAD_REF" = feature ]; then
+  while [ ! -f "$AI_FACTORY_MEMORY_DIR/release" ]; do sleep 0.02; done
+fi
+"#
+}
+
+fn one_node_approval_flow(fixture: &Fixture) {
+    let mut settings = fixture.factory.settings().unwrap();
+    settings.flows[1].nodes.truncate(1);
+    fixture.factory.save_settings(settings).unwrap();
 }
 
 fn stale_base_for_event(source: &Path) -> String {
@@ -686,4 +810,176 @@ async fn preparation_rejects_base_ref_moving_between_api_read_and_fetch() {
         .contains("refs changed during workspace preparation"));
     assert!(d.nodes.iter().all(|n| n.started_at.is_none()));
     assert!(f.writes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn queued_approval_prepares_live_base_only_after_previous_merge_and_cleanup() {
+    let f = Fixture::new().await;
+    let merged = f.add_second_approval();
+    std::fs::write(f.dir.path().join("allow-merge"), "").unwrap();
+    std::fs::write(f.dir.path().join("allow-delete"), "").unwrap();
+    f.agent(blocked_approval_agent(), json!({}));
+
+    let first = f.factory.enqueue(f.event.clone()).unwrap().unwrap();
+    f.factory.start();
+    wait_for_started(&f, &first).await;
+    one_node_approval_flow(&f);
+    let second = f.factory.enqueue(f.second_event()).unwrap().unwrap();
+    let queued = f.factory.run_detail(&second).unwrap();
+    assert_eq!(queued.run.status, "queued");
+    assert!(queued.run.started_at.is_none() && queued.run.workspace.is_none());
+    assert!(!run_memory(&f, &second).join("started").exists());
+    assert!(!f
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|path| path == "/repos/acme/repo/pulls/6"));
+    let commands = std::fs::read_to_string(f.dir.path().join("remote-commands.jsonl")).unwrap();
+    assert!(!commands.contains("refs/pull/6/head"));
+
+    std::fs::write(run_memory(&f, &first).join("release"), "").unwrap();
+    let first_result = f.wait(&first).await;
+    let second_result = f.wait(&second).await;
+    f.factory.shutdown().await;
+
+    assert_eq!(first_result.run.status, "succeeded", "{first_result:?}");
+    assert_eq!(second_result.run.status, "succeeded", "{second_result:?}");
+    assert_eq!(
+        std::fs::read_to_string(run_memory(&f, &first).join("base"))
+            .unwrap()
+            .trim(),
+        f.base_sha
+    );
+    assert_eq!(
+        std::fs::read_to_string(run_memory(&f, &second).join("base"))
+            .unwrap()
+            .trim(),
+        merged
+    );
+    assert_eq!(
+        std::fs::read_to_string(run_memory(&f, &second).join("base-ref"))
+            .unwrap()
+            .trim(),
+        merged
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            std::fs::read_to_string(run_memory(&f, id).join("head"))
+                .unwrap()
+                .trim(),
+            f.event.head_sha
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_memory(&f, id).join("head-ref"))
+                .unwrap()
+                .trim(),
+            f.event.head_sha
+        );
+    }
+    assert_eq!(git(&f.remote, &["rev-parse", "refs/heads/main"]), merged);
+    assert_eq!(
+        *f.writes.lock().unwrap(),
+        vec![
+            "PUT /repos/acme/repo/pulls/5/merge",
+            "DELETE /repos/acme/repo/git/refs/heads/feature"
+        ]
+    );
+    assert!(!f
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|write| write.contains("/pulls/6/merge") || write.contains("feature-two")));
+    let commands = std::fs::read_to_string(f.dir.path().join("remote-commands.jsonl")).unwrap();
+    assert!(commands.contains("refs/pull/6/head"));
+}
+
+#[tokio::test]
+async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
+    let f = Fixture::new().await;
+    let moved_head = f.add_second_approval();
+    one_node_approval_flow(&f);
+    f.agent(blocked_approval_agent(), json!({}));
+    let first = f.factory.enqueue(f.event.clone()).unwrap().unwrap();
+    f.factory.start();
+    wait_for_started(&f, &first).await;
+
+    let stale_event = f.second_event();
+    let stale_head = stale_event.head_sha.clone();
+    let stale = f.factory.enqueue(stale_event).unwrap().unwrap();
+    git(
+        &f.remote,
+        &["update-ref", "refs/heads/feature-two", &moved_head],
+    );
+    git(&f.remote, &["update-ref", "refs/pull/6/head", &moved_head]);
+    std::fs::write(run_memory(&f, &first).join("release"), "").unwrap();
+
+    let first_result = f.wait(&first).await;
+    let stale_result = f.wait(&stale).await;
+    assert_eq!(first_result.run.status, "succeeded", "{first_result:?}");
+    assert_eq!(stale_result.run.status, "failed", "{stale_result:?}");
+    assert_eq!(stale_result.event.head_sha, stale_head);
+    assert!(!run_memory(&f, &stale).join("started").exists());
+    assert!(f.writes.lock().unwrap().is_empty());
+
+    let mut new_event = f.second_event();
+    new_event.event_id = format!("approval:6:{moved_head}");
+    new_event.head_sha = moved_head.clone();
+    let new_attempt = f.factory.enqueue(new_event).unwrap().unwrap();
+    let new_result = f.wait(&new_attempt).await;
+    f.factory.shutdown().await;
+    assert_eq!(new_result.run.status, "succeeded", "{new_result:?}");
+    assert_eq!(
+        std::fs::read_to_string(run_memory(&f, &new_attempt).join("head"))
+            .unwrap()
+            .trim(),
+        moved_head
+    );
+}
+
+#[tokio::test]
+async fn failed_merge_action_releases_next_queued_approval_without_advancing_base() {
+    let f = Fixture::new().await;
+    f.add_second_approval();
+    f.agent(blocked_approval_agent(), json!({}));
+    let first = f.factory.enqueue(f.event.clone()).unwrap().unwrap();
+    f.factory.start();
+    wait_for_started(&f, &first).await;
+    one_node_approval_flow(&f);
+    let second = f.factory.enqueue(f.second_event()).unwrap().unwrap();
+    assert_eq!(f.factory.run_detail(&second).unwrap().run.status, "queued");
+    assert!(!f
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|path| path == "/repos/acme/repo/pulls/6"));
+
+    std::fs::write(run_memory(&f, &first).join("release"), "").unwrap();
+    let first_result = f.wait(&first).await;
+    let second_result = f.wait(&second).await;
+    f.factory.shutdown().await;
+    assert_eq!(first_result.run.status, "failed", "{first_result:?}");
+    assert_eq!(second_result.run.status, "succeeded", "{second_result:?}");
+    assert_eq!(
+        std::fs::read_to_string(run_memory(&f, &second).join("base"))
+            .unwrap()
+            .trim(),
+        f.base_sha
+    );
+    assert_eq!(
+        git(&f.remote, &["rev-parse", "refs/heads/main"]),
+        f.base_sha
+    );
+    assert_eq!(
+        *f.writes.lock().unwrap(),
+        vec!["PUT /repos/acme/repo/pulls/5/merge"]
+    );
+    assert!(!f
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|write| write.contains("/pulls/6/merge") || write.contains("feature-two")));
 }

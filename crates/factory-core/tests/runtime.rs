@@ -123,6 +123,77 @@ async fn fixture() -> (
     (dir, factory, sha, server)
 }
 
+fn install_signalled_agent(dir: &Path) {
+    let agent = dir.join("agent");
+    std::fs::write(
+        &agent,
+        r#"#!/bin/sh
+set -eu
+cat >/dev/null
+touch "$AI_FACTORY_MEMORY_DIR/started"
+while [ ! -f "$AI_FACTORY_MEMORY_DIR/release" ]; do sleep 0.02; done
+printf '%s' '{"status":"succeeded","summary":"finished","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn install_outcome_agent(dir: &Path) {
+    let agent = dir.join("agent");
+    std::fs::write(
+        &agent,
+        r#"#!/bin/sh
+set -eu
+cat >/dev/null
+touch "$AI_FACTORY_MEMORY_DIR/started"
+while [ ! -f "$AI_FACTORY_MEMORY_DIR/release" ]; do sleep 0.02; done
+if [ -f "$AI_FACTORY_MEMORY_DIR/outcome" ]; then
+  cat "$AI_FACTORY_MEMORY_DIR/outcome" > "$AI_FACTORY_RESULT_PATH"
+else
+  printf '%s' '{"status":"succeeded","summary":"finished","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
+fi
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn run_memory(dir: &Path, id: &str) -> std::path::PathBuf {
+    dir.join("data/memory/acme/repo/runs").join(id)
+}
+
+async fn started(dir: &Path, id: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !run_memory(dir, id).join("started").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn status(factory: &Factory, id: &str, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while factory.run_detail(id).unwrap().run.status != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn runtime_event(trigger: &str, number: u64, sha: &str) -> TriggerEvent {
+    let mut event = TriggerEvent::issue("acme/repo", number, "[AI] Runtime test", "alice", "");
+    event.trigger_id = trigger.into();
+    if trigger != "new_issue" {
+        event.head_sha = sha.into();
+        event.event_id = format!("{trigger}:{number}");
+        event.url = format!("https://github.com/acme/repo/pull/{number}");
+    }
+    event
+}
+
 async fn child(factory: &Factory, id: &str) -> Option<i32> {
     let detail = factory.run_detail(id).unwrap();
     let node = detail.nodes.first().unwrap();
@@ -312,5 +383,266 @@ async fn graceful_shutdown_stops_descendants_and_leaves_no_running_history() {
         detail.run.status
     );
     assert!(detail.nodes.iter().all(|node| node.status != "running"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn approvals_wait_without_blocking_other_triggers_and_resume_in_stable_order() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    let mut settings = factory.settings().unwrap();
+    settings.poll_interval_seconds = 3600;
+    factory.save_settings(settings).unwrap();
+    let mut events = factory.subscribe();
+
+    let first = factory
+        .enqueue(runtime_event("pr_approved", 1, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    started(dir.path(), &first).await;
+
+    let second = factory
+        .enqueue(runtime_event("pr_approved", 2, &sha))
+        .unwrap()
+        .unwrap();
+    let third = factory
+        .enqueue(runtime_event("pr_approved", 3, &sha))
+        .unwrap()
+        .unwrap();
+    let mut other_runs = Vec::new();
+    for (trigger, number) in [("new_issue", 4), ("pr_review", 5), ("new_issue", 6)] {
+        let id = factory
+            .enqueue(runtime_event(trigger, number, &sha))
+            .unwrap()
+            .unwrap();
+        started(dir.path(), &id).await;
+        other_runs.push(id);
+    }
+
+    assert_eq!(factory.snapshot().unwrap().metrics.running, 4);
+    assert_eq!(factory.snapshot().unwrap().metrics.queued, 2);
+    for id in [&second, &third] {
+        let detail = factory.run_detail(id).unwrap();
+        assert_eq!(detail.run.status, "queued");
+        assert!(detail.run.started_at.is_none() && detail.run.workspace.is_none());
+        assert!(detail.nodes.iter().all(|node| node.status == "pending"));
+        assert!(!run_memory(dir.path(), id).join("started").exists());
+        assert!(!dir.path().join("data/workspaces").join(id).exists());
+    }
+    let saved_flows: Vec<_> = [&second, &third]
+        .iter()
+        .map(|id| serde_json::to_value(factory.run_detail(id).unwrap().flow).unwrap())
+        .collect();
+    let saved_events: Vec<_> = [&second, &third]
+        .iter()
+        .map(|id| {
+            let event = factory.run_detail(id).unwrap().event;
+            (event.event_id, event.actor, event.head_sha)
+        })
+        .collect();
+    let clone_args = std::fs::read_to_string(dir.path().join("clone-args.log")).unwrap();
+    assert_eq!(
+        clone_args.lines().filter(|line| *line == "clone").count(),
+        4
+    );
+
+    let mut settings = factory.settings().unwrap();
+    let approval = settings
+        .flows
+        .iter_mut()
+        .find(|flow| flow.id == "pr_approved")
+        .unwrap();
+    approval.enabled = false;
+    approval.profile_activation.insert("alice".into(), false);
+    factory.save_settings(settings).unwrap();
+
+    for id in &other_runs {
+        std::fs::write(run_memory(dir.path(), id).join("release"), "").unwrap();
+        status(&factory, id, "succeeded").await;
+    }
+    status(&factory, &first, "running").await;
+
+    let mut pending = [second.clone(), third.clone()];
+    pending.sort_by_key(|id| {
+        let run = factory.run_detail(id).unwrap().run;
+        (run.created_at, run.id)
+    });
+    std::fs::write(run_memory(dir.path(), &first).join("release"), "").unwrap();
+    status(&factory, &first, "succeeded").await;
+    for (index, id) in pending.iter().enumerate() {
+        started(dir.path(), id).await;
+        if index == 0 {
+            assert_eq!(
+                factory.run_detail(&pending[1]).unwrap().run.status,
+                "queued"
+            );
+        }
+        std::fs::write(run_memory(dir.path(), id).join("release"), "").unwrap();
+        status(&factory, id, "succeeded").await;
+    }
+
+    for ((id, flow), event) in [&second, &third].iter().zip(saved_flows).zip(saved_events) {
+        assert_eq!(
+            serde_json::to_value(factory.run_detail(id).unwrap().flow).unwrap(),
+            flow
+        );
+        let detail = factory.run_detail(id).unwrap();
+        assert_eq!(
+            (
+                detail.event.event_id,
+                detail.event.actor,
+                detail.event.head_sha
+            ),
+            event
+        );
+    }
+    let clone_args = std::fs::read_to_string(dir.path().join("clone-args.log")).unwrap();
+    assert_eq!(
+        clone_args.lines().filter(|line| *line == "clone").count(),
+        6
+    );
+
+    let all_runs = [
+        first.clone(),
+        second.clone(),
+        third.clone(),
+        other_runs[0].clone(),
+        other_runs[1].clone(),
+        other_runs[2].clone(),
+    ];
+    let mut observed = std::collections::HashMap::<String, Vec<String>>::new();
+    while let Ok(event) = events.try_recv() {
+        if let Some(id) = event.run_id {
+            observed.entry(id).or_default().push(event.kind);
+        }
+    }
+    for id in all_runs {
+        let kinds = observed.get(&id).expect("subscribed run events");
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "run_created").count(),
+            1
+        );
+        assert!(kinds.iter().filter(|kind| *kind == "run_changed").count() >= 2);
+    }
+
+    factory.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn blocked_and_failed_approvals_release_the_next_queued_worker() {
+    for (outcome, terminal) in [("blocked", "blocked"), ("failed", "failed")] {
+        let (dir, factory, sha, server) = fixture().await;
+        install_outcome_agent(dir.path());
+        let first = factory
+            .enqueue(runtime_event("pr_approved", 1, &sha))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        started(dir.path(), &first).await;
+        let next = factory
+            .enqueue(runtime_event("pr_approved", 2, &sha))
+            .unwrap()
+            .unwrap();
+        assert_eq!(factory.run_detail(&next).unwrap().run.status, "queued");
+        std::fs::write(
+            run_memory(dir.path(), &first).join("outcome"),
+            format!(
+                "{{\"status\":\"{outcome}\",\"summary\":\"{outcome} fixture\",\"artifacts\":[],\"data\":{{}}}}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(run_memory(dir.path(), &first).join("release"), "").unwrap();
+        status(&factory, &first, terminal).await;
+        started(dir.path(), &next).await;
+        std::fs::write(run_memory(dir.path(), &next).join("release"), "").unwrap();
+        status(&factory, &next, "succeeded").await;
+        factory.shutdown().await;
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn cancelling_queued_approval_does_not_stop_active_descendant_and_next_runs_after_drain() {
+    let (_dir, factory, sha, server) = fixture().await;
+    let first = factory
+        .enqueue(runtime_event("pr_approved", 1, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    let pid = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pid) = child(&factory, &first).await {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let cancelled = factory
+        .enqueue(runtime_event("pr_approved", 2, &sha))
+        .unwrap()
+        .unwrap();
+    factory.cancel(&cancelled).unwrap();
+    assert_eq!(
+        factory.run_detail(&cancelled).unwrap().run.status,
+        "cancelled"
+    );
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+
+    let next = factory
+        .enqueue(runtime_event("pr_approved", 3, &sha))
+        .unwrap()
+        .unwrap();
+    factory.cancel(&first).unwrap();
+    assert_gone(pid).await;
+    status(&factory, &first, "cancelled").await;
+    let next_pid = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pid) = child(&factory, &next).await {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(factory.run_detail(&next).unwrap().run.status, "running");
+    factory.cancel(&next).unwrap();
+    factory.shutdown().await;
+    assert_gone(next_pid).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn global_capacity_one_still_serializes_other_triggers_with_approval() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    let mut settings = factory.settings().unwrap();
+    settings.max_concurrent = 1;
+    factory.save_settings(settings).unwrap();
+    let approval = factory
+        .enqueue(runtime_event("pr_approved", 1, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    started(dir.path(), &approval).await;
+    let issue = factory
+        .enqueue(runtime_event("new_issue", 2, &sha))
+        .unwrap()
+        .unwrap();
+    assert_eq!(factory.run_detail(&issue).unwrap().run.status, "queued");
+    assert!(!run_memory(dir.path(), &issue).join("started").exists());
+    assert_eq!(factory.snapshot().unwrap().metrics.running, 1);
+
+    std::fs::write(run_memory(dir.path(), &approval).join("release"), "").unwrap();
+    status(&factory, &approval, "succeeded").await;
+    started(dir.path(), &issue).await;
+    std::fs::write(run_memory(dir.path(), &issue).join("release"), "").unwrap();
+    status(&factory, &issue, "succeeded").await;
+    factory.shutdown().await;
     server.abort();
 }

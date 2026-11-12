@@ -16,6 +16,38 @@ use std::{
 use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
+pub(crate) struct ActiveWorker {
+    trigger_id: String,
+    cancel: CancellationToken,
+}
+
+#[derive(Default)]
+struct QueuedWorkerScan {
+    approval_deferred: bool,
+}
+
+impl QueuedWorkerScan {
+    fn reserve(
+        &mut self,
+        factory: &Factory,
+        id: &str,
+        trigger_id: &str,
+        capacity: usize,
+    ) -> Result<Option<CancellationToken>> {
+        if trigger_id == "pr_approved" && self.approval_deferred {
+            return Ok(None);
+        }
+
+        let reservation = factory.register_queued_worker(id, capacity);
+        if trigger_id == "pr_approved" && !matches!(reservation.as_ref(), Ok(Some(_))) {
+            // Preserve FIFO among approvals for the rest of this queue snapshot.
+            // Other triggers must still be considered for any free global slots.
+            self.approval_deferred = true;
+        }
+        reservation
+    }
+}
+
 pub struct Factory {
     _process_lock: std::fs::File,
     pub(crate) root: PathBuf,
@@ -25,13 +57,17 @@ pub struct Factory {
     pub(crate) wake: Notify,
     pub(crate) stop: CancellationToken,
     pub(crate) started: AtomicBool,
-    pub(crate) active: Mutex<HashMap<String, CancellationToken>>,
+    pub(crate) active: Mutex<HashMap<String, ActiveWorker>>,
     pub(crate) service: Mutex<ServiceStatus>,
     poll_lock: tokio::sync::Mutex<()>,
     pub(crate) lifecycle_gate: Mutex<()>,
     pub(crate) deletion_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     pub(crate) cleanup: Arc<dyn RunCleanup>,
 }
+
+#[cfg(test)]
+mod worker_tests;
+
 impl Drop for Factory {
     fn drop(&mut self) {
         // Explicit unlock also releases descriptors briefly inherited by a fork
@@ -334,8 +370,8 @@ impl Factory {
             ["queued", "running"].contains(&d.run.status.as_str()),
             "Run is already terminal"
         );
-        if let Some(c) = self.active.lock().unwrap().get(id) {
-            c.cancel();
+        if let Some(worker) = self.active.lock().unwrap().get(id) {
+            worker.cancel.cancel();
         }
         self.set_run_status_inner(id, "cancelled", None)?;
         for mut n in d.nodes {
@@ -416,19 +452,34 @@ impl Factory {
         let Ok(_gate) = self.lifecycle_gate.try_lock() else {
             return Ok(None);
         };
-        if !self
-            .store
-            .detail(id)
-            .is_ok_and(|d| d.run.status == "queued")
-        {
+        if self.stop.is_cancelled() {
+            return Ok(None);
+        }
+        let Ok(detail) = self.store.detail(id) else {
+            return Ok(None);
+        };
+        if detail.run.status != "queued" {
             return Ok(None);
         }
         let mut active = self.active.lock().unwrap();
         if active.len() >= capacity || active.contains_key(id) {
             return Ok(None);
         }
+        if detail.run.trigger_id == "pr_approved"
+            && active
+                .values()
+                .any(|worker| worker.trigger_id == "pr_approved")
+        {
+            return Ok(None);
+        }
         let cancel = CancellationToken::new();
-        active.insert(id.into(), cancel.clone());
+        active.insert(
+            id.into(),
+            ActiveWorker {
+                trigger_id: detail.run.trigger_id,
+                cancel: cancel.clone(),
+            },
+        );
         Ok(Some(cancel))
     }
     pub fn start(self: &Arc<Self>) {
@@ -458,8 +509,10 @@ impl Factory {
                     last = std::time::Instant::now();
                 }
                 if let Ok(runs) = f.store.runs() {
+                    let mut scan = QueuedWorkerScan::default();
                     for r in runs.into_iter().rev().filter(|r| r.status == "queued") {
-                        let Ok(Some(c)) = f.register_queued_worker(&r.id, s.max_concurrent) else {
+                        let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id, s.max_concurrent)
+                        else {
                             continue;
                         };
                         let worker = f.clone();
@@ -506,9 +559,12 @@ impl Factory {
         });
     }
     pub async fn shutdown(&self) {
-        self.stop.cancel();
-        for c in self.active.lock().unwrap().values() {
-            c.cancel();
+        {
+            let _gate = self.lifecycle_gate.lock().unwrap();
+            self.stop.cancel();
+            for worker in self.active.lock().unwrap().values() {
+                worker.cancel.cancel();
+            }
         }
         for _ in 0..100 {
             if self.active.lock().unwrap().is_empty() {
