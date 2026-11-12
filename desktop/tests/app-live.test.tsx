@@ -86,6 +86,7 @@ const run: Run = {
 };
 const snapshot: Snapshot = {
   runs: [],
+  deletions: [],
   metrics: {
     total: 0,
     queued: 0,
@@ -174,7 +175,7 @@ it("resync refreshes active details and logs even without a run identifier", asy
       },
     ],
   };
-  vi.mocked(factoryApi.detail).mockResolvedValue(detail);
+  vi.mocked(factoryApi.detail).mockResolvedValue({ state: "available", detail });
   vi.mocked(factoryApi.logs).mockResolvedValue({
     text: "",
     offset: 0,
@@ -299,7 +300,7 @@ it("blocks navigation and pending discard during workflow save but leaves Sync n
 
 it("shows activation rejection from retry without changing run detail", async () => {
   const detail: RunDetail = { run: { ...run, status: "failed" }, flow: settings.flows[0], event: {}, nodes: [] };
-  vi.mocked(factoryApi.detail).mockResolvedValue(detail);
+  vi.mocked(factoryApi.detail).mockResolvedValue({ state: "available", detail });
   vi.mocked(factoryApi.retry).mockRejectedValue(new Error("Workflow new_issue for @alice is disabled globally"));
   const select = vi.fn();
   render(<RunDetailPage id="run1" onBack={() => {}} onSelect={select} />);

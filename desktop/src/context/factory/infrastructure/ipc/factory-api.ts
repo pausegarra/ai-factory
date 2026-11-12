@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   Settings,
   Snapshot,
-  RunDetail,
+  RunView,
+  DeleteRunOutcome,
   LogChunk,
   FactoryEvent,
   ImportReport,
@@ -30,6 +31,7 @@ const previewSettings: Settings = {
 };
 const previewSnapshot: Snapshot = {
   runs: [],
+  deletions: [],
   metrics: {
     total: 0,
     queued: 0,
@@ -66,7 +68,8 @@ export const factoryApi = {
       : Promise.resolve(structuredClone(previewSnapshot)),
   saveSettings: (settings: Settings) =>
     command<Settings>("save_settings", { settings }),
-  detail: (runId: string) => command<RunDetail>("get_run_detail", { runId }),
+  detail: (runId: string) => command<RunView>("get_run_detail", { runId }),
+  deleteRun: (runId: string) => command<DeleteRunOutcome>("delete_run", { runId }),
   logs: (runId: string, nodeId: string, offset = 0) =>
     command<LogChunk>("get_logs", { runId, nodeId, offset }),
   cancel: (runId: string) => command<void>("cancel_run", { runId }),

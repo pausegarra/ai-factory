@@ -428,6 +428,8 @@ pub struct ServiceStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub runs: Vec<Run>,
+    #[serde(default)]
+    pub deletions: Vec<crate::RunDeletion>,
     pub metrics: Metrics,
     pub service: ServiceStatus,
 }

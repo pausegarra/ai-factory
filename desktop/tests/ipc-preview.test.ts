@@ -1,0 +1,9 @@
+import { it, expect, vi } from "vitest";
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: () => false }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+import { invoke } from "@tauri-apps/api/core";
+import { factoryApi } from "../src/context/factory/infrastructure/ipc/factory-api";
+it("does not pretend to delete in browser preview", async () => {
+  await expect(factoryApi.deleteRun("run-1")).rejects.toThrow(/desktop/);
+  expect(invoke).not.toHaveBeenCalled();
+});

@@ -1,7 +1,10 @@
+use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
+use crate::CleanupTarget;
 use crate::{context::factory::infrastructure::repositories::store::Store, Result};
 use anyhow::{ensure, Context};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) fn archive_artifact(
     memory: &Path,
@@ -58,38 +61,15 @@ pub(crate) fn path(root: &Path, run: &str) -> Result<PathBuf> {
     Ok(parent.join(run))
 }
 
-fn remove(root: &Path, run: &str) -> Result<()> {
-    let workspace = path(root, run)?;
-    match std::fs::symlink_metadata(&workspace) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            // Remove the link itself; never traverse its target.
-            #[cfg(windows)]
-            std::fs::remove_file(&workspace).or_else(|_| std::fs::remove_dir(&workspace))?;
-            #[cfg(not(windows))]
-            std::fs::remove_file(&workspace)?;
-            Ok(())
-        }
-        Ok(metadata) if metadata.is_dir() => {
-            ensure!(
-                workspace.canonicalize()? == workspace,
-                "Workspace directory resolved outside its expected path"
-            );
-            std::fs::remove_dir_all(&workspace).context("Cannot remove temporary workspace")
-        }
-        Ok(_) => {
-            std::fs::remove_file(&workspace)?;
-            Ok(())
-        }
-    }
-}
-
-pub(crate) async fn cleanup(root: PathBuf, run: String) -> Result<()> {
+pub(crate) async fn cleanup(
+    cleaner: Arc<dyn RunCleanup>,
+    repository: String,
+    run: String,
+) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let mut last = None;
         for attempt in 0..5 {
-            match remove(&root, &run) {
+            match cleaner.remove(&repository, &run, &CleanupTarget::Workspace) {
                 Ok(()) => return Ok(()),
                 Err(error) => last = Some(error),
             }
@@ -101,7 +81,7 @@ pub(crate) async fn cleanup(root: PathBuf, run: String) -> Result<()> {
     .context("Workspace cleanup worker stopped")?
 }
 
-pub(crate) fn recover(root: &Path, store: &Store) -> Result<Vec<String>> {
+pub(crate) fn recover(root: &Path, store: &Store, cleaner: &dyn RunCleanup) -> Result<Vec<String>> {
     let mut errors = Vec::new();
     for run in store.runs()? {
         if ["queued", "running"].contains(&run.status.as_str())
@@ -109,7 +89,7 @@ pub(crate) fn recover(root: &Path, store: &Store) -> Result<Vec<String>> {
         {
             continue;
         }
-        match remove(root, &run.id) {
+        match cleaner.remove(&run.repository, &run.id, &CleanupTarget::Workspace) {
             Ok(()) => {
                 if run.workspace.as_deref() == path(root, &run.id)?.to_str() {
                     store.set_workspace(&run.id, None)?;

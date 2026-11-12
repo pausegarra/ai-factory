@@ -330,6 +330,7 @@ fn refuses_ambiguous_legacy_pull_request_provenance() {
     )
     .unwrap();
     assert!(batch.registered_prs.is_empty());
+    assert_eq!(batch.pr_conflicts.len(), 2);
     assert!(batch.warnings.iter().any(|w| w.contains("ambiguous")));
 }
 
@@ -399,4 +400,230 @@ fn factory_ingests_legacy_history_idempotently_and_keeps_secrets_private() {
         ))
         .unwrap()
         .is_none());
+}
+
+fn legacy_with_local_files(root: &Path) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    let db = root.join("old.sqlite");
+    old_database(&db);
+    let log = root.join("events.jsonl");
+    fs::write(&log, "legacy session output\n").unwrap();
+    let memory = root.join("old-memory");
+    fs::create_dir(&memory).unwrap();
+    let context = memory.join("context.md");
+    fs::write(&context, "legacy project memory").unwrap();
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch("CREATE TABLE workflow_nodes(workflow_key TEXT,node_id TEXT,state TEXT,session_id TEXT,started_at TEXT,finished_at TEXT,last_error TEXT); INSERT INTO workflow_nodes VALUES('acme/repo#7','builder','running','session-1',NULL,NULL,NULL); CREATE TABLE workflow_sessions(id TEXT,workflow_key TEXT,node_id TEXT,provider TEXT,event_path TEXT); ALTER TABLE workflows ADD COLUMN documentation TEXT;").unwrap();
+    c.execute(
+        "INSERT INTO workflow_sessions VALUES('session-1','acme/repo#7','builder','codex',?1)",
+        [log.to_str()],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE workflows SET documentation=?1",
+        [serde_json::json!({"memory_dir": memory}).to_string()],
+    )
+    .unwrap();
+    drop(c);
+    (db.clone(), vec![db, log, context])
+}
+
+#[test]
+fn deleting_imported_run_preserves_sources_and_shared_archive_and_allows_explicit_reimport() {
+    let source = tempfile::tempdir().unwrap();
+    let (database, files) = legacy_with_local_files(source.path());
+    let before: Vec<_> = files.iter().map(|p| fs::read(p).unwrap()).collect();
+    let app = tempfile::tempdir().unwrap();
+    let f = common::open(app.path().into()).unwrap();
+    let report = f.import_legacy(None, Some(database.clone())).unwrap();
+    assert_eq!(report.runs_imported, 1);
+    let id = f.snapshot().unwrap().runs[0].id.clone();
+    let archive = report.archive_path.unwrap();
+    let archive_before = fs::read(&archive).unwrap();
+    let sessions = app.path().join("sessions").join(&id);
+    let legacy = app.path().join("legacy").join(&id);
+    let memory = app.path().join("memory/acme/repo/runs").join(&id);
+    assert!(sessions.join("builder.log").is_file());
+    assert!(legacy.is_dir());
+    assert!(fs::read_dir(&legacy).unwrap().any(|entry| {
+        fs::read_to_string(entry.unwrap().path()).is_ok_and(|text| text == "legacy project memory")
+    }));
+    // Imported memory copies live in legacy/<id>; newer run-local memory is owned too.
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(memory.join("context.md"), "run-local memory").unwrap();
+    let shared = app.path().join("memory/acme/repo/shared/context.md");
+    fs::create_dir_all(shared.parent().unwrap()).unwrap();
+    fs::write(&shared, "shared project memory").unwrap();
+
+    assert!(matches!(
+        f.delete_run(&id).unwrap(),
+        DeleteRunOutcome::Deleted { .. }
+    ));
+    assert!(f.snapshot().unwrap().runs.is_empty());
+    assert!(!sessions.exists());
+    assert!(!legacy.exists());
+    assert!(!memory.exists());
+    assert_eq!(fs::read(&archive).unwrap(), archive_before);
+    assert_eq!(
+        fs::read_to_string(&shared).unwrap(),
+        "shared project memory"
+    );
+    for (file, bytes) in files.iter().zip(&before) {
+        assert_eq!(&fs::read(file).unwrap(), bytes);
+    }
+
+    let again = f.import_legacy(None, Some(database)).unwrap();
+    assert_eq!(again.runs_imported, 1);
+    assert_eq!(f.snapshot().unwrap().runs[0].id, id);
+    assert!(sessions.join("builder.log").is_file());
+    assert!(legacy.is_dir());
+}
+
+#[test]
+fn pending_legacy_deletion_is_excluded_before_session_and_memory_copies() {
+    let source = tempfile::tempdir().unwrap();
+    let (database, files) = legacy_with_local_files(source.path());
+    let before: Vec<_> = files.iter().map(|p| fs::read(p).unwrap()).collect();
+    let baseline = tempfile::tempdir().unwrap();
+    let batch =
+        legacy::read_legacy(None, Some(&database), baseline.path(), &Settings::default()).unwrap();
+    let id = batch.runs[0].detail.run.id.clone();
+    assert!(baseline.path().join("sessions").join(&id).is_dir());
+    assert!(baseline.path().join("legacy").join(&id).is_dir());
+
+    let app = tempfile::tempdir().unwrap();
+    let batch = legacy::read_legacy_excluding(
+        None,
+        Some(&database),
+        app.path(),
+        &Settings::default(),
+        &std::collections::HashSet::from([id.clone()]),
+    )
+    .unwrap();
+    assert!(batch.runs.is_empty());
+    assert!(batch.consumed_events.contains(&"issue:acme/repo#7".into()));
+    assert!(!app.path().join("sessions").join(&id).exists());
+    assert!(!app.path().join("legacy").join(&id).exists());
+    assert!(!app.path().join("memory/acme/repo/runs").join(&id).exists());
+    for (file, bytes) in files.iter().zip(&before) {
+        assert_eq!(&fs::read(file).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn ambiguous_provenance_survives_pending_deletion_reimport_and_reopen() -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let (database, files) = legacy_with_local_files(source.path());
+    let legacy_db = Connection::open(&database)?;
+    legacy_db.execute_batch("INSERT INTO tasks SELECT 'acme/repo#8',repository,8,replace(issue,'old','other'),'completed','finished',1,detected_at,launched_at,finished_at,last_error FROM tasks; INSERT INTO workflows SELECT 'acme/repo#8',phase,trigger_name,pull_requests,created_at,updated_at,documentation FROM workflows;")?;
+    drop(legacy_db);
+    let before: Vec<_> = files.iter().map(|p| fs::read(p).unwrap()).collect();
+    let app = tempfile::tempdir()?;
+    let f = common::open(app.path().into())?;
+    assert_eq!(
+        f.import_legacy(None, Some(database.clone()))?.runs_imported,
+        2
+    );
+    let id = f
+        .snapshot()?
+        .runs
+        .iter()
+        .find(|r| r.number == 7)
+        .unwrap()
+        .id
+        .clone();
+    let db = Connection::open(app.path().join("factory.sqlite3"))?;
+    let assert_ineligible = || -> Result<()> {
+        let eligible: i64 = db.query_row(
+            "SELECT COUNT(*) FROM (SELECT repository,number FROM tracked_pr_origins WHERE repository='acme/repo' AND number=9 GROUP BY repository,number HAVING MIN(trusted)=1 AND COUNT(DISTINCT json_array(event_id,issue_repository,issue_number,actor,trigger_id))=1)",
+            [], |r| r.get(0),
+        )?;
+        assert_eq!(
+            eligible, 0,
+            "ambiguous PR must remain ineligible for approval automation"
+        );
+        Ok(())
+    };
+    assert_ineligible()?;
+    // Fail finalization after all physical cleanup: portable, deterministic partial deletion.
+    db.execute_batch("CREATE TRIGGER fail_legacy_final BEFORE DELETE ON runs BEGIN SELECT RAISE(ABORT,'fixture final failure'); END;")?;
+    assert!(f.delete_run(&id).is_err());
+    assert!(matches!(f.run_view(&id)?, RunView::Deleting { .. }));
+    let sessions = app.path().join("sessions").join(&id);
+    let legacy = app.path().join("legacy").join(&id);
+    assert!(!sessions.exists());
+    assert!(!legacy.exists());
+    assert_eq!(
+        f.import_legacy(None, Some(database.clone()))?.runs_imported,
+        0
+    );
+    assert!(!sessions.exists(), "pending deletion must not restore logs");
+    assert!(
+        !legacy.exists(),
+        "pending deletion must not restore memory copies"
+    );
+    assert_ineligible()?;
+    db.execute_batch("DROP TRIGGER fail_legacy_final;")?;
+    assert!(matches!(
+        f.delete_run(&id)?,
+        DeleteRunOutcome::Deleted { .. }
+    ));
+    assert_ineligible()?;
+    drop(f);
+    let f = common::open(app.path().into())?;
+    assert!(matches!(f.run_view(&id)?, RunView::Missing));
+    assert_ineligible()?;
+    // Explicit reimport after completed deletion may restore history, never trust.
+    assert_eq!(f.import_legacy(None, Some(database))?.runs_imported, 1);
+    assert_ineligible()?;
+    for (file, bytes) in files.iter().zip(&before) {
+        assert_eq!(&fs::read(file)?, bytes);
+    }
+    Ok(())
+}
+
+#[test]
+fn newly_discovered_legacy_conflict_revokes_prior_trust_durably() -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let database = source.path().join("old.sqlite");
+    old_database(&database);
+    let app = tempfile::tempdir()?;
+    let f = common::open(app.path().into())?;
+    f.import_legacy(None, Some(database.clone()))?;
+    let db = Connection::open(app.path().join("factory.sqlite3"))?;
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM tracked_pr_origins WHERE trusted=1",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        1
+    );
+    let legacy_db = Connection::open(&database)?;
+    legacy_db.execute_batch("INSERT INTO tasks SELECT 'acme/repo#8',repository,8,replace(issue,'old','other'),'completed','finished',1,detected_at,launched_at,finished_at,last_error FROM tasks; INSERT INTO workflows SELECT 'acme/repo#8',phase,trigger_name,pull_requests,created_at,updated_at FROM workflows;")?;
+    f.import_legacy(None, Some(database.clone()))?;
+    let assert_conflicts = || -> Result<()> {
+        let counts: (i64, i64) = db.query_row(
+            "SELECT COUNT(*),SUM(trusted) FROM tracked_pr_origins WHERE repository='acme/repo' AND number=9 AND event_id IS NULL AND issue_repository IS NULL AND issue_number IS NULL AND actor IS NULL AND trigger_id IS NULL",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(
+            counts,
+            (2, 0),
+            "retain only minimal, untrusted conflict identities"
+        );
+        Ok(())
+    };
+    assert_conflicts()?;
+    // An incomplete later source cannot erase earlier ambiguity or promote trust.
+    legacy_db.execute("DELETE FROM workflows WHERE key='acme/repo#8'", [])?;
+    f.import_legacy(None, Some(database))?;
+    assert_conflicts()?;
+    for run in f.snapshot()?.runs {
+        f.delete_run(&run.id)?;
+    }
+    drop(f);
+    let f = common::open(app.path().into())?;
+    assert!(f.snapshot()?.runs.is_empty());
+    assert_conflicts()?;
+    Ok(())
 }

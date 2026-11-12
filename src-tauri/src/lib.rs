@@ -1,7 +1,7 @@
 mod lifecycle;
 mod startup;
 
-use factory_core::{Factory, FactoryEvent, LogChunk, RunDetail, Settings, Snapshot};
+use factory_core::{Factory, FactoryEvent, LogChunk, Settings, Snapshot};
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -96,9 +96,18 @@ async fn get_snapshot(state: State<'_, DesktopState>) -> Result<Snapshot, String
 async fn get_run_detail(
     state: State<'_, DesktopState>,
     run_id: String,
-) -> Result<RunDetail, String> {
+) -> Result<factory_core::RunView, String> {
     let factory = state.factory.clone();
-    blocking(move || factory.run_detail(&run_id)).await
+    blocking(move || factory.run_view(&run_id)).await
+}
+
+#[tauri::command]
+async fn delete_run(
+    state: State<'_, DesktopState>,
+    run_id: String,
+) -> Result<factory_core::DeleteRunOutcome, String> {
+    let factory = state.factory.clone();
+    blocking(move || factory.delete_run(&run_id)).await
 }
 
 #[tauri::command]
@@ -245,6 +254,7 @@ pub fn run() {
             get_logs,
             cancel_run,
             retry_run,
+            delete_run,
             poll_now,
             import_legacy
         ])
