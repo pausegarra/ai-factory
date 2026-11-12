@@ -18,7 +18,7 @@ it("ignores programmatic canvas move, remove, connect and selection callbacks wh
   const value: Settings = {
     owners: [], authors: [], reviewers: [], token_profiles: [], projects: [],
     commands: { codex: "codex", opencode: "opencode", git: "git" },
-    poll_interval_seconds: 15, node_timeout_seconds: 3600, max_concurrent: 4, start_at_login: false,
+    poll_interval_seconds: 15, max_concurrent: 4, start_at_login: false,
     flows: [
       { id: "new_issue", name: "Issue", enabled: true, nodes: ["plan", "build"].map((id, index) => ({
         id, name: id, agent: "codex", model: "", effort: "", access: "read", prompt: "Work",

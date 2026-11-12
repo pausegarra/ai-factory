@@ -49,7 +49,6 @@ export interface Settings {
   commands: { codex: string; opencode: string; git: string };
   poll_interval_seconds: number;
   max_concurrent: number;
-  node_timeout_seconds: number;
   start_at_login: boolean;
   flows: Flow[];
 }

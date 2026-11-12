@@ -735,7 +735,14 @@ async fn execute_node(
         log,
         false,
     );
-    let status = tokio::select! {r=child.wait()=>r.context("CLI wait failed"),_=cancel.cancelled()=>{process_tree.terminate();let _=child.kill().await;Err(anyhow::anyhow!("Run cancelled"))},_=tokio::time::sleep(std::time::Duration::from_secs(settings.node_timeout_seconds))=>{process_tree.terminate();let _=child.kill().await;Err(anyhow::anyhow!("Agent timeout exceeded"))}};
+    let status = tokio::select! {
+        r = child.wait() => r.context("CLI wait failed"),
+        _ = cancel.cancelled() => {
+            process_tree.terminate();
+            let _ = child.kill().await;
+            Err(anyhow::anyhow!("Run cancelled"))
+        }
+    };
     // A CLI may exit while descendants still own its pipes. End the entire
     // session before draining output, including on normal leader exit.
     process_tree.terminate();

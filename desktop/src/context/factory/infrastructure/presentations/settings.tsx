@@ -393,7 +393,7 @@ export function SettingsPage({
               </p>
             </div>
           </div>
-          <div className="form-grid three-col">
+          <div className="form-grid">
             <Field label="Concurrent tasks" hint="From 1 to 64. Defaults to 4.">
               <input
                 type="number"
@@ -417,20 +417,6 @@ export function SettingsPage({
                 value={draft.poll_interval_seconds}
                 onChange={(e) =>
                   update({ poll_interval_seconds: Number(e.target.value) })
-                }
-              />
-            </Field>
-            <Field
-              label="Step timeout · seconds"
-              hint="Stops the agent when it exceeds this limit."
-            >
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={draft.node_timeout_seconds}
-                onChange={(e) =>
-                  update({ node_timeout_seconds: Number(e.target.value) })
                 }
               />
             </Field>

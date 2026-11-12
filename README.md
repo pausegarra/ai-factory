@@ -20,7 +20,7 @@ npm run dev
 2. Set allowed owners, issue authors and reviewers. An empty reviewer list skips review request discovery.
 3. Repositories are downloaded automatically from GitHub using the event actor's token. No local clone or folder mapping is required.
 4. Edit the three Flows. Add/delete/drag nodes, connect dependencies, select Codex or OpenCode, model, effort, access, prompt and result JSON Schema. Save to apply changes to new runs.
-5. Set global concurrency, GitHub polling interval and node timeout. Enable startup at login if required.
+5. Set global concurrency and GitHub polling interval. Agents run without a duration limit and can be cancelled manually. Enable startup at login if required.
 
 Tokens are never returned to the UI after storage. An empty replacement field preserves the existing token; removing its profile removes the stored credential. Tokens need access to the repositories and the corresponding contents, issues and pull request operations. Factory verifies token identity and uses process-local Git credentials without changing global account settings.
 
@@ -48,7 +48,7 @@ Runs keep immutable flow snapshots. Retrying creates a new attempt using the cur
 
 Each execution gets a fresh clone in `workspaces/<run-id>` under the application data directory. Nodes in that execution share its clone; concurrent issues and retry attempts use different directories. PR workflows fetch and verify the expected head SHA. GitHub tokens stay in process-local Git configuration and are not embedded in remote URLs.
 
-After all agent and Git processes stop, Factory removes the clone on success, failure, timeout or cancellation. Startup also removes leftovers belonging to known completed/interrupted runs; unrelated directories and queued runs are preserved. Cleanup failures remain visible and are retried at the next launch. Existing legacy local-folder settings are accepted but no longer used.
+After all agent and Git processes stop, Factory removes the clone on success, failure or cancellation. Startup also removes leftovers belonging to known completed/interrupted runs; unrelated directories and queued runs are preserved. Cleanup failures remain visible and are retried at the next launch. Existing legacy local-folder and agent timeout settings are accepted but no longer used.
 
 History, session logs, structured results and project memory stay outside temporary clones. Declared artifacts are validated, copied into persistent per-run memory, and returned with their archived paths and hashes so downstream steps and history retain them. Unpublished changes and undeclared files in a workspace are removed when the execution ends; workflows that implement code should include their publishing step before completion.
 

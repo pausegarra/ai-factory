@@ -29,7 +29,6 @@ const settings = (): Settings => ({
   commands: { codex: "codex", opencode: "opencode", git: "git" },
   poll_interval_seconds: 15,
   max_concurrent: 4,
-  node_timeout_seconds: 3600,
   start_at_login: false,
   flows: [
     {
@@ -55,6 +54,14 @@ const settings = (): Settings => ({
     { id: "pr_review", name: "Review", enabled: false, nodes: [] },
   ],
 });
+it("does not offer an agent timeout setting", () => {
+  render(
+    <SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app/data" />,
+  );
+
+  expect(screen.queryByLabelText(/step timeout/i)).toBeNull();
+});
+
 it("explains temporary workspaces without local repository controls", () => {
   const value = settings();
   value.projects = [

@@ -89,7 +89,6 @@ describe("settings validation", () => {
     const settings = {
       max_concurrent: 4,
       poll_interval_seconds: 10,
-      node_timeout_seconds: 60,
       commands: { codex: "codex", opencode: "opencode", git: "git" },
       token_profiles: [],
       projects: [{ id: "legacy", repository: "owner/repo", source_path }],
@@ -103,7 +102,6 @@ describe("settings validation", () => {
     const settings = {
       max_concurrent: 0,
       poll_interval_seconds: 10,
-      node_timeout_seconds: 60,
       commands: { codex: "codex", opencode: "opencode", git: "git" },
       token_profiles: [
         { id: "a", label: "Work", account: "me", has_token: false },
