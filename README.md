@@ -98,6 +98,8 @@ Codex uses `codex exec --json`, access-specific sandboxing and an output schema.
 
 Valid statuses are `succeeded`, `blocked` and `failed`. `data` must satisfy the node schema. `data.approved=false` cannot be declared successful. Artifacts include `path`, `sha256` and `kind`; Factory validates authorized paths, existence and hashes.
 
+Artifact `kind` is descriptive metadata, not verification evidence. Factory replaces missing or blank categories with the neutral value `artifact`, and accepts a legacy `type` category when `kind` is absent. This normalization does not alter status, verification limitations, approval decisions or requested actions. Formatting repairs preserve the exact multiset of artifact paths and hashes and any originally declared categories; missing category metadata alone is not a workflow blocker. The canonical response must still pass the node schema and every artifact must pass filesystem and hash validation.
+
 Agents request GitHub operations through `data`; the engine performs REST calls with the actor token:
 
 - `publish: {title, body}` pushes the issue branch and creates its PR against the repository's current default branch, resolved through GitHub before pushing. Legacy `base` values from agents are ignored. An existing matching PR is reused without retargeting it. The body must close the source issue using `Closes #N`.
