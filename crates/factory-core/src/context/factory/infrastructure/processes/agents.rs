@@ -167,22 +167,15 @@ async fn prepare(
 ) -> Result<PathBuf> {
     let s = factory.store.public_settings()?;
     ensure!(valid_repository(&event.repository), "Invalid repository");
+    let profile = s
+        .profile_for(&event.actor)
+        .with_context(|| format!("No API token configured for actor {}", event.actor))?;
     ensure!(
-        s.owners.iter().any(|o| event
-            .repository
-            .split('/')
-            .next()
-            .unwrap()
-            .eq_ignore_ascii_case(o)),
+        profile.allows_owner(event.repository.split('/').next().unwrap()),
         "Repository owner no longer authorized"
     );
-    let actors = if event.trigger_id == "pr_review" {
-        &s.reviewers
-    } else {
-        &s.authors
-    };
     ensure!(
-        actors.iter().any(|a| a.eq_ignore_ascii_case(&event.actor)),
+        profile.allows_actor(&event.trigger_id),
         "Trigger actor no longer authorized"
     );
     {

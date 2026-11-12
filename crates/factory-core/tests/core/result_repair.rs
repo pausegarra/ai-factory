@@ -40,6 +40,12 @@ if response.get('artifact'):
     if response.get('legacy_type'):
         for item in value['artifacts']:
             item['type'] = item.pop('kind')
+    if response.get('missing_kind'):
+        for item in value['artifacts']:
+            item.pop('kind', None)
+    if response.get('blank_kind'):
+        for item in value['artifacts']:
+            item['kind'] = ''
 if response.get('direct'):
     print(json.dumps(value))
 elif response.get('stdout'):
@@ -97,6 +103,103 @@ async fn repair_accepts_type_to_kind_rename_with_original_files_and_hashes() {
             assert_eq!(artifact["sha256"], format!("{:x}", Sha256::digest(&bytes)));
             assert!(artifact.get("type").is_none());
             assert!(artifact["kind"].is_string());
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_or_blank_artifact_kind_uses_neutral_category_without_repeating_work() {
+    for agent in ["codex", "opencode"] {
+        for field in ["missing_kind", "blank_kind"] {
+            let mut response = json!({"value":valid_result(),"artifact":true,"patch":true,"stdout":agent == "opencode"});
+            response[field] = json!(true);
+            let (dir, factory) = repair_fixture(agent, &[response]);
+            let (id, detail) = run_repair_fixture(&factory).await;
+            assert_eq!(
+                detail.run.status, "succeeded",
+                "{agent}/{field}: {:?}",
+                detail.nodes
+            );
+            assert_eq!(attempts(&dir, &id), 1);
+            let result = detail.nodes[0].result.as_ref().unwrap();
+            for (artifact, expected) in result["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(["original evidence", "original patch"])
+            {
+                assert_eq!(artifact["kind"], "artifact");
+                let bytes = std::fs::read(artifact["path"].as_str().unwrap()).unwrap();
+                assert_eq!(bytes, expected.as_bytes());
+                use sha2::{Digest, Sha256};
+                assert_eq!(artifact["sha256"], format!("{:x}", Sha256::digest(bytes)));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn neutral_artifact_category_preserves_failure_status_and_physical_file_checks() {
+    for agent in ["codex", "opencode"] {
+        for status in ["blocked", "failed"] {
+            let mut value = valid_result();
+            value["status"] = json!(status);
+            let (dir, factory) = repair_fixture(
+                agent,
+                &[json!({"value":value,"artifact":true,"missing_kind":true})],
+            );
+            let (id, detail) = run_repair_fixture(&factory).await;
+            assert_eq!(detail.run.status, status, "{agent}: {:?}", detail.nodes);
+            assert_eq!(attempts(&dir, &id), 1);
+            assert_eq!(
+                detail.nodes[0].result.as_ref().unwrap()["artifacts"][0]["kind"],
+                "artifact"
+            );
+        }
+        let (dir, factory) = repair_fixture(
+            agent,
+            &[
+                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"bad"}],"data":{}}}),
+            ],
+        );
+        let (id, detail) = run_repair_fixture(&factory).await;
+        assert_eq!(detail.run.status, "failed");
+        assert_eq!(attempts(&dir, &id), 1);
+        assert!(detail.nodes[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Artifact does not exist"));
+    }
+}
+
+#[tokio::test]
+async fn screenshot_result_without_any_artifact_category_can_be_repaired() {
+    for agent in ["codex", "opencode"] {
+        for blank_kind in [false, true] {
+            let summary = "Implementation and automated checks complete. Native GUI smoke remains unverified.";
+            let limitations = json!([
+                "Native GUI smoke not run",
+                "Cross-platform validation not run"
+            ]);
+            let (dir, factory) = repair_fixture(
+                agent,
+                &[
+                    json!({"value":{"status":"partial","result":summary,"verification":{"tests":"passed"},"limitations":limitations,"artifacts":[]},"artifact":true,"patch":true,"missing_kind":true,"stdout":agent == "opencode"}),
+                    json!({"value":{"status":"succeeded","summary":summary,"artifacts":[],"data":{"verification":{"tests":"passed"},"limitations":limitations}},"artifact":true,"patch":true,"blank_kind":blank_kind,"stdout":agent == "opencode"}),
+                ],
+            );
+            let (id, detail) = run_repair_fixture(&factory).await;
+            assert_eq!(
+                detail.run.status, "succeeded",
+                "{agent}/{blank_kind}: {:?}",
+                detail.nodes
+            );
+            assert_eq!(attempts(&dir, &id), 2);
+            let result = detail.nodes[0].result.as_ref().unwrap();
+            assert_eq!(result["summary"], summary);
+            assert_eq!(result["data"]["limitations"], limitations);
+            assert_eq!(result["artifacts"].as_array().unwrap().len(), 2);
         }
     }
 }

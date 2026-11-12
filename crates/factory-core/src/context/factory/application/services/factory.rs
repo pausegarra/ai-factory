@@ -161,15 +161,19 @@ impl Factory {
         }
     }
     pub fn save_settings(&self, mut s: Settings) -> Result<Settings> {
-        for values in [&mut s.owners, &mut s.authors, &mut s.reviewers] {
-            let mut seen = std::collections::HashSet::new();
-            for v in values.iter_mut() {
-                *v = v.to_lowercase();
+        for profile in &mut s.token_profiles {
+            profile.account = profile.account.to_lowercase();
+            for values in [
+                &mut profile.owners,
+                &mut profile.authors,
+                &mut profile.reviewers,
+            ] {
+                let mut seen = std::collections::HashSet::new();
+                for value in values.iter_mut() {
+                    *value = value.to_lowercase();
+                }
+                values.retain(|value| seen.insert(value.clone()));
             }
-            values.retain(|v| seen.insert(v.clone()));
-        }
-        for p in &mut s.token_profiles {
-            p.account = p.account.to_lowercase();
         }
         for p in &mut s.projects {
             p.repository = p.repository.to_lowercase();

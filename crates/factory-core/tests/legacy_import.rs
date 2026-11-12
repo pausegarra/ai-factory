@@ -62,7 +62,18 @@ triggers:
 fn legacy_config_resets_profile_activation() {
     let tmp = tempfile::tempdir().unwrap();
     config(tmp.path());
-    let mut current = Settings::default();
+    let mut current = Settings {
+        token_profiles: ["alice", "bob"]
+            .into_iter()
+            .map(|account| TokenProfile {
+                id: account.into(),
+                label: account.into(),
+                account: account.into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
     for flow in &mut current.flows {
         flow.profile_activation.insert("work".into(), false);
         flow.profile_activation.insert("orphan".into(), false);
@@ -74,12 +85,32 @@ fn legacy_config_resets_profile_activation() {
         &current,
     )
     .unwrap();
-    assert!(batch
-        .settings
-        .unwrap()
+    let imported = batch.settings.unwrap();
+    assert!(imported
         .flows
         .iter()
         .all(|f| f.profile_activation.is_empty()));
+    for profile in &imported.token_profiles {
+        assert_eq!(profile.owners, vec!["acme"]);
+        assert_eq!(
+            profile.authors,
+            if profile.account == "alice" {
+                vec!["alice"]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            profile.reviewers,
+            if profile.account == "bob" {
+                vec!["bob"]
+            } else {
+                vec![]
+            }
+        );
+        assert!(!profile.has_token);
+        assert!(profile.token.is_none());
+    }
 }
 
 #[test]
@@ -94,7 +125,10 @@ fn imports_mapping_nodes_yaml_anchors_and_relative_files_without_tokens() {
     )
     .unwrap();
     let settings = batch.settings.unwrap();
-    assert_eq!(settings.authors, vec!["alice"]);
+    let canonical = serde_json::to_value(&settings).unwrap();
+    for field in ["owners", "authors", "reviewers"] {
+        assert!(canonical.get(field).is_none());
+    }
     assert_eq!(settings.max_concurrent, 4);
     assert!(settings.token_profiles.is_empty());
     let issue = settings.flows.iter().find(|f| f.id == "new_issue").unwrap();
@@ -213,6 +247,7 @@ fn imports_sessions_and_copies_accessible_logs_into_application_directory() {
         account: "alice".into(),
         token: Some("legacy-secret".into()),
         has_token: false,
+        ..Default::default()
     });
     factory.save_settings(settings).unwrap();
     factory.import_legacy(None, Some(path)).unwrap();

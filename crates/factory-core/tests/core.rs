@@ -114,6 +114,7 @@ async fn durable_queue_dedup_redaction_and_immediate_events() {
         account: "alice".into(),
         token: Some("secret-example".into()),
         has_token: false,
+        ..Default::default()
     });
     f.save_settings(s).unwrap();
     assert!(!serde_json::to_string(&f.settings().unwrap())
@@ -209,14 +210,15 @@ fn fixture(script: &str, limit: usize) -> (tempfile::TempDir, std::sync::Arc<Fac
         .to_string_lossy()
         .into();
     s.max_concurrent = limit;
-    s.owners = vec!["acme".into()];
-    s.authors = vec!["alice".into()];
     s.token_profiles.push(TokenProfile {
         id: "alice".into(),
         label: "Alice".into(),
         account: "alice".into(),
         token: Some("dummy-token".into()),
         has_token: false,
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        ..Default::default()
     });
     s.flows[1].enabled = false;
     s.flows[2].enabled = false;
@@ -727,18 +729,20 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
     let root = tempfile::tempdir().unwrap();
     let f = common::open(root.path().into()).unwrap();
     let mut s = f.settings().unwrap();
-    s.owners = vec!["Acme".into(), "acme".into()];
-    s.authors = vec!["Alice".into()];
     s.token_profiles.push(TokenProfile {
         id: "actor".into(),
         label: "Alice".into(),
         account: "Alice".into(),
         token: Some("token-test".into()),
         has_token: false,
+        owners: vec!["Acme".into(), "acme".into()],
+        authors: vec!["Alice".into()],
+        reviewers: vec!["Alice".into()],
     });
     let s = f.save_settings(s).unwrap();
-    assert_eq!(s.owners, vec!["acme"]);
-    assert_eq!(s.authors, vec!["alice"]);
+    assert_eq!(s.token_profiles[0].owners, vec!["acme"]);
+    assert_eq!(s.token_profiles[0].authors, vec!["alice"]);
+    assert_eq!(s.token_profiles[0].reviewers, vec!["alice"]);
     assert_eq!(s.token_profiles[0].account, "alice");
     let mut s = s;
     s.token_profiles[0].token = Some(String::new());

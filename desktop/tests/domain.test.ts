@@ -104,7 +104,7 @@ describe("settings validation", () => {
       poll_interval_seconds: 10,
       commands: { codex: "codex", opencode: "opencode", git: "git" },
       token_profiles: [
-        { id: "a", label: "Work", account: "me", has_token: false },
+        { id: "a", label: "Work", account: "me", has_token: false, owners: [], authors: [], reviewers: [] },
       ],
       projects: [],
       flows: [],

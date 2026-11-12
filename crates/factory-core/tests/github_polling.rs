@@ -36,14 +36,15 @@ async fn server(handler: impl Fn(&str, &str) -> (u16, Value) + Send + Sync + 'st
 fn setup(root: std::path::PathBuf, base: &str) -> Arc<Factory> {
     let f = common::open_with_api(root, base).unwrap();
     let mut s = f.settings().unwrap();
-    s.owners = vec!["acme".into()];
-    s.authors = vec!["alice".into()];
     s.token_profiles = vec![TokenProfile {
         id: "alice".into(),
         account: "alice".into(),
         label: "Alice".into(),
         token: Some("alice-token".into()),
         has_token: false,
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec![],
     }];
     f.save_settings(s).unwrap();
     f
@@ -140,8 +141,8 @@ if path.starts_with("/search/"){let m=*state.lock().unwrap();if m==2{return(503,
     let dir = tempfile::tempdir().unwrap();
     let f = setup(dir.path().into(), &base);
     let mut s = f.settings().unwrap();
-    s.authors.clear();
-    s.reviewers = vec!["alice".into()];
+    s.token_profiles[0].authors.clear();
+    s.token_profiles[0].reviewers = vec!["alice".into()];
     s.flows[2].nodes[0].token_overrides.insert(
         "alice".into(),
         AgentConfig {
@@ -213,10 +214,10 @@ async fn deleted_source_origin_polls_without_history_and_revalidates_authorizati
         let mut s = f.settings().unwrap();
         s.flows[0].enabled = false;
         if mode == "actor_revoked" {
-            s.authors.clear();
+            s.token_profiles[0].authors.clear();
         }
         if mode == "owner_revoked" {
-            s.owners = vec!["other-owner".into()];
+            s.token_profiles[0].owners = vec!["other-owner".into()];
         }
         f.save_settings(s).unwrap();
         let result = f.poll_now().await;

@@ -218,6 +218,7 @@ fn activation_profile_lifecycle_and_restart_use_id_not_label_or_secret() {
         account: "alice".into(),
         token: Some("new-fixture".into()),
         has_token: false,
+        ..Default::default()
     });
     f.save_settings(s).unwrap();
     drop(f);

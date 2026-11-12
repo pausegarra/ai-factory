@@ -41,7 +41,7 @@ beforeEach(() => {
   vi.mocked(factoryApi.agentModels).mockResolvedValue([]);
   vi.mocked(factoryApi.saveSettings).mockImplementation(async value => value);
   vi.mocked(factoryApi.poll).mockResolvedValue(undefined);
-  vi.mocked(factoryApi.settings).mockResolvedValue({ owners: [], authors: [], reviewers: [], token_profiles: [], projects: [], commands: { codex: "", opencode: "", git: "" }, poll_interval_seconds: 15, max_concurrent: 1, start_at_login: false, flows: [detail.flow] });
+  vi.mocked(factoryApi.settings).mockResolvedValue({ token_profiles: [], projects: [], commands: { codex: "", opencode: "", git: "" }, poll_interval_seconds: 15, max_concurrent: 1, start_at_login: false, flows: [detail.flow] });
   globalThis.ResizeObserver = class {
     observe() {}
     unobserve() {}

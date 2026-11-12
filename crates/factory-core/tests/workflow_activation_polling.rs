@@ -16,9 +16,6 @@ use tokio::sync::Notify;
 
 fn settings() -> Settings {
     Settings {
-        owners: vec!["acme".into()],
-        authors: vec!["alice".into()],
-        reviewers: vec!["alice".into()],
         token_profiles: vec![
             TokenProfile {
                 id: "work".into(),
@@ -26,6 +23,9 @@ fn settings() -> Settings {
                 account: "alice".into(),
                 token: Some("fixture-a".into()),
                 has_token: false,
+                owners: vec!["acme".into()],
+                authors: vec!["alice".into()],
+                reviewers: vec!["alice".into()],
             },
             TokenProfile {
                 id: "personal".into(),
@@ -33,6 +33,8 @@ fn settings() -> Settings {
                 account: "bob".into(),
                 token: Some("fixture-b".into()),
                 has_token: false,
+                owners: vec!["acme".into()],
+                ..Default::default()
             },
         ],
         ..Settings::default()
@@ -94,10 +96,10 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                 let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
                 let mut s = settings();
                 if trigger != "new_issue" {
-                    s.authors.clear();
+                    s.token_profiles[0].authors.clear();
                 }
                 if trigger != "pr_review" {
-                    s.reviewers.clear();
+                    s.token_profiles[0].reviewers.clear();
                 }
                 f.save_settings(s).unwrap();
                 if trigger == "pr_approved" {
@@ -116,7 +118,7 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                         .track_pr("acme/repo", 5, &source)
                         .unwrap();
                     let mut s = f.settings().unwrap();
-                    s.authors = vec!["alice".into()];
+                    s.token_profiles[0].authors = vec!["alice".into()];
                     s.flows[0].enabled = false;
                     // Bob's preference must not replace the source author's preference.
                     s.flows[1]
@@ -203,16 +205,18 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
         let dir = tempfile::tempdir().unwrap();
         let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
         let mut s = settings();
-        s.authors = if trigger == "new_issue" {
-            vec!["alice".into(), "bob".into()]
-        } else {
-            vec![]
-        };
-        s.reviewers = if trigger == "pr_review" {
-            vec!["alice".into(), "bob".into()]
-        } else {
-            vec![]
-        };
+        for profile in &mut s.token_profiles {
+            profile.authors = if trigger == "new_issue" {
+                vec![profile.account.clone()]
+            } else {
+                vec![]
+            };
+            profile.reviewers = if trigger == "pr_review" {
+                vec![profile.account.clone()]
+            } else {
+                vec![]
+            };
+        }
         for flow in &mut s.flows {
             flow.profile_activation.insert("work".into(), false);
         }
@@ -240,7 +244,9 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
                     .unwrap();
             }
             let mut s = f.settings().unwrap();
-            s.authors = vec!["alice".into(), "bob".into()];
+            for profile in &mut s.token_profiles {
+                profile.authors = vec![profile.account.clone()];
+            }
             s.flows[0].enabled = false;
             f.save_settings(s).unwrap();
             baseline = 2;
@@ -323,7 +329,7 @@ async fn review_withdrawal_race_and_unobserved_edges_preserve_generation() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = settings();
-    s.authors.clear();
+    s.token_profiles[0].authors.clear();
     s.flows[2]
         .profile_activation
         .insert("personal".into(), false);

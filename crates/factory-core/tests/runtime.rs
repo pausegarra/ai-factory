@@ -97,15 +97,15 @@ async fn fixture() -> (
     let git_wrapper = common::remote_git(dir.path(), &source);
     let factory = common::open_with_api(dir.path().join("data"), &address).unwrap();
     let mut settings = factory.settings().unwrap();
-    settings.owners = vec!["acme".into()];
-    settings.authors = vec!["alice".into()];
-    settings.reviewers = vec!["alice".into()];
     settings.token_profiles = vec![TokenProfile {
         id: "alice".into(),
         label: "Test".into(),
         account: "alice".into(),
         token: Some("fixture-token".into()),
         has_token: false,
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
     }];
     settings.projects = vec![Project {
         id: "repo".into(),

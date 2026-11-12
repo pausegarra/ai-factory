@@ -16,7 +16,7 @@ afterEach(cleanup);
 
 it("ignores programmatic canvas move, remove, connect and selection callbacks while saving", async () => {
   const value: Settings = {
-    owners: [], authors: [], reviewers: [], token_profiles: [], projects: [],
+    token_profiles: [], projects: [],
     commands: { codex: "codex", opencode: "opencode", git: "git" },
     poll_interval_seconds: 15, max_concurrent: 4, start_at_login: false,
     flows: [

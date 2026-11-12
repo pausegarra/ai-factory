@@ -71,7 +71,7 @@ export function FlowsPage({
   onBusyChange,
 }: {
   settings: Settings;
-  onSave: (s: Settings) => Promise<void>;
+  onSave: (s: Settings) => Promise<Settings | void>;
   onDirtyChange?: (dirty: boolean) => void;
   onBusyChange?: (busy: boolean) => void;
 }) {

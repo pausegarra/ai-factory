@@ -17,12 +17,16 @@ npm run dev
 ## Set up your factory
 
 1. Add GitHub token profiles in Settings. Each token must belong to its configured login. Multiple accounts are supported; the issue author or assigned reviewer selects the account for a run.
-2. Set allowed owners, issue authors and reviewers. An empty reviewer list skips review request discovery.
+2. Set GitHub owners, allowed authors and allowed reviewers inside each token profile. A profile searches only its own owners with its own token. Include its GitHub login in allowed authors for issues and approval handling, or allowed reviewers for review requests. Empty owners disable discovery for that profile; an empty reviewer list skips its review request discovery.
 3. Repositories are downloaded automatically from GitHub using the event actor's token. No local clone or folder mapping is required.
 4. Edit the three Flows. Add/delete/drag nodes, connect dependencies, select Codex or OpenCode, model, effort, access, prompt and result JSON Schema. Save to apply changes to new runs.
 5. Set global concurrency and GitHub polling interval. Agents run without a duration limit and can be cancelled manually. Enable startup at login if required.
 
 Tokens are never returned to the UI after storage. An empty replacement field preserves the existing token; removing its profile removes the stored credential. Tokens need access to the repositories and the corresponding contents, issues and pull request operations. Factory verifies token identity and uses process-local Git credentials without changing global account settings.
+
+Permission lists are scoped to each profile, not shared across accounts. For example, a personal profile can watch `pausegarra` while a work profile watches `ITACCIONA`; neither token searches the other profile's owners. Search failures remain isolated from unrelated accounts and workflows.
+
+Existing global permission lists migrate when settings are loaded. Owners are copied to existing profiles without guessing which organizations each token can access; review each profile's owners once after upgrading. Authors and reviewers retain only the matching profile's login, preserving the previously effective account permissions. Explicit profile lists, including empty lists, take precedence. New profiles start with empty lists. Saved settings contain only profile scopes; token credentials and workflow activation preferences are preserved.
 
 GitHub tokens are stored in macOS Keychain, Windows Credential Manager or Linux Secret Service. SQLite stores account metadata and opaque credential references. There is no plaintext fallback: unlock the system credential store if saving or reading a token fails. Linux needs a running user D-Bus session and an unlocked Secret Service provider (such as GNOME Keyring or KWallet). Each GitHub operation retrieves only its actor's credential; an unavailable profile does not disable the scheduler or unrelated accounts. Native credential reads run outside the async executor. Historical logs are withheld if required secrets cannot be loaded for redaction.
 
@@ -93,6 +97,8 @@ Codex uses `codex exec --json`, access-specific sandboxing and an output schema.
 ```
 
 Valid statuses are `succeeded`, `blocked` and `failed`. `data` must satisfy the node schema. `data.approved=false` cannot be declared successful. Artifacts include `path`, `sha256` and `kind`; Factory validates authorized paths, existence and hashes.
+
+Artifact `kind` is descriptive metadata, not verification evidence. Factory replaces missing or blank categories with the neutral value `artifact`, and accepts a legacy `type` category when `kind` is absent. This normalization does not alter status, verification limitations, approval decisions or requested actions. Formatting repairs preserve the exact multiset of artifact paths and hashes and any originally declared categories; missing category metadata alone is not a workflow blocker. The canonical response must still pass the node schema and every artifact must pass filesystem and hash validation.
 
 Agents request GitHub operations through `data`; the engine performs REST calls with the actor token:
 

@@ -22,7 +22,7 @@ import {FlowsPage} from "../src/context/factory/infrastructure/presentations/flo
 afterEach(cleanup);
 function settings(connected=false):Settings {
   const nodes:FlowNode[]=["builder","code","tests","architecture"].map((id,i)=>({id,name:id,agent:"codex",model:"",effort:"",access:"read",prompt:"Review",result_schema:{},depends_on:connected&&i>0?["builder"]:[],position:{x:80+i*280,y:180}}));
-  return {owners:[],authors:[],reviewers:[],token_profiles:[],projects:[],commands:{codex:"codex",opencode:"opencode",git:"git"},poll_interval_seconds:15,max_concurrent:4,start_at_login:false,flows:[{id:"new_issue",name:"Issue",enabled:true,nodes},{id:"pr_approved",name:"Approved",enabled:false,nodes:[]},{id:"pr_review",name:"Review",enabled:false,nodes:[]}]};
+  return {token_profiles:[],projects:[],commands:{codex:"codex",opencode:"opencode",git:"git"},poll_interval_seconds:15,max_concurrent:4,start_at_login:false,flows:[{id:"new_issue",name:"Issue",enabled:true,nodes},{id:"pr_approved",name:"Approved",enabled:false,nodes:[]},{id:"pr_review",name:"Review",enabled:false,nodes:[]}]};
 }
 it("shows three distinct branches and no dependency selector in the inspector",async()=>{
   render(<FlowsPage settings={settings(true)} onSave={vi.fn()} />);

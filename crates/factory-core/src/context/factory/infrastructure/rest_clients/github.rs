@@ -155,12 +155,13 @@ impl Github {
     }
     pub(crate) async fn poll(factory: &Factory) -> Result<()> {
         let s = factory.store.public_settings()?;
-        if s.owners.is_empty() {
-            return Ok(());
-        }
         let mut failures = vec![];
-        for owner in &s.owners {
-            for author in &s.authors {
+        for profile in &s.token_profiles {
+            if !profile.allows_actor("new_issue") {
+                continue;
+            }
+            let author = &profile.account;
+            for owner in &profile.owners {
                 let result = async {
                     if !factory.workflow_enabled_for("new_issue", author)? {
                         return Ok(());
@@ -218,7 +219,7 @@ impl Github {
                 let repo = origin.repository.clone();
                 let n = origin.number;
                 let result=async {
-   if !factory.workflow_enabled_for("pr_approved", &origin.actor)? { return Ok(()); }ensure!(s.authors.iter().any(|a|a.eq_ignore_ascii_case(&origin.actor))&&s.owners.iter().any(|a|repo.split('/').next().unwrap().eq_ignore_ascii_case(a)),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.actor).await?)?;api.verify_actor(&origin.actor).await?;let pr=api.pr(&repo,n).await?;ensure!(pr["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)),"Tracked PR author mismatch");if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
+   if !factory.workflow_enabled_for("pr_approved", &origin.actor)? { return Ok(()); }let profile=s.profile_for(&origin.actor).context("Tracked source no longer authorized")?;ensure!(profile.allows_actor("pr_approved")&&profile.allows_owner(repo.split('/').next().unwrap()),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.actor).await?)?;api.verify_actor(&origin.actor).await?;let pr=api.pr(&repo,n).await?;ensure!(pr["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)),"Tracked PR author mismatch");if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
    let reviews=api.pages(&format!("/repos/{repo}/pulls/{n}/reviews")).await;let comments=api.pages(&format!("/repos/{repo}/issues/{n}/comments")).await;
    let approved=reviews.as_ref().is_ok_and(|rows|rows.iter().any(|r|r["state"]=="APPROVED"&&r["commit_id"].as_str().is_some_and(|c|c.eq_ignore_ascii_case(sha))));
    let fresh_comments:Vec<_>=comments.as_ref().map(|rows|rows.iter().filter(|c|c["body"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("ok")&&c["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)&&pr["user"]["login"].as_str().is_some_and(|p|p.eq_ignore_ascii_case(a)))).filter_map(|c|c["id"].as_u64()).filter(|id|factory.store.observation(&format!("approval-comment:{repo}#{n}:{id}")).ok().flatten().is_none()).collect()).unwrap_or_default();
@@ -230,8 +231,12 @@ impl Github {
             }
         }
         {
-            for owner in &s.owners {
-                for reviewer in &s.reviewers {
+            for profile in &s.token_profiles {
+                if !profile.allows_actor("pr_review") {
+                    continue;
+                }
+                let reviewer = &profile.account;
+                for owner in &profile.owners {
                     let result = async {
                         if !factory.workflow_enabled_for("pr_review", reviewer)? {
                             return Ok(());

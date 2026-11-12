@@ -3,12 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 
+mod settings_input;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "settings_input::SettingsInput")]
 pub struct Settings {
-    pub owners: Vec<String>,
-    pub authors: Vec<String>,
-    pub reviewers: Vec<String>,
     pub token_profiles: Vec<TokenProfile>,
     pub projects: Vec<Project>,
     pub commands: Commands,
@@ -22,10 +21,55 @@ pub struct TokenProfile {
     pub id: String,
     pub label: String,
     pub account: String,
+    #[serde(default)]
+    pub owners: Vec<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub reviewers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default)]
     pub has_token: bool,
+}
+
+impl TokenProfile {
+    pub fn allows_owner(&self, owner: &str) -> bool {
+        self.owners
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(owner))
+    }
+
+    pub fn allows_actor(&self, trigger: &str) -> bool {
+        let actors = match trigger {
+            "new_issue" | "pr_approved" => &self.authors,
+            "pr_review" => &self.reviewers,
+            _ => return false,
+        };
+        actors
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(&self.account))
+    }
+
+    /// Convert legacy global permissions to this account's effective scope.
+    pub fn apply_legacy_scope(
+        &mut self,
+        owners: &[String],
+        authors: &[String],
+        reviewers: &[String],
+    ) {
+        self.owners = owners.to_vec();
+        self.authors = authors
+            .iter()
+            .filter(|value| value.eq_ignore_ascii_case(&self.account))
+            .cloned()
+            .collect();
+        self.reviewers = reviewers
+            .iter()
+            .filter(|value| value.eq_ignore_ascii_case(&self.account))
+            .cloned()
+            .collect();
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
@@ -127,7 +171,7 @@ impl Default for Settings {
                 .collect(),
         }
         };
-        Self{owners:vec![],authors:vec![],reviewers:vec![],token_profiles:vec![],projects:vec![],commands:Commands{codex:"codex".into(),opencode:"opencode".into(),git:"git".into()},poll_interval_seconds:15,max_concurrent:4,start_at_login:false,flows:vec![
+        Self{token_profiles:vec![],projects:vec![],commands:Commands{codex:"codex".into(),opencode:"opencode".into(),git:"git".into()},poll_interval_seconds:15,max_concurrent:4,start_at_login:false,flows:vec![
    mk("new_issue","New issue",vec![("spec","Write a specification for the issue.","write",vec![]),("architect","Write an implementation plan from the specification.","write",vec!["spec"]),("plan_review","Review specification and plan. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["architect"]),("builder","Implement the approved plan. Run real verification and record evidence.","write",vec!["plan_review"]),("review_code","Review code and tests. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_tests","Review test coverage and verification evidence. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_architecture","Review the implementation against the approved architecture. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("publish","Check approvals and commit changes locally. Return data.publish={title,body} to publish a PR through the API; body must include Closes #<issue number>. Do not use gh.","write",vec!["review_code","review_tests","review_architecture"]) ]),
    mk("pr_approved","Approved PR",vec![("publish","Check the approved PR against the authenticated refs/ai-factory/base and refs/ai-factory/head snapshot. If the snapshot says merged=true, return data.merge={method:'squash'} only to retry pending branch cleanup; do not modify files or resolve conflicts. Otherwise, if conflicts exist, merge the checked base into the current working branch, resolve conflicts preserving both changes, run relevant verification, and commit the correction locally. Return data.update_pr={} to update the existing PR branch through Factory and wait for new approval. Never combine update_pr with merge. If there are no conflicts and no local changes, return data.merge={method:'squash'} to merge through the API. Do not use gh or perform remote Git operations.","write",vec![])]),
    mk("pr_review","Review requested",vec![("review","Review PR changes and run relevant tests. Return data.review={event:'APPROVE'|'REQUEST_CHANGES'|'COMMENT',body:'report'} to submit a review through the API. Do not use gh.","read",vec![])]) ]}
@@ -160,6 +204,9 @@ impl Settings {
                 valid_login(&t.account) && accounts.insert(t.account.to_lowercase()),
                 "Invalid or duplicate token account"
             );
+            for value in t.owners.iter().chain(&t.authors).chain(&t.reviewers) {
+                ensure!(valid_login(value), "Invalid GitHub login");
+            }
         }
         ids.clear();
         let mut repositories = HashSet::new();
@@ -173,14 +220,6 @@ impl Settings {
                 "Invalid or duplicate project ID"
             );
             ensure!(valid_repository(&p.repository), "Invalid repository");
-        }
-        for v in self
-            .owners
-            .iter()
-            .chain(&self.authors)
-            .chain(&self.reviewers)
-        {
-            ensure!(valid_login(v), "Invalid GitHub login");
         }
         ensure!(
             self.flows.len() == 3,
@@ -206,12 +245,16 @@ impl Settings {
         s
     }
     pub fn token_for(&self, actor: &str) -> Result<&str> {
-        self.token_profiles
-            .iter()
-            .find(|p| p.account.eq_ignore_ascii_case(actor))
+        self.profile_for(actor)
             .and_then(|p| p.token.as_deref())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("No API token configured for actor {actor}"))
+    }
+
+    pub fn profile_for(&self, actor: &str) -> Option<&TokenProfile> {
+        self.token_profiles
+            .iter()
+            .find(|profile| profile.account.eq_ignore_ascii_case(actor))
     }
 }
 impl Flow {
