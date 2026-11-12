@@ -95,7 +95,7 @@ fn reference_sha(value: &Value, branch: &str) -> Result<String> {
 }
 
 impl Github {
-    async fn repository_default(&self, repo: &str) -> Result<String> {
+    pub(super) async fn repository_default(&self, repo: &str) -> Result<String> {
         ensure!(valid_repository(repo), "Invalid repository identity");
         let value = self
             .request(Method::GET, &format!("/repos/{repo}"), None)

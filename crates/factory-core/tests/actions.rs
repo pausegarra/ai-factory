@@ -439,6 +439,128 @@ async fn publish_adopts_matching_existing_stable_branch_before_any_push() {
 }
 
 #[tokio::test]
+async fn publish_uses_repository_default_instead_of_agent_base_or_main_fallback() {
+    for (default, requested) in [
+        ("master", Some("main")),
+        ("master", None),
+        ("main", None),
+        ("trunk", Some("develop")),
+        ("release/Stable", Some("main")),
+    ] {
+        let e = event("new_issue");
+        let root = tempfile::tempdir().unwrap();
+        let (ws, branch, sha) = workspace(root.path(), &e);
+        let remote = root.path().join("remote.git");
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&ws, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        let mut published = pr(&e, &branch, &sha);
+        published["base"]["ref"] = json!(default);
+        let script = Script::start(vec![
+            Step::new("GET", "/user", Reply::Json(200, json!({"login":"alice"}))),
+            Step::new(
+                "GET",
+                &format!(
+                    "/repos/acme/repo/pulls?state=open&head=acme:{branch}&per_page=100&page=1"
+                ),
+                Reply::Json(200, json!([])),
+            ),
+            Step::new("GET", REPO_PATH, Reply::Json(200, repo_value(default))),
+            Step::new(
+                "POST",
+                "/repos/acme/repo/pulls",
+                Reply::Json(201, published.clone()),
+            )
+            .body(
+                json!({"title":"PR","body":"Closes #1","head":branch,"base":default,"draft":false}),
+            ),
+            Step::new("GET", PR_PATH, Reply::Json(200, published)),
+        ])
+        .await;
+        let (_app, f) = factory(&script.base);
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        let mut publish = json!({"title":"PR","body":"Closes #1"});
+        if let Some(requested) = requested {
+            publish["base"] = json!(requested);
+        }
+        api.publish_actions(
+            &f,
+            &e,
+            "attempt",
+            "publish",
+            &ws,
+            &result(json!({"publish":publish})),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("default={default}, requested={requested:?}: {error:#}"));
+        script.assert_done();
+        assert_eq!(
+            script.writes(),
+            vec![("POST".into(), "/repos/acme/repo/pulls".into())]
+        );
+        assert_eq!(
+            git(
+                &ws,
+                &["ls-remote", "origin", &format!("refs/heads/{branch}")]
+            ),
+            format!("{sha}\trefs/heads/{branch}")
+        );
+    }
+}
+
+#[tokio::test]
+async fn publish_requires_verified_default_before_pushing_or_creating_pr() {
+    for (status, metadata) in [
+        (200, json!({"full_name":"acme/repo"})),
+        (
+            200,
+            json!({"full_name":"other/repo","default_branch":"master"}),
+        ),
+        (200, repo_value("")),
+        (200, repo_value("invalid..branch")),
+        (403, json!({"message":"alice-token"})),
+    ] {
+        let e = event("new_issue");
+        let root = tempfile::tempdir().unwrap();
+        let (ws, branch, _) = workspace(root.path(), &e);
+        let remote = root.path().join("remote.git");
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&ws, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        let script = Script::start(vec![
+            Step::new("GET", "/user", Reply::Json(200, json!({"login":"alice"}))),
+            Step::new(
+                "GET",
+                &format!(
+                    "/repos/acme/repo/pulls?state=open&head=acme:{branch}&per_page=100&page=1"
+                ),
+                Reply::Json(200, json!([])),
+            ),
+            Step::new("GET", REPO_PATH, Reply::Json(status, metadata)),
+        ])
+        .await;
+        let (_app, f) = factory(&script.base);
+        let api = Github::with_base("alice-token", &script.base).unwrap();
+        let error = api
+            .publish_actions(
+                &f,
+                &e,
+                "attempt",
+                "publish",
+                &ws,
+                &result(json!({"publish":{"title":"PR","body":"Closes #1","base":"main"}})),
+            )
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains("alice-token"));
+        script.assert_done();
+        assert!(script.writes().is_empty());
+        assert!(
+            git(&ws, &["ls-remote", "origin"]).is_empty(),
+            "metadata error must precede push"
+        );
+    }
+}
+
+#[tokio::test]
 async fn all_actions_are_validated_before_any_git_or_github_mutation() {
     let writes = Arc::new(AtomicUsize::new(0));
     let w = writes.clone();

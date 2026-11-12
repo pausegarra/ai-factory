@@ -463,6 +463,9 @@ impl Github {
                 verify_published_pr(&pr, event, &branch)?;
                 n
             } else {
+                // Agents may return a guessed or stale base (often "main").
+                // Resolve the repository's actual principal branch before pushing.
+                let base = self.repository_default(&event.repository).await?;
                 check_active()?;
                 super::super::processes::agents::git_output(
                     factory,
@@ -472,7 +475,7 @@ impl Github {
                 )
                 .await?;
                 check_active()?;
-                let pr = self.request(Method::POST, &format!("/repos/{}/pulls", event.repository), Some(&json!({"title":p["title"],"body":body,"head":branch,"base":p["base"].as_str().unwrap_or("main"),"draft":false}))).await?;
+                let pr = self.request(Method::POST, &format!("/repos/{}/pulls", event.repository), Some(&json!({"title":p["title"],"body":body,"head":branch,"base":base,"draft":false}))).await?;
                 let n = pr["number"].as_u64().context("No created PR number")?;
                 let pr = self.pr(&event.repository, n).await?;
                 verify_published_pr(&pr, event, &branch)?;
