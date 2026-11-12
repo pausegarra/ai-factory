@@ -336,7 +336,7 @@ async fn wait_until(factory: &Factory, id: &str, status: &str) {
 async fn cancelled_worker_holds_approval_until_cleanup_returns_even_on_cleanup_error() {
     for fail in [false, true] {
         let (_dir, mut factory) = setup();
-        assert!(factory.settings().unwrap().owners.is_empty());
+        assert!(factory.settings().unwrap().token_profiles.is_empty());
         let active = queued(&factory, "pr_approved", 1);
         let (release, receive) = std::sync::mpsc::channel();
         let cleaner = Arc::new(GatedCleanup {

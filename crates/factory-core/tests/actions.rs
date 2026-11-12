@@ -99,6 +99,7 @@ fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
         label: "Alice".into(),
         token: Some("alice-token".into()),
         has_token: false,
+        ..Default::default()
     }];
     f.save_settings(s).unwrap();
     (dir, f)

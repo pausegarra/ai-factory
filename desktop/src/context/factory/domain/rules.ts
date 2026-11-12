@@ -117,6 +117,10 @@ export function validateSettings(s: Settings): string[] {
   for (const t of s.token_profiles) {
     if (!t.label.trim() || !t.account.trim())
       errors.push("Each token needs a name and GitHub account.");
+    for (const [field, logins] of Object.entries({ account: [t.account], owners: t.owners, authors: t.authors, reviewers: t.reviewers })) {
+      if (logins.some((login) => !/^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(login)))
+        errors.push(`${t.label || "Profile"}: ${field} must contain valid GitHub logins.`);
+    }
     if (!t.has_token && !t.token?.trim())
       errors.push(`Add a token for ${t.label || "the new profile"}.`);
     if (accounts.has(t.account.toLowerCase()))

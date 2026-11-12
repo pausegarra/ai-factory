@@ -17,6 +17,7 @@ fn with_token(token: &str) -> Settings {
         account: "alice".into(),
         token: Some(token.into()),
         has_token: false,
+        ..Default::default()
     });
     settings
 }
@@ -47,6 +48,7 @@ fn github_tokens_are_not_written_to_sqlite() {
         account: "alice".into(),
         token: Some("fixture-token-must-not-reach-sqlite".into()),
         has_token: false,
+        ..Default::default()
     });
     factory.save_settings(settings).unwrap();
     let db = Connection::open(dir.path().join("factory.sqlite3")).unwrap();
@@ -270,7 +272,11 @@ fn config_import_keeps_credentials_out_of_settings_json() {
     let config = dir.path().join("config.yaml");
     std::fs::write(&config, "github:\n  owners: [acme]\n").unwrap();
     factory.import_legacy(Some(config), None).unwrap();
-    assert!(factory.settings().unwrap().token_profiles[0].has_token);
+    let imported = factory.settings().unwrap();
+    assert!(imported.token_profiles[0].has_token);
+    assert_eq!(imported.token_profiles[0].owners, vec!["acme"]);
+    assert!(imported.token_profiles[0].authors.is_empty());
+    assert!(imported.token_profiles[0].reviewers.is_empty());
     assert!(!raw(&dir.path().join("app")).contains("import-fixture-token"));
 }
 

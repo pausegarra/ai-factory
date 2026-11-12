@@ -82,6 +82,7 @@ export function App() {
   async function saveSettings(value: Settings) {
     const result = await factoryApi.saveSettings(value);
     setSettings(result);
+    return result;
   }
   function navigate(value: string) {
     if (savingWorkflow) return;

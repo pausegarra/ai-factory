@@ -34,6 +34,9 @@ export interface TokenProfile {
   account: string;
   token?: string;
   has_token: boolean;
+  owners: string[];
+  authors: string[];
+  reviewers: string[];
 }
 export interface Project {
   id: string;
@@ -41,9 +44,6 @@ export interface Project {
   source_path: string;
 }
 export interface Settings {
-  owners: string[];
-  authors: string[];
-  reviewers: string[];
   token_profiles: TokenProfile[];
   projects: Project[];
   commands: { codex: string; opencode: string; git: string };

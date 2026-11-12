@@ -30,7 +30,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(factoryApi.detail).mockResolvedValue({ state: "available", detail });
   vi.mocked(factoryApi.logs).mockResolvedValue({ text: "", offset: 0, next_offset: 0, eof: true });
-  vi.mocked(factoryApi.settings).mockResolvedValue({ owners: [], authors: [], reviewers: [], token_profiles: [], projects: [], commands: { codex: "", opencode: "", git: "" }, poll_interval_seconds: 15, max_concurrent: 1, start_at_login: false, flows: [detail.flow] });
+  vi.mocked(factoryApi.settings).mockResolvedValue({ token_profiles: [], projects: [], commands: { codex: "", opencode: "", git: "" }, poll_interval_seconds: 15, max_concurrent: 1, start_at_login: false, flows: [detail.flow] });
 });
 afterEach(() => { cleanup(); mocks.listeners.clear(); });
 it("confirms once, keeps navigation usable and announces success", async () => {

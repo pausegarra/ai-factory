@@ -241,15 +241,15 @@ sys.exit(code)
         );
         let factory = common::open_with_api(dir.path().join("app"), &api_base).unwrap();
         let mut s = factory.settings().unwrap();
-        s.owners = vec!["acme".into()];
-        s.authors = vec!["alice".into()];
-        s.reviewers = vec!["alice".into()];
         s.token_profiles = vec![TokenProfile {
             id: "alice".into(),
             account: "alice".into(),
             label: "Alice".into(),
             token: Some("fixture-token".into()),
             has_token: false,
+            owners: vec!["acme".into()],
+            authors: vec!["alice".into()],
+            reviewers: vec!["alice".into()],
         }];
         s.commands.git = wrapper.to_string_lossy().into();
         s.commands.opencode = dir.path().join("agent").to_string_lossy().into();

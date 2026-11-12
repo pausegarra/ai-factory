@@ -50,9 +50,6 @@ afterEach(() => {
   mocked.listeners.clear();
 });
 const settings: Settings = {
-  owners: [],
-  authors: [],
-  reviewers: [],
   token_profiles: [],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
@@ -109,8 +106,7 @@ it("considers setup complete with GitHub credentials and owners without a local 
       snapshot={snapshot}
       settings={{
         ...settings,
-        owners: ["owner"],
-        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: true }],
+        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: true, owners: ["owner"], authors: [], reviewers: [] }],
       }}
       onPage={() => {}}
       onRun={() => {}}
@@ -124,8 +120,7 @@ it.each(["token", "owner"])("keeps setup guidance when %s is missing without req
       snapshot={snapshot}
       settings={{
         ...settings,
-        owners: missing === "owner" ? [] : ["owner"],
-        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: missing !== "token" }],
+        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: missing !== "token", owners: missing === "owner" ? [] : ["owner"], authors: [], reviewers: [] }],
       }}
       onPage={() => {}}
       onRun={() => {}}
@@ -134,6 +129,16 @@ it.each(["token", "owner"])("keeps setup guidance when %s is missing without req
   expect(screen.getByRole("heading", { name: "Set up your first production line" })).toBeTruthy();
   expect(screen.queryByText("Local project")).toBeNull();
   expect(screen.queryByText(/add a project/i)).toBeNull();
+});
+it("requires token and owners on the same profile for setup readiness", () => {
+  render(<OverviewPage snapshot={snapshot} settings={{ ...settings,
+    token_profiles: [
+      { id: "work", label: "Work", account: "worker", has_token: true, owners: [], authors: [], reviewers: [] },
+      { id: "personal", label: "Personal", account: "alice", has_token: false, owners: ["alice"], authors: [], reviewers: [] },
+    ],
+  }} onPage={() => {}} onRun={() => {}} />);
+  expect(screen.getByRole("heading", { name: "Set up your first production line" })).toBeTruthy();
+  expect(screen.getByText("Owners and permissions").className).not.toContain("done");
 });
 it("shows a newly enqueued run from an event without refresh or polling", async () => {
   vi.mocked(factoryApi.settings).mockResolvedValue(settings);
@@ -225,7 +230,7 @@ it("keeps workflow edits when navigation is cancelled", async () => {
 
 function activationSettings(): Settings {
   const value = structuredClone(settings);
-  value.token_profiles = [{ id: "work", label: "Work", account: "alice", has_token: true }];
+  value.token_profiles = [{ id: "work", label: "Work", account: "alice", has_token: true, owners: [], authors: [], reviewers: [] }];
   for (const flow of value.flows) {
     flow.nodes = [{ id: "plan", name: "Plan", agent: "codex", model: "", effort: "", access: "read", prompt: "Plan", result_schema: {}, depends_on: [], position: { x: 80, y: 180 } }];
   }
@@ -307,4 +312,51 @@ it("shows activation rejection from retry without changing run detail", async ()
   await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Workflow new_issue for @alice is disabled globally"));
   expect(screen.getByRole("heading", { name: run.title })).toBeTruthy();
   expect(select).not.toHaveBeenCalled();
+});
+
+
+it("rehydrates saved account scopes from canonical backend settings without leaving unsaved changes", async () => {
+  const value = activationSettings();
+  value.projects = [{ id: "legacy", repository: "owner/repo", source_path: "/legacy/repo" }];
+  value.flows[0].profile_activation = { work: false };
+  vi.mocked(factoryApi.settings).mockResolvedValue(value);
+  vi.mocked(factoryApi.snapshot).mockResolvedValue(snapshot);
+  vi.mocked(factoryApi.saveSettings).mockImplementation(async (next) => ({
+    ...next,
+    token_profiles: next.token_profiles.map((profile) => ({
+      ...profile,
+      owners: [...new Set(profile.owners.map((login) => login.toLowerCase()))],
+      authors: [...new Set(profile.authors.map((login) => login.toLowerCase()))],
+      reviewers: [...new Set(profile.reviewers.map((login) => login.toLowerCase()))],
+      has_token: true,
+      token: undefined,
+    })),
+  }));
+  render(<App />);
+  await screen.findByRole("heading", { name: "Factory overview." });
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "Work-Org, work-org" } });
+  fireEvent.change(screen.getByLabelText("Allowed authors"), { target: { value: "ALICE, alice" } });
+  fireEvent.change(screen.getByLabelText("Allowed reviewers"), { target: { value: "ALICE, alice" } });
+  fireEvent.change(screen.getByLabelText("Replace token"), { target: { value: "replacement-fixture" } });
+  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value: "30" } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  });
+  await screen.findByText("Settings saved.");
+  expect((screen.getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org");
+  expect((screen.getByLabelText("Allowed authors") as HTMLInputElement).value).toBe("alice");
+  expect((screen.getByLabelText("Allowed reviewers") as HTMLInputElement).value).toBe("alice");
+  expect((screen.getByLabelText("Replace token") as HTMLInputElement).value).toBe("");
+  expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+  const submitted = vi.mocked(factoryApi.saveSettings).mock.lastCall![0];
+  expect(submitted.projects).toEqual(value.projects);
+  expect(submitted.commands).toEqual(value.commands);
+  expect(submitted.flows).toEqual(value.flows);
+  expect(submitted.poll_interval_seconds).toBe(30);
+  expect(submitted.token_profiles[0].token).toBe("replacement-fixture");
+  fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect(screen.getByRole("heading", { name: "Factory overview." })).toBeTruthy();
 });

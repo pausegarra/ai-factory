@@ -29,8 +29,7 @@ export function OverviewPage({
   onRun: (id: string) => void;
 }) {
   const configured =
-    settings.token_profiles.some((t) => t.has_token) &&
-    settings.owners.length > 0;
+    settings.token_profiles.some((t) => t.has_token && t.owners.length > 0);
   const { metrics } = snapshot;
   const active = snapshot.runs.filter((r) =>
     ["running", "queued"].includes(r.status),
@@ -114,7 +113,7 @@ export function OverviewPage({
                 <CheckCircle size={16} />
                 GitHub account
               </span>
-              <span className={settings.owners.length ? "done" : ""}>
+              <span className={configured ? "done" : ""}>
                 <CheckCircle size={16} />
                 Owners and permissions
               </span>

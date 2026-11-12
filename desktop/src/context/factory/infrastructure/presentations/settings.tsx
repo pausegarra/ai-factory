@@ -2,18 +2,25 @@ import { useEffect, useState } from "react";
 import {
   FloppyDisk,
   Folder,
-  GitBranch,
   Key,
   Plus,
   Sliders,
   Terminal,
   Trash,
 } from "@phosphor-icons/react";
-import type { Settings } from "../../domain/types";
+import type { Settings, TokenProfile } from "../../domain/types";
 import { validateFlowActivation, validateSettings } from "../../domain/rules";
 import { factoryApi } from "../ipc/factory-api";
 import { LegacyImport } from "./legacy-import";
 import { Field, Notice, Toggle } from "./ui";
+type ScopeField = "owners" | "authors" | "reviewers";
+function scopeLists(settings: Settings): Record<string, Record<ScopeField, string>> {
+  return Object.fromEntries(settings.token_profiles.map((profile) => [profile.id, {
+    owners: profile.owners.join(", "),
+    authors: profile.authors.join(", "),
+    reviewers: profile.reviewers.join(", "),
+  }]));
+}
 export function SettingsPage({
   settings,
   onSave,
@@ -21,16 +28,12 @@ export function SettingsPage({
   onDirtyChange,
 }: {
   settings: Settings;
-  onSave: (s: Settings) => Promise<void>;
+  onSave: (s: Settings) => Promise<Settings | void>;
   appDir: string;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState(() => structuredClone(settings));
-  const [lists, setLists] = useState({
-    owners: settings.owners.join(", "),
-    authors: settings.authors.join(", "),
-    reviewers: settings.reviewers.join(", "),
-  });
+  const [lists, setLists] = useState(() => scopeLists(settings));
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -42,6 +45,22 @@ export function SettingsPage({
   function update(patch: Partial<Settings>) {
     setDraft((s) => ({ ...s, ...patch }));
     setSaved(false);
+  }
+  function updateProfile(id: string, patch: Partial<TokenProfile>) {
+    setDraft((value) => ({
+      ...value,
+      token_profiles: value.token_profiles.map((profile) =>
+        profile.id === id ? { ...profile, ...patch } : profile,
+      ),
+    }));
+    setSaved(false);
+  }
+  function updateScope(profile: TokenProfile, field: ScopeField, value: string) {
+    setLists((previous) => ({
+      ...previous,
+      [profile.id]: { ...previous[profile.id], [field]: value },
+    }));
+    updateProfile(profile.id, { [field]: split(value) });
   }
   async function save() {
     const token_profiles = draft.token_profiles.map((profile) => ({
@@ -58,15 +77,17 @@ export function SettingsPage({
     setBusy(true);
     setError("");
     try {
-      await onSave(next);
-      setDraft({
-        ...next,
-        token_profiles: next.token_profiles.map((t) => ({
+      const stored = await onSave(next) ?? next;
+      const clean = {
+        ...stored,
+        token_profiles: stored.token_profiles.map((t) => ({
           ...t,
           has_token: t.has_token || !!t.token,
           token: undefined,
         })),
-      });
+      };
+      setDraft(clean);
+      setLists(scopeLists(clean));
       setSaved(true);
     } catch (e) {
       setError(String(e));
@@ -76,22 +97,14 @@ export function SettingsPage({
   }
   function discard() {
     setDraft(structuredClone(settings));
-    setLists({
-      owners: settings.owners.join(", "),
-      authors: settings.authors.join(", "),
-      reviewers: settings.reviewers.join(", "),
-    });
+    setLists(scopeLists(settings));
     setError("");
     setSaved(false);
   }
   async function imported() {
     const latest = await factoryApi.settings();
     setDraft(latest);
-    setLists({
-      owners: latest.owners.join(", "),
-      authors: latest.authors.join(", "),
-      reviewers: latest.reviewers.join(", "),
-    });
+    setLists(scopeLists(latest));
     setSaved(false);
   }
   const split = (value: string) =>
@@ -143,7 +156,7 @@ export function SettingsPage({
               <h2>GitHub accounts</h2>
               <p>
                 One token per account, stored in your system credential store.
-                AI Factory uses the event author’s profile.
+                Each account searches only its owners and uses its own permissions.
               </p>
             </div>
             <button
@@ -157,6 +170,9 @@ export function SettingsPage({
                       label: "",
                       account: "",
                       has_token: false,
+                      owners: [],
+                      authors: [],
+                      reviewers: [],
                       token: "",
                     },
                   ],
@@ -170,7 +186,10 @@ export function SettingsPage({
           {draft.token_profiles.length ? (
             <div className="token-list">
               {draft.token_profiles.map((profile, i) => (
-                <div className="editable-row" key={profile.id}>
+                <fieldset className="editable-row token-profile" key={profile.id}>
+                  <legend className="sr-only">
+                    {profile.label || `Account ${i + 1}`}{profile.account ? ` (@${profile.account})` : ""}
+                  </legend>
                   <span className="row-index">
                     {String(i + 1).padStart(2, "0")}
                   </span>
@@ -245,7 +264,36 @@ export function SettingsPage({
                   >
                     <Trash size={18} />
                   </button>
-                </div>
+                  <div className="form-grid three-col profile-scopes">
+                    <Field label="GitHub owners" hint="Organizations or users searched by this account. Separate with commas.">
+                      <input
+                        value={lists[profile.id]?.owners ?? profile.owners.join(", ")}
+                        placeholder="your-organization"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        onChange={(e) => updateScope(profile, "owners", e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Allowed authors" hint="Include this account to trigger issues and approvals.">
+                      <input
+                        value={lists[profile.id]?.authors ?? profile.authors.join(", ")}
+                        placeholder="github-login"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        onChange={(e) => updateScope(profile, "authors", e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Allowed reviewers" hint="Include this account to trigger requested reviews.">
+                      <input
+                        value={lists[profile.id]?.reviewers ?? profile.reviewers.join(", ")}
+                        placeholder="github-login"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        onChange={(e) => updateScope(profile, "reviewers", e.target.value)}
+                      />
+                    </Field>
+                  </div>
+                </fieldset>
               ))}
             </div>
           ) : (
@@ -262,61 +310,6 @@ export function SettingsPage({
           )}
           <div className="section-note">
             Tokens stay hidden after saving. Multiple accounts are supported.
-          </div>
-        </section>
-        <section className="panel settings-section">
-          <div className="section-intro">
-            <div className="section-icon">
-              <GitBranch size={20} />
-            </div>
-            <div>
-              <h2>Permissions and scope</h2>
-              <p>
-                Choose which repositories to watch and who can trigger your
-                agents.
-              </p>
-            </div>
-          </div>
-          <div className="form-grid three-col">
-            <Field
-              label="GitHub owners"
-              hint="Organizations or users. Separate with commas."
-            >
-              <input
-                value={lists.owners}
-                placeholder="your-organization"
-                onChange={(e) => {
-                  setLists((v) => ({ ...v, owners: e.target.value }));
-                  update({ owners: split(e.target.value) });
-                }}
-              />
-            </Field>
-            <Field
-              label="Allowed authors"
-              hint="Authors of issues and approvals."
-            >
-              <input
-                value={lists.authors}
-                placeholder="github-login"
-                onChange={(e) => {
-                  setLists((v) => ({ ...v, authors: e.target.value }));
-                  update({ authors: split(e.target.value) });
-                }}
-              />
-            </Field>
-            <Field
-              label="Allowed reviewers"
-              hint="Accounts receiving review requests."
-            >
-              <input
-                value={lists.reviewers}
-                placeholder="github-login"
-                onChange={(e) => {
-                  setLists((v) => ({ ...v, reviewers: e.target.value }));
-                  update({ reviewers: split(e.target.value) });
-                }}
-              />
-            </Field>
           </div>
         </section>
         <section className="panel settings-section">

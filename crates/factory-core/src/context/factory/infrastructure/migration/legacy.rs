@@ -200,9 +200,15 @@ fn read_config(path: &Path, current: &Settings, warnings: &mut Vec<String>) -> R
     ensure!(data.is_object(), "Legacy config must be a mapping");
     let mut settings = current.clone();
     let github = &data["github"];
-    settings.owners = strings(github, "owners")?;
-    settings.authors = strings(github, "authors")?;
-    settings.reviewers = strings(github, "reviewers")?;
+    let owners = strings(github, "owners")?;
+    let authors = strings(github, "authors")?;
+    let reviewers = strings(github, "reviewers")?;
+    for value in owners.iter().chain(&authors).chain(&reviewers) {
+        ensure!(crate::valid_login(value), "Invalid GitHub login");
+    }
+    for profile in &mut settings.token_profiles {
+        profile.apply_legacy_scope(&owners, &authors, &reviewers);
+    }
     if let Some(n) = data.get("poll_seconds").and_then(Value::as_f64) {
         ensure!(n.is_finite() && n > 0., "Invalid legacy poll_seconds");
         settings.poll_interval_seconds = n.ceil() as u64;

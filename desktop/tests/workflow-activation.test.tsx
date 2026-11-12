@@ -8,8 +8,8 @@ import { WorkflowActivationFields } from "../src/context/factory/infrastructure/
 afterEach(cleanup);
 const flow = (): Flow => ({ id: "new_issue", name: "Issue", enabled: false, nodes: [] });
 const profiles: TokenProfile[] = [
-  { id: "work", label: "Work", account: "alice", has_token: true },
-  { id: "personal", label: "Personal", account: "bob", has_token: false },
+  { id: "work", label: "Work", account: "alice", has_token: true, owners: [], authors: [], reviewers: [] },
+  { id: "personal", label: "Personal", account: "bob", has_token: false, owners: [], authors: [], reviewers: [] },
 ];
 it("edits account preferences while globally disabled without mutating input", () => {
   const value = flow();
