@@ -143,6 +143,77 @@ async fn assert_gone(pid: i32) {
 }
 
 #[tokio::test]
+async fn disabled_workflow_does_not_stop_queued_or_running_runs() {
+    let (dir, factory, _sha, server) = fixture().await;
+    std::fs::write(dir.path().join("agent"),r#"#!/bin/sh
+cat >/dev/null
+touch "$AI_FACTORY_MEMORY_DIR/started"
+while [ ! -f "$AI_FACTORY_MEMORY_DIR/release" ]; do sleep 0.02; done
+printf '%s' '{"status":"succeeded","summary":"continued","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
+"#).unwrap();
+    let mut settings = factory.settings().unwrap();
+    settings.max_concurrent = 1;
+    factory.save_settings(settings).unwrap();
+    let mut ids = Vec::new();
+    for n in [1, 2] {
+        ids.push(
+            factory
+                .enqueue(TriggerEvent::issue(
+                    "acme/repo",
+                    n,
+                    "[AI] Runtime test",
+                    "alice",
+                    "",
+                ))
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let snapshots: Vec<_> = ids
+        .iter()
+        .map(|id| serde_json::to_value(factory.run_detail(id).unwrap().flow).unwrap())
+        .collect();
+    factory.start();
+    for (index, id) in ids.iter().enumerate() {
+        let memory = dir.path().join("data/memory/acme/repo/runs").join(id);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !memory.join("started").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if index == 0 {
+            assert_eq!(factory.snapshot().unwrap().metrics.running, 1);
+            assert_eq!(factory.snapshot().unwrap().metrics.queued, 1);
+            let mut settings = factory.settings().unwrap();
+            settings.flows[0].enabled = false;
+            settings.flows[0]
+                .profile_activation
+                .insert("alice".into(), false);
+            factory.save_settings(settings).unwrap();
+            assert_eq!(factory.snapshot().unwrap().metrics.running, 1);
+            assert_eq!(factory.snapshot().unwrap().metrics.queued, 1);
+        }
+        assert_eq!(
+            serde_json::to_value(factory.run_detail(id).unwrap().flow).unwrap(),
+            snapshots[index]
+        );
+        std::fs::write(memory.join("release"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while factory.run_detail(id).unwrap().run.status != "succeeded" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    factory.shutdown().await;
+    server.abort();
+    assert_eq!(factory.snapshot().unwrap().metrics.succeeded, 2);
+}
+
+#[tokio::test]
 async fn four_real_processes_from_three_triggers_share_default_capacity() {
     let (_dir, factory, sha, server) = fixture().await;
     let mut ids = Vec::new();

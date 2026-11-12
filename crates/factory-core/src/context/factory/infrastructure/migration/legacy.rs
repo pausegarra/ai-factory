@@ -254,6 +254,7 @@ fn read_config(path: &Path, current: &Settings, warnings: &mut Vec<String>) -> R
         }
     }
     for flow in &mut settings.flows {
+        flow.profile_activation.clear();
         let declaration = triggers.and_then(|t| t.get(&flow.id));
         let workflow = if triggers.is_some() {
             declaration.and_then(|t| t.get("workflow"))
@@ -510,6 +511,7 @@ fn snapshot_flow(workflow: &Value, trigger: &str) -> Result<Option<Flow>> {
         id: trigger.into(),
         name: format!("{trigger} (legacy snapshot)"),
         enabled: true,
+        profile_activation: Default::default(),
         max_parallel: usize::try_from(data["max_parallel"].as_u64().unwrap_or(3))?,
         nodes: parse_nodes(&normalized, path.parent().unwrap_or(Path::new(".")))?,
     };
@@ -631,11 +633,16 @@ fn read_database(
                     .iter()
                     .find(|f| f.id == event.trigger_id)
                     .cloned()
+                    .map(|mut flow| {
+                        flow.profile_activation.clear();
+                        flow
+                    })
             })
             .unwrap_or(Flow {
                 id: event.trigger_id.clone(),
                 name: event.trigger_id.clone(),
                 enabled: false,
+                profile_activation: Default::default(),
                 max_parallel: 3,
                 nodes: vec![],
             });

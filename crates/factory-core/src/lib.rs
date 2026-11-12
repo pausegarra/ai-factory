@@ -32,6 +32,7 @@ pub mod context {
                 pub mod legacy;
             }
             pub mod repositories {
+                pub(crate) mod admission;
                 pub(crate) mod pr_origins;
                 pub(crate) mod run_deletions;
                 pub mod secure_settings;

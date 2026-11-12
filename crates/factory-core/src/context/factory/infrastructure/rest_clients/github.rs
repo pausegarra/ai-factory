@@ -2,7 +2,6 @@ use crate::*;
 use anyhow::{bail, ensure, Context};
 use reqwest::{Client, Method};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
 
 mod merge_cleanup;
 
@@ -162,7 +161,7 @@ impl Github {
         for owner in &s.owners {
             for author in &s.authors {
                 let result = async {
-                    if !s.flows.iter().any(|f| f.id == "new_issue" && f.enabled) {
+                    if !factory.workflow_enabled_for("new_issue", author)? {
                         return Ok(());
                     }
                     let api = factory.github(&factory.store.token_for(author).await?)?;
@@ -213,12 +212,12 @@ impl Github {
                 }
             }
         }
-        if s.flows.iter().any(|f| f.id == "pr_approved" && f.enabled) {
+        {
             for origin in factory.store.tracked_prs()? {
                 let repo = origin.repository.clone();
                 let n = origin.number;
                 let result=async {
-   ensure!(s.authors.iter().any(|a|a.eq_ignore_ascii_case(&origin.actor))&&s.owners.iter().any(|a|repo.split('/').next().unwrap().eq_ignore_ascii_case(a)),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.actor).await?)?;api.verify_actor(&origin.actor).await?;let pr=api.pr(&repo,n).await?;ensure!(pr["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)),"Tracked PR author mismatch");if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
+   if !factory.workflow_enabled_for("pr_approved", &origin.actor)? { return Ok(()); }ensure!(s.authors.iter().any(|a|a.eq_ignore_ascii_case(&origin.actor))&&s.owners.iter().any(|a|repo.split('/').next().unwrap().eq_ignore_ascii_case(a)),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.actor).await?)?;api.verify_actor(&origin.actor).await?;let pr=api.pr(&repo,n).await?;ensure!(pr["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)),"Tracked PR author mismatch");if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
    let reviews=api.pages(&format!("/repos/{repo}/pulls/{n}/reviews")).await;let comments=api.pages(&format!("/repos/{repo}/issues/{n}/comments")).await;
    let approved=reviews.as_ref().is_ok_and(|rows|rows.iter().any(|r|r["state"]=="APPROVED"&&r["commit_id"].as_str().is_some_and(|c|c.eq_ignore_ascii_case(sha))));
    let fresh_comments:Vec<_>=comments.as_ref().map(|rows|rows.iter().filter(|c|c["body"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("ok")&&c["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)&&pr["user"]["login"].as_str().is_some_and(|p|p.eq_ignore_ascii_case(a)))).filter_map(|c|c["id"].as_u64()).filter(|id|factory.store.observation(&format!("approval-comment:{repo}#{n}:{id}")).ok().flatten().is_none()).collect()).unwrap_or_default();
@@ -229,10 +228,13 @@ impl Github {
                 }
             }
         }
-        if s.flows.iter().any(|f| f.id == "pr_review" && f.enabled) {
+        {
             for owner in &s.owners {
                 for reviewer in &s.reviewers {
                     let result = async {
+                        if !factory.workflow_enabled_for("pr_review", reviewer)? {
+                            return Ok(());
+                        }
                         let api = factory.github(&factory.store.token_for(reviewer).await?)?;
                         api.verify_actor(reviewer).await?;
                         let rows = api
@@ -240,18 +242,13 @@ impl Github {
                                 "is:pr is:open user:{owner} review-requested:{reviewer}"
                             ))
                             .await?;
-                        let key = format!("review:{owner}:{reviewer}");
-                        let mut previous = factory.store.observation(&key)?.unwrap_or(json!({}));
-                        let map = previous.as_object_mut().context("Invalid review state")?;
-                        let mut present = HashSet::new();
-                        let mut hydrated = HashMap::new();
+                        let mut candidates = Vec::new();
                         for row in rows {
                             let repo = repository(&row)?;
                             if !repo.split('/').next().unwrap().eq_ignore_ascii_case(owner) {
                                 continue;
                             }
                             let n = row["number"].as_u64().context("Invalid PR number")?;
-                            let identity = format!("{repo}#{n}");
                             let pr = api.pr(&repo, n).await?;
                             if pr["state"] != "open"
                                 || !pr["requested_reviewers"].as_array().is_some_and(|rs| {
@@ -264,38 +261,17 @@ impl Github {
                             {
                                 continue;
                             }
-                            present.insert(identity.clone());
-                            hydrated.insert(identity, (repo.clone(), n, pr));
+                            candidates.push(pr_event(
+                                "pr_review",
+                                String::new(),
+                                &repo,
+                                n,
+                                reviewer,
+                                &pr,
+                                json!({"pull_request":pr,"reviewer":reviewer}),
+                            )?);
                         }
-                        for (identity, (repo, n, pr)) in hydrated {
-                            let old = map.get(&identity);
-                            let requested =
-                                old.and_then(|v| v["requested"].as_bool()).unwrap_or(false);
-                            let generation =
-                                old.and_then(|v| v["generation"].as_u64()).unwrap_or(0);
-                            if !requested {
-                                let generation = generation + 1;
-                                factory.enqueue(pr_event(
-                                    "pr_review",
-                                    format!("review:{repo}#{n}:{reviewer}:{generation}"),
-                                    &repo,
-                                    n,
-                                    reviewer,
-                                    &pr,
-                                    json!({"pull_request":pr,"reviewer":reviewer}),
-                                )?)?;
-                                map.insert(
-                                    identity,
-                                    json!({"requested":true,"generation":generation}),
-                                );
-                            }
-                        }
-                        for (identity, v) in map.iter_mut() {
-                            if !present.contains(identity) {
-                                v["requested"] = json!(false);
-                            }
-                        }
-                        factory.store.observe(&key, &previous)?;
+                        factory.enqueue_review_scan(owner, reviewer, &candidates)?;
                         Ok::<(), anyhow::Error>(())
                     }
                     .await;
@@ -464,6 +440,9 @@ impl Github {
                 verify_published_pr(&pr, event, &branch)?;
                 n
             } else {
+                // Agents may return a guessed or stale base (often "main").
+                // Resolve the repository's actual principal branch before pushing.
+                let base = self.repository_default(&event.repository).await?;
                 check_active()?;
                 super::super::processes::agents::git_output(
                     factory,
@@ -473,7 +452,7 @@ impl Github {
                 )
                 .await?;
                 check_active()?;
-                let pr = self.request(Method::POST, &format!("/repos/{}/pulls", event.repository), Some(&json!({"title":p["title"],"body":body,"head":branch,"base":p["base"].as_str().unwrap_or("main"),"draft":false}))).await?;
+                let pr = self.request(Method::POST, &format!("/repos/{}/pulls", event.repository), Some(&json!({"title":p["title"],"body":body,"head":branch,"base":base,"draft":false}))).await?;
                 let n = pr["number"].as_u64().context("No created PR number")?;
                 let pr = self.pr(&event.repository, n).await?;
                 verify_published_pr(&pr, event, &branch)?;

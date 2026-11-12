@@ -46,9 +46,17 @@ pub struct Flow {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile_activation: BTreeMap<String, bool>,
     #[serde(default = "default_parallel")]
     pub max_parallel: usize,
     pub nodes: Vec<FlowNode>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationState {
+    Enabled,
+    DisabledGlobally,
+    DisabledForProfile,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -96,6 +104,7 @@ impl Default for Settings {
             id: id.into(),
             name: name.into(),
             enabled: true,
+            profile_activation: BTreeMap::new(),
             max_parallel: 3,
             nodes: steps
                 .into_iter()
@@ -120,7 +129,7 @@ impl Default for Settings {
         }
         };
         Self{owners:vec![],authors:vec![],reviewers:vec![],token_profiles:vec![],projects:vec![],commands:Commands{codex:"codex".into(),opencode:"opencode".into(),git:"git".into()},poll_interval_seconds:15,max_concurrent:4,node_timeout_seconds:3600,start_at_login:false,flows:vec![
-   mk("new_issue","New issue",vec![("spec","Write a specification for the issue.","write",vec![]),("architect","Write an implementation plan from the specification.","write",vec!["spec"]),("plan_review","Review specification and plan. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["architect"]),("builder","Implement the approved plan. Run real verification and record evidence.","write",vec!["plan_review"]),("review_code","Review code and tests. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_tests","Review test coverage and verification evidence. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_architecture","Review the implementation against the approved architecture. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("publish","Check approvals and commit changes locally. Return data.publish={title,body,base} to publish a PR through the API; body must include Closes #<issue number>. Do not use gh.","write",vec!["review_code","review_tests","review_architecture"]) ]),
+   mk("new_issue","New issue",vec![("spec","Write a specification for the issue.","write",vec![]),("architect","Write an implementation plan from the specification.","write",vec!["spec"]),("plan_review","Review specification and plan. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["architect"]),("builder","Implement the approved plan. Run real verification and record evidence.","write",vec!["plan_review"]),("review_code","Review code and tests. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_tests","Review test coverage and verification evidence. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_architecture","Review the implementation against the approved architecture. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("publish","Check approvals and commit changes locally. Return data.publish={title,body} to publish a PR through the API; body must include Closes #<issue number>. Do not use gh.","write",vec!["review_code","review_tests","review_architecture"]) ]),
    mk("pr_approved","Approved PR",vec![("publish","Check the approved PR. Return data.merge={method:'squash'} to merge through the API. Do not use gh.","write",vec![])]),
    mk("pr_review","Review requested",vec![("review","Review PR changes and run relevant tests. Return data.review={event:'APPROVE'|'REQUEST_CHANGES'|'COMMENT',body:'report'} to submit a review through the API. Do not use gh.","read",vec![])]) ]}
     }
@@ -207,6 +216,23 @@ impl Settings {
     }
 }
 impl Flow {
+    pub fn activation_for(&self, actor: &str, profiles: &[TokenProfile]) -> ActivationState {
+        if !self.enabled {
+            return ActivationState::DisabledGlobally;
+        }
+        let allowed = profiles
+            .iter()
+            .find(|profile| profile.account.eq_ignore_ascii_case(actor))
+            .and_then(|profile| self.profile_activation.get(&profile.id))
+            .copied()
+            .unwrap_or(true);
+        if allowed {
+            ActivationState::Enabled
+        } else {
+            ActivationState::DisabledForProfile
+        }
+    }
+
     /// Freeze effective agent settings for each node using the event actor's profile.
     pub fn for_actor(&self, actor: &str, profiles: &[TokenProfile]) -> Self {
         let profile = profiles
@@ -225,6 +251,9 @@ impl Flow {
     }
 
     pub fn validate(&self) -> Result<()> {
+        for profile in self.profile_activation.keys() {
+            ensure!(safe_id(profile), "Invalid workflow activation profile ID");
+        }
         ensure!(
             (1..=64).contains(&self.max_parallel),
             "Flow parallel limit must be 1..64"

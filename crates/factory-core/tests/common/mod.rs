@@ -12,6 +12,7 @@ use std::{
 #[derive(Default)]
 pub struct MemoryCredentials {
     pub values: Mutex<HashMap<String, String>>,
+    pub gets: Mutex<HashMap<String, usize>>,
     pub fail_set: AtomicBool,
     pub fail_get: AtomicBool,
     pub fail_delete: AtomicBool,
@@ -19,6 +20,7 @@ pub struct MemoryCredentials {
 }
 impl Credentials for MemoryCredentials {
     fn get(&self, key: &str) -> Result<Option<String>> {
+        *self.gets.lock().unwrap().entry(key.into()).or_default() += 1;
         anyhow::ensure!(
             !self.fail_get.load(Ordering::SeqCst),
             "fixture backend error with secret text"

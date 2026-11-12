@@ -240,11 +240,22 @@ fn locked_keychain_allows_metadata_edits_but_backend_secret_reads_fail_closed() 
     store.save_settings(&with_token("fixture-token")).unwrap();
     drop(store);
     credentials.fail_get.store(true, Ordering::SeqCst);
-    let store = Store::open_with_credentials(dir.path(), credentials).unwrap();
+    let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
     let mut settings = store.public_settings().unwrap();
     assert!(settings.token_profiles[0].has_token);
     settings.poll_interval_seconds = 30;
+    credentials.gets.lock().unwrap().clear();
+    settings.flows[0]
+        .profile_activation
+        .insert("alice".into(), false);
     store.save_settings(&settings).unwrap();
+    assert!(credentials.gets.lock().unwrap().is_empty());
+    assert_eq!(
+        store.public_settings().unwrap().flows[0]
+            .profile_activation
+            .get("alice"),
+        Some(&false)
+    );
     assert!(store.settings().is_err());
     assert!(!raw(dir.path()).contains("fixture-token"));
 }

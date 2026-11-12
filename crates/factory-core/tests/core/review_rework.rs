@@ -145,11 +145,30 @@ data='{}'"#,
                 round.to_string()
             );
             assert!(!memory.join("finish.count").exists());
+            if round == 1 {
+                let snapshot = serde_json::to_value(&detail.flow).unwrap();
+                let mut settings = factory.settings().unwrap();
+                settings.flows[0].enabled = false;
+                settings.flows[0]
+                    .profile_activation
+                    .insert("alice".into(), false);
+                factory.save_settings(settings).unwrap();
+                assert_eq!(
+                    serde_json::to_value(factory.run_detail(&id).unwrap().flow).unwrap(),
+                    snapshot
+                );
+            }
             std::fs::write(memory.join(format!("release-{round}")), "").unwrap();
         }
         let detail = terminal(&factory, &id).await;
         factory.shutdown().await;
         assert_eq!(detail.run.status, "succeeded", "{:?}", detail.nodes);
+        assert_eq!(detail.run.attempt, 1);
+        assert!(factory
+            .retry(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("disabled globally"));
         for node in ["builder", "review_a", "review_b", "review_c"] {
             assert_eq!(
                 std::fs::read_to_string(memory.join(format!("{node}.count"))).unwrap(),

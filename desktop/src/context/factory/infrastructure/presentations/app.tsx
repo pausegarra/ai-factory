@@ -45,6 +45,7 @@ export function App() {
     initiated.current.delete(id);
   }
   const [hasUnsaved, setHasUnsaved] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [pendingPage, setPendingPage] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [reload, setReload] = useState(0);
@@ -83,6 +84,7 @@ export function App() {
     setSettings(result);
   }
   function navigate(value: string) {
+    if (savingWorkflow) return;
     if (value === page) return;
     if (hasUnsaved) {
       setPendingPage(value);
@@ -123,6 +125,7 @@ export function App() {
           {nav.map((item) => (
             <button
               key={item.id}
+              disabled={savingWorkflow}
               aria-current={page === item.id ? "page" : undefined}
               className={`nav-item ${page === item.id ? "active" : ""}`}
               onClick={() => navigate(item.id)}
@@ -262,6 +265,7 @@ export function App() {
               settings={settings}
               onSave={saveSettings}
               onDirtyChange={setHasUnsaved}
+              onBusyChange={setSavingWorkflow}
             />
           ) : (
             <SettingsPage
@@ -319,7 +323,9 @@ export function App() {
               </button>
               <button
                 className="button button-primary"
+                disabled={savingWorkflow}
                 onClick={() => {
+                  if (savingWorkflow) return;
                   setPage(pendingPage);
                   setSelectedRun(null);
                   setHasUnsaved(false);
