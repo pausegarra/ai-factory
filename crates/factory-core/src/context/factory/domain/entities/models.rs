@@ -120,6 +120,9 @@ pub struct FlowNode {
     pub effort: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub token_overrides: BTreeMap<String, AgentConfig>,
+    // None preserves native discovery; Some lists the only skills enabled for this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
     pub access: String,
     pub prompt: String,
     #[serde(default = "empty_schema")]
@@ -159,6 +162,7 @@ impl Default for Settings {
                     model: String::new(),
                     effort: String::new(),
                     token_overrides: BTreeMap::new(),
+                    skills: None,
                     access: access.into(),
                     prompt: prompt.into(),
                     result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}})}else{empty_schema()},

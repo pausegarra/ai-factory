@@ -1,5 +1,6 @@
 mod results;
 
+use super::agent_skills::SkillPolicy;
 use super::workspaces;
 use crate::context::factory::application::services::reviews;
 use crate::*;
@@ -64,7 +65,7 @@ pub fn resolve_command(command: &str) -> PathBuf {
     }
     p
 }
-fn clean_env(command: &mut Command) {
+pub(super) fn clean_env(command: &mut Command) {
     for (k, _) in std::env::vars() {
         if k.starts_with("GIT_CONFIG_")
             || [
@@ -496,6 +497,14 @@ async fn execute_node(
     let (workspace, memory) = paths;
     ensure!(!cancel.is_cancelled(), "Run cancelled before agent launch");
     let settings = factory.store.public_settings()?;
+    let skill_policy = SkillPolicy::prepare(
+        &node.agent,
+        &settings.commands.codex,
+        node.skills.as_deref(),
+        workspace,
+        &cancel,
+    )
+    .await?;
     let session = factory.root.join("sessions").join(run);
     let result_path = session.join(format!("{}.result.json", node.id));
     let schema_path = session.join(format!("{}.schema.json", node.id));
@@ -539,7 +548,7 @@ async fn execute_node(
             String::new()
         };
         let prompt=format!("{prompt}{feedback}\n\nPrevious successful project runs (read-only context, mutable memory is private to this run):\n{prior}\n\n{}", include_str!("agent-instructions.md"));
-        let prompt = format!("{prompt}\n\n{contract}");
+        let prompt = format!("{prompt}\n\n{}\n\n{contract}", skill_policy.prompt()?);
         std::fs::write(session.join(format!("{}.prompt.txt", node.id)), &prompt)?;
         prompt
     };
@@ -651,6 +660,7 @@ async fn execute_node(
             if node.access == "write" && attempt == 0 {
                 cmd.arg("--add-dir").arg(memory);
             }
+            skill_policy.configure_codex(&mut cmd)?;
             cmd.arg("-");
         } else {
             cmd.args([
@@ -685,6 +695,7 @@ async fn execute_node(
                 external.insert(format!("{}/**", memory.display()), json!("allow"));
                 permissions["external_directory"] = Value::Object(external);
             }
+            skill_policy.configure_opencode(&mut permissions, attempt == 0);
             cmd.env("OPENCODE_CONFIG_CONTENT",json!({"permission":permissions,"agent":{"ai-factory":{"mode":"primary","permission":permissions}}}).to_string());
         }
         #[cfg(unix)]

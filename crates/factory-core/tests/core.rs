@@ -1141,3 +1141,6 @@ mod result_repair;
 #[cfg(unix)]
 #[path = "core/review_rework.rs"]
 mod review_rework;
+#[cfg(unix)]
+#[path = "core/skills.rs"]
+mod skills;

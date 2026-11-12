@@ -10,6 +10,7 @@ import type {
   ImportReport,
   Agent,
   AgentModel,
+  InstalledSkill,
 } from "../../domain/types";
 export const native = isTauri();
 const previewSettings: Settings = {
@@ -54,6 +55,12 @@ function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
 }
 export const factoryApi = {
   agentModels: (agent: Agent) => command<AgentModel[]>("get_agent_models", { agent }),
+  installedSkills: () =>
+    native
+      ? invoke<InstalledSkill[]>("get_installed_skills")
+      : Promise.reject(
+          new Error("Open AI Factory desktop to view installed skills."),
+        ),
   settings: () =>
     native
       ? invoke<Settings>("get_settings")

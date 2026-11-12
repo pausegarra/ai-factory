@@ -87,6 +87,15 @@ async fn get_agent_models(
 }
 
 #[tauri::command]
+async fn get_installed_skills() -> Result<Vec<factory_core::InstalledSkill>, String> {
+    tauri::async_runtime::spawn_blocking(
+        factory_core::context::factory::infrastructure::filesystem::skill_catalog::list_installed,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn get_snapshot(state: State<'_, DesktopState>) -> Result<Snapshot, String> {
     let factory = state.factory.clone();
     blocking(move || factory.snapshot()).await
@@ -248,6 +257,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_agent_models,
+            get_installed_skills,
             save_settings,
             get_snapshot,
             get_run_detail,

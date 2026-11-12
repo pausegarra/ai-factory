@@ -18,6 +18,7 @@ pub mod context {
             }
             pub mod dto {
                 pub mod agent_model;
+                pub mod installed_skill;
                 pub(crate) mod pr_workspace;
             }
             pub mod services {
@@ -28,6 +29,7 @@ pub mod context {
         pub mod infrastructure {
             pub mod filesystem {
                 pub mod run_cleanup;
+                pub mod skill_catalog;
             }
             pub mod migration {
                 pub mod legacy;
@@ -47,6 +49,7 @@ pub mod context {
             }
             pub mod processes {
                 pub mod agent_models;
+                pub(crate) mod agent_skills;
                 pub mod agents;
                 pub(crate) mod pr_workspace;
                 pub mod workspaces;
@@ -55,6 +58,7 @@ pub mod context {
     }
 }
 pub use context::factory::application::dto::agent_model::AgentModel;
+pub use context::factory::application::dto::installed_skill::InstalledSkill;
 pub use context::factory::application::services::factory::Factory;
 pub use context::factory::domain::entities::models::*;
 pub use context::factory::domain::entities::run_deletion::*;
