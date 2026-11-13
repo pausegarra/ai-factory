@@ -173,6 +173,7 @@ async fn agents_complete_after_legacy_timeout_for_both_clis() {
     for agent in ["codex", "opencode"] {
         let (_dir, f) = fixture(
             r#"cat >/dev/null
+echo READY
 sleep 2
 printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#,
             4,
@@ -193,6 +194,8 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' >
             .unwrap()
             .unwrap();
         f.start();
+        // Workspace preparation is separate from the agent's execution budget.
+        wait_for_cli_marker(&f, &id, "READY").await;
         let detail = terminal(&f, &id).await;
         f.shutdown().await;
         assert_eq!(
@@ -352,7 +355,28 @@ async fn terminal(f: &Factory, id: &str) -> RunDetail {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    panic!("run did not finish")
+    let detail = f.run_detail(id).unwrap();
+    let logs = f.logs(id, "spec", 0).unwrap().text;
+    f.shutdown().await;
+    panic!("run did not finish: {detail:?}\nCLI log:\n{logs}")
+}
+#[cfg(unix)]
+async fn wait_for_cli_marker(f: &Factory, id: &str, marker: &str) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let logs = f.logs(id, "spec", 0).unwrap().text;
+        if logs.lines().any(|line| line.starts_with(marker)) {
+            return logs;
+        }
+        let detail = f.run_detail(id).unwrap();
+        if !["queued", "running"].contains(&detail.run.status.as_str())
+            || tokio::time::Instant::now() >= deadline
+        {
+            f.shutdown().await;
+            panic!("CLI did not reach {marker}: {detail:?}\nCLI log:\n{logs}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 #[tokio::test]
 #[cfg(unix)]
@@ -875,7 +899,7 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
 #[tokio::test]
 #[cfg(unix)]
 async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
-    let (_dir, f) = fixture("cat >/dev/null\nsleep 30 &\necho CHILD:$!\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"", 4);
+    let (_dir, f) = fixture("cat >/dev/null\nsleep 30 &\necho CHILD:$!\nwhile [ ! -f .finish-cli ]; do sleep 0.01; done\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"", 4);
     let id = f
         .enqueue(TriggerEvent::issue(
             "acme/repo",
@@ -887,6 +911,18 @@ async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
         .unwrap()
         .unwrap();
     f.start();
+    // Start the existing two-second completion assertion only after the CLI has
+    // spawned its descendant. The handshake keeps it alive until we can observe
+    // the child, independently of clone/setup latency.
+    let text = wait_for_cli_marker(&f, &id, "CHILD:").await;
+    let pid: i32 = text
+        .lines()
+        .find_map(|l| l.strip_prefix("CHILD:"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let workspace = f.run_detail(&id).unwrap().run.workspace.unwrap();
+    std::fs::write(std::path::Path::new(&workspace).join(".finish-cli"), "").unwrap();
     let done = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let d = f.run_detail(&id).unwrap();
@@ -898,13 +934,8 @@ async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
     })
     .await;
     // Always cancel/clean up the fixture, including on the regression path.
+    let detail = f.run_detail(&id).unwrap();
     let text = f.logs(&id, "spec", 0).unwrap().text;
-    let pid: i32 = text
-        .lines()
-        .find_map(|l| l.strip_prefix("CHILD:"))
-        .unwrap()
-        .parse()
-        .unwrap();
     let mut alive = true;
     for _ in 0..100 {
         alive = unsafe { libc::kill(pid, 0) } == 0;
@@ -929,7 +960,7 @@ async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
     f.shutdown().await;
     assert!(
         done.is_ok(),
-        "CLI exited but inherited output pipes blocked completion"
+        "CLI exited but inherited output pipes blocked completion: {detail:?}\nCLI log:\n{text}"
     );
     assert!(!alive, "descendant survived its CLI session");
 }

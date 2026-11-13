@@ -63,6 +63,7 @@ export interface Project {
   source_path: string;
 }
 export interface Settings {
+  notification_connectors?: NotificationConnector[];
   token_profiles: TokenProfile[];
   codex_bindings?: Record<string, string>;
   projects: Project[];
@@ -186,3 +187,17 @@ export interface ImportReport {
   archive_path: string;
   warnings: string[];
 }
+
+export type NotificationEvent = "run_started" | "run_succeeded" | "run_failed" | "run_blocked";
+export interface NotificationConnector {
+  id: string;
+  label: string;
+  enabled: boolean;
+  events: NotificationEvent[];
+  type: string;
+  config: Record<string, unknown>;
+}
+export type TelegramNotificationConnector = NotificationConnector & {
+  type: "telegram";
+  config: { chat_id: string; has_token: boolean; bot_token?: string };
+};

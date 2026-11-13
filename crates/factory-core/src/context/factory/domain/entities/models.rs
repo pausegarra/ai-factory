@@ -11,6 +11,7 @@ pub(crate) const RELEASE_NODE_ID: &str = "factory_release";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "settings_input::SettingsInput")]
 pub struct Settings {
+    pub notification_connectors: Vec<super::notification_connector::NotificationConnector>,
     pub token_profiles: Vec<TokenProfile>,
     #[serde(default)]
     pub codex_bindings: BTreeMap<String, String>,
@@ -186,6 +187,7 @@ impl Default for Settings {
         }
         };
         Self {
+            notification_connectors: vec![],
             token_profiles: vec![],
             codex_bindings: BTreeMap::new(),
             projects: vec![],
@@ -280,6 +282,7 @@ impl Settings {
         flow
     }
     pub fn validate(&self) -> Result<()> {
+        super::notification_connector::validate_connectors(&self.notification_connectors)?;
         ensure!(
             (1..=64).contains(&self.max_concurrent),
             "Concurrency must be between 1 and 64"
@@ -349,6 +352,13 @@ impl Settings {
     }
     pub fn redacted(&self) -> Self {
         let mut s = self.clone();
+        for c in &mut s.notification_connectors {
+            if let super::notification_connector::ConnectorProvider::Telegram(config) =
+                &mut c.provider
+            {
+                config.bot_token = None;
+            }
+        }
         for t in &mut s.token_profiles {
             t.has_token = t.token.as_ref().is_some_and(|v| !v.is_empty());
             t.token = None;

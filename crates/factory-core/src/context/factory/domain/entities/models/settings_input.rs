@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Deserialize)]
 #[serde(default)]
 pub(super) struct SettingsInput {
+    notification_connectors: Vec<crate::NotificationConnector>,
     owners: Vec<String>,
     authors: Vec<String>,
     reviewers: Vec<String>,
@@ -47,6 +48,7 @@ impl Default for SettingsInput {
             owners: vec![],
             authors: vec![],
             reviewers: vec![],
+            notification_connectors: vec![],
             token_profiles: vec![],
             codex_bindings: defaults.codex_bindings,
             projects: defaults.projects,
@@ -81,6 +83,7 @@ impl From<SettingsInput> for Settings {
             })
             .collect();
         Self {
+            notification_connectors: input.notification_connectors,
             token_profiles,
             codex_bindings: input.codex_bindings,
             projects: input.projects,

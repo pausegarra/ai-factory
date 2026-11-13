@@ -8,6 +8,7 @@ import {
   Terminal,
   Trash,
 } from "@phosphor-icons/react";
+import { cleanNotificationConnectors } from "../../domain/notification-connectors";
 import type { Settings, TokenProfile } from "../../domain/types";
 import { validateFlowActivation, validateSettings } from "../../domain/rules";
 import { factoryApi } from "../ipc/factory-api";
@@ -148,7 +149,7 @@ export function SettingsPage({
       has_token: settings.token_profiles.some((saved) => saved.id === profile.id && saved.account.toLowerCase() === profile.account.toLowerCase() && saved.has_token),
       token: profile.token?.trim() || undefined,
     }));
-    const next = { ...draft, token_profiles, flows: settings.flows };
+    const next = { ...draft, token_profiles, flows: settings.flows, notification_connectors: settings.notification_connectors ?? [] };
     const errors = [...validateSettings(next), ...next.flows.flatMap(validateFlowActivation)];
     if (errors.length) {
       setError(errors.join(" "));
@@ -162,6 +163,7 @@ export function SettingsPage({
       const stored = await onSave(next) ?? next;
       const clean = {
         ...stored,
+        notification_connectors: cleanNotificationConnectors(stored.notification_connectors ?? []),
         token_profiles: stored.token_profiles.map((t) => ({
           ...t,
           has_token: t.has_token || !!t.token,

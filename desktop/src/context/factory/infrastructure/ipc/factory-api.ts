@@ -16,6 +16,7 @@ import type {
 } from "../../domain/types";
 export const native = isTauri();
 const previewSettings: Settings = {
+  notification_connectors: [],
   token_profiles: [],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },

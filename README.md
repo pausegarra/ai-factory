@@ -102,6 +102,36 @@ affect runs or cleanup. Error details in notifications use brief safe summaries.
 Full run details remain available in Runs. Browser preview does not send native
 notifications.
 
+
+Open **Notifications → Add connector** to configure Telegram destinations. Give each
+connector a name, enter its bot token and chat ID, choose **Run started**, **Run
+succeeded**, **Run failed** and/or **Run blocked**, then enable it and **Save
+changes**. New connectors start disabled. Disabled connectors can be saved
+incomplete; disabling preserves their destination, token and event preferences.
+Changes apply only after saving. **Discard changes** restores saved preferences.
+Multiple Telegram destinations can have independent event selections. Other
+connector types can be added in the future; unsupported saved types are preserved
+but never send messages.
+
+Bot tokens use the OS credential store, without a plaintext fallback. The UI only
+reports whether a token is configured: leave the replacement field blank to keep
+it. Removing a connector removes its credential reference and schedules secure
+credential cleanup; failed cleanup is retried on a later save or restart. Unlock
+the OS credential store and retry if credentials cannot be saved or read.
+
+Telegram delivery works while the engine process is active, independently of the
+current page and the system notification channel. It uses the same safe run
+summaries, without raw errors, agent output or event URLs. Opening Notifications
+and saving preferences do not contact Telegram. Invalid credentials and delivery
+failures never change run results; safe diagnostics on stderr contain only the
+connector ID and a fixed failure code. There is no remote test action, automatic
+retry, durable delivery queue or delivery history. Each connector has an independent
+backlog of up to 64 pending messages; overflow and shutdown can discard messages.
+HTTP requests have a 10 second total timeout, a 3 second connection timeout and a
+64 KiB response limit. Pending events keep the destination and preferences captured
+at their transition; rotating or removing a credential invalidates pending jobs
+using its old reference. An already started delivery may finish.
+
 ## Agent results and GitHub actions
 
 By default, Codex uses `codex exec --json`, access-specific sandboxing and an output schema. OpenCode uses `opencode run --format json`, model/variant and per-node tool permissions. The prompt includes event context, workspace, project memory and dependency results. Each node execution invokes its agent once. There is no automatic response-repair or format-retry call. Codex receives its native `--output-schema`; OpenCode receives the final-response contract in both the task prompt and its configured agent system prompt. OpenCode's `--format json` controls CLI events and does not provide schema-constrained model output. Before returning, agents must check their complete JSON envelope against the supplied schema. Invalid first responses fail the node and skip its dependents; Factory retains `<node>.invalid-response.txt` and `<node>.validation-error.txt` in session history. Manual run retries and reviewer-requested content corrections retain their existing behavior.

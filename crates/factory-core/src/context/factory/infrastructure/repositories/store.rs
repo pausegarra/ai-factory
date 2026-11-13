@@ -28,6 +28,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS nodes (run_id TEXT NOT NULL,node_id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(run_id,node_id));
    CREATE TABLE IF NOT EXISTS observations (key TEXT PRIMARY KEY,json TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS credential_refs (profile_id TEXT PRIMARY KEY,account TEXT NOT NULL,reference TEXT NOT NULL UNIQUE);
+   CREATE TABLE IF NOT EXISTS notification_credential_refs (connector_id TEXT PRIMARY KEY,reference TEXT NOT NULL UNIQUE);
    CREATE TABLE IF NOT EXISTS credential_gc (reference TEXT PRIMARY KEY);")?;
         super::run_deletions::migrate(&mut db)?;
         super::agent_accounts::migrate(&db)?;

@@ -47,3 +47,13 @@ it("uses account IDs for managed OAuth commands and scopes model catalogs by Git
   await factoryApi.agentModels("codex", "work");
   expect(invoke).toHaveBeenCalledWith("get_agent_models", { agent: "codex", tokenProfileId: "work" });
 });
+it("passes notification secrets only in explicit save input through existing IPC", async () => {
+  const input = {notification_connectors:[{id:"team",label:"Team",enabled:true,events:["run_failed"],type:"telegram",config:{chat_id:"-1001",bot_token:"synthetic_fixture_token",has_token:false}}]} as unknown as Settings;
+  const output = {notification_connectors:[{...input.notification_connectors![0],config:{chat_id:"-1001",has_token:true}}]} as unknown as Settings;
+  vi.mocked(invoke).mockResolvedValue(output);
+  const saved = await factoryApi.saveSettings(input);
+  expect(invoke).toHaveBeenCalledWith("save_settings",{settings:input});
+  expect(saved.notification_connectors?.[0].config.bot_token).toBeUndefined();
+  const loaded = await factoryApi.settings();
+  expect(loaded.notification_connectors?.[0].config).toEqual({chat_id:"-1001",has_token:true});
+});
