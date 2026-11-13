@@ -102,10 +102,10 @@ it("confirms once, keeps navigation usable and announces success", async () => {
   fireEvent.click(buttons[buttons.length - 1]);
   expect(factoryApi.deleteRun).toHaveBeenCalledTimes(1);
   expect(screen.queryByRole("alertdialog")).toBeNull();
-  expect(screen.getByText("Deleting...")).toBeTruthy();
+  expect(screen.getByText("Deleting…")).toBeTruthy();
   vi.mocked(factoryApi.detail).mockImplementationOnce(() => new Promise(() => {}));
   act(() => mocks.listeners.forEach(cb => cb({ kind: "run_deletion_pending", run_id: "run-1", timestamp: "now" })));
-  expect(screen.getByText("Deleting...")).toBeTruthy();
+  expect(screen.getByText("Deleting…")).toBeTruthy();
   await act(async () => resolve({ state: "deleted", run_id: "run-1" }));
   expect(deleted).toHaveBeenCalledWith("run-1");
 });
@@ -512,7 +512,7 @@ it("only announces success after pending cleanup is retried and completed", asyn
   await showApp();
   await openRun();
   await startDelete();
-  expect(screen.getByText("Deleting...")).toBeTruthy();
+  expect(screen.getByText("Deleting…")).toBeTruthy();
   expect(screen.queryByText("Run deleted.")).toBeNull();
   vi.mocked(factoryApi.snapshot).mockResolvedValue({ ...empty, deletions: [pending] });
   vi.mocked(factoryApi.detail).mockResolvedValue({ state: "deleting", deletion: pending });
@@ -550,7 +550,7 @@ it("does not clear a real sync error when dismissing deletion feedback", async (
   });
   await startDelete();
   const notice = (await screen.findByText("Run deleted.")).closest('[role="status"]') as HTMLElement;
-  await screen.findByText("GitHub sync failed: Fixture sync denied");
+  await screen.findByText(/Factory reported a problem\./);
   fireEvent.click(within(notice).getByRole("button", { name: "Dismiss notice" }));
   expect(screen.getByRole("alert").textContent).toContain("Fixture sync denied");
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -561,8 +561,158 @@ it("keeps a snapshot load failure visible without deletion success", async () =>
   await showApp();
   vi.mocked(factoryApi.snapshot).mockRejectedValue(new Error("Fixture load denied"));
   await act(async () => emit("resync"));
-  await screen.findByText("Error: Fixture load denied");
+  await screen.findByText(/Could not load Factory data\./);
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   expect(screen.getByRole("alert").textContent).toContain("Fixture load denied");
   expect(screen.queryByText("Run deleted.")).toBeNull();
+});
+
+it("keeps deletion help in the action group and updates it with run state", async () => {
+  const states: Run["status"][] = ["queued", "succeeded", "running"];
+  vi.mocked(factoryApi.detail).mockImplementation(async () => ({
+    state: "available",
+    detail: { ...detail, run: { ...detail.run, status: states.shift() ?? "running" } },
+  }));
+  render(<RunDetailPage id="run-1" onBack={() => {}} onSelect={() => {}} />);
+  const button = await screen.findByRole("button", { name: "Delete run" });
+  const reasonId = button.getAttribute("aria-describedby");
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  expect(reasonId).toBeTruthy();
+  const reason = document.getElementById(reasonId!);
+  expect(reason?.textContent).toBe("Cancel this run before deleting it.");
+  expect(button.closest(".run-action-group")?.contains(reason)).toBe(true);
+  expect(reason?.getAttribute("role")).toBeNull();
+  expect(reason?.querySelector("button")).toBeNull();
+
+  await act(async () => emit("resync", "run-1"));
+  await waitFor(() => expect(button.getAttribute("aria-describedby")).toBeNull());
+  expect(document.getElementById(reasonId!)).toBeNull();
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+
+  await act(async () => emit("resync", "run-1"));
+  await waitFor(() => expect(button.getAttribute("aria-describedby")).toBe(reasonId));
+  expect(document.getElementById(reasonId!)?.textContent).toBe(
+    "Cancel this run before deleting it.",
+  );
+});
+
+it("closes only the cancel error and preserves historical run and step errors", async () => {
+  vi.mocked(factoryApi.detail).mockResolvedValue({
+    state: "available",
+    detail: {
+      ...detail,
+      run: { ...detail.run, status: "running", error: "Historical run failure" },
+      nodes: [{ ...detail.nodes[0], error: "Historical step failure" }],
+    },
+  });
+  vi.mocked(factoryApi.cancel).mockRejectedValue(new Error("fixture cancel denied"));
+  render(<RunDetailPage id="run-1" onBack={() => {}} onSelect={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+  const message = await screen.findByText(/Could not cancel run\./);
+  const alert = message.closest('[role="alert"]') as HTMLElement;
+  expect(alert.textContent).toContain("Could not cancel run.");
+  expect(alert.textContent).toContain("fixture cancel denied");
+  fireEvent.click(within(alert).getByRole("button", { name: "Dismiss notice" }));
+  expect(screen.queryByText(/Could not cancel run\./)).toBeNull();
+  expect(screen.getByText("Historical run failure")).toBeTruthy();
+  expect(screen.getByText("Historical step failure")).toBeTruthy();
+});
+
+it("retries a failed detail load without retrying the workflow", async () => {
+  vi.mocked(factoryApi.detail)
+    .mockRejectedValueOnce(new Error("fixture load denied"))
+    .mockResolvedValueOnce({ state: "available", detail });
+  render(<RunDetailPage id="run-1" onBack={() => {}} onSelect={() => {}} />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not load run details.");
+  expect(alert.textContent).toContain("fixture load denied");
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await screen.findByRole("button", { name: "Delete run" });
+  expect(factoryApi.retry).not.toHaveBeenCalled();
+});
+
+it("shows and retries a failed detail reload while deletion is pending", async () => {
+  const deletion = {
+    run_id: "run-1", repository: "owner/repo", number: 4,
+    title: detail.run.title, attempt: 1, state: "failed" as const,
+    last_error: "Cleanup failed",
+  };
+  vi.mocked(factoryApi.detail).mockResolvedValueOnce({ state: "deleting", deletion });
+  render(<RunDetailPage id="run-1" onBack={() => {}} onSelect={() => {}} />);
+  await screen.findByRole("heading", { name: "Deletion pending" });
+
+  vi.mocked(factoryApi.detail).mockRejectedValueOnce(new Error("fixture reload denied"));
+  await act(async () => emit("resync"));
+  await waitFor(() => expect(factoryApi.detail).toHaveBeenCalledTimes(2));
+  const message = await screen.findByText(/Could not load run details\./);
+  const alert = message.closest('[role="alert"]') as HTMLElement;
+  expect(alert.textContent).toContain("fixture reload denied");
+
+  vi.mocked(factoryApi.detail).mockResolvedValueOnce({ state: "available", detail });
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  await screen.findByRole("button", { name: "Delete run" });
+  expect(screen.queryByText(/Could not load run details\./)).toBeNull();
+  expect(factoryApi.detail).toHaveBeenCalledTimes(3);
+  expect(factoryApi.deleteRun).not.toHaveBeenCalled();
+  expect(factoryApi.retry).not.toHaveBeenCalled();
+});
+
+it("moves focus to Back to runs when pending deletion removes the focused detail heading", async () => {
+  const request = deferred<DeleteRunOutcome>();
+  const deletion = {
+    run_id: "run-1", repository: "owner/repo", number: 4,
+    title: detail.run.title, attempt: 1, state: "failed" as const,
+    last_error: "Cleanup failed",
+  };
+  vi.mocked(factoryApi.deleteRun).mockReturnValue(request.promise);
+  render(<RunDetailPage id="run-1" onBack={() => {}} onSelect={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Delete run" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete run" }));
+  const heading = screen.getByRole("heading", { name: detail.run.title });
+  expect(document.activeElement).toBe(heading);
+
+  vi.mocked(factoryApi.detail).mockResolvedValueOnce({ state: "deleting", deletion });
+  await act(async () => emit("run_deletion_pending", "run-1"));
+  await screen.findByRole("heading", { name: "Deletion pending" });
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to runs" }));
+});
+
+it("keeps outside focus when a pending deletion removes its detail", async () => {
+  const request = deferred<DeleteRunOutcome>();
+  const deletion = {
+    run_id: "run-1", repository: "owner/repo", number: 4,
+    title: detail.run.title, attempt: 1, state: "failed" as const,
+    last_error: "Cleanup failed",
+  };
+  vi.mocked(factoryApi.deleteRun).mockReturnValue(request.promise);
+  render(<><button type="button">Outside navigation</button><RunDetailPage id="run-1" onBack={() => {}} onSelect={() => {}} /></>);
+  fireEvent.click(await screen.findByRole("button", { name: "Delete run" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete run" }));
+  const outside = screen.getByRole("button", { name: "Outside navigation" });
+  outside.focus();
+
+  vi.mocked(factoryApi.detail).mockResolvedValueOnce({ state: "deleting", deletion });
+  await act(async () => emit("run_deletion_pending", "run-1"));
+  await screen.findByRole("heading", { name: "Deletion pending" });
+  expect(document.activeElement).toBe(outside);
+});
+
+it("does not navigate when a retry resolves after leaving its run", async () => {
+  const pending = deferred<string>();
+  const select = vi.fn();
+  vi.mocked(factoryApi.detail).mockImplementation(async (id) => ({
+    state: "available",
+    detail: { ...detail, run: { ...detail.run, id, status: "failed" } },
+  }));
+  vi.mocked(factoryApi.retry).mockReturnValue(pending.promise);
+  const view = render(
+    <RunDetailPage id="run-1" onBack={() => {}} onSelect={select} />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+  view.rerender(<RunDetailPage id="run-2" onBack={() => {}} onSelect={select} />);
+  await screen.findByRole("heading", { name: detail.run.title });
+  await act(async () => pending.resolve("run-3"));
+  expect(select).not.toHaveBeenCalled();
 });

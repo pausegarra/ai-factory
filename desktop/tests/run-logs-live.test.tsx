@@ -82,11 +82,13 @@ it("keeps current text on IPC failure then resumes from exact offset", async () 
   });
   render(<RunDetailPage id="run-order" onBack={() => {}} onSelect={() => {}} />);
   await screen.findByText("before error");
-  expect((await screen.findByRole("alert")).textContent).toContain("Log read failed:");
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "Could not read run logs.\nfixture offline",
+  );
   await event("resync");
   await screen.findByText("recovered");
   expect(screen.getByText("before error")).toBeTruthy();
-  await waitFor(() => expect(screen.queryByText(/Log read failed:/)).toBeNull());
+  await waitFor(() => expect(screen.queryByText(/Could not read run logs\./)).toBeNull());
   expect(factoryApi.logs).toHaveBeenLastCalledWith("run-order", "check_conflicts", 800);
 });
 

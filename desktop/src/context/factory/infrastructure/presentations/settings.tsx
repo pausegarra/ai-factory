@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   FloppyDisk,
   Folder,
@@ -14,6 +14,7 @@ import { factoryApi } from "../ipc/factory-api";
 import { LegacyImport } from "./legacy-import";
 import { AgentsSettings } from "./agent-settings";
 import { Field, Notice, Toggle } from "./ui";
+import { noticeText } from "./notice-content";
 type ScopeField = "owners" | "authors" | "reviewers";
 const settingsTabs = [
   { id: "general", label: "General" },
@@ -26,6 +27,27 @@ function scopeLists(settings: Settings): Record<string, Record<ScopeField, strin
     authors: profile.authors.join(", "),
     reviewers: profile.reviewers.join(", "),
   }]));
+}
+function reconcileScopeLists(
+  current: Record<string, Record<ScopeField, string>>,
+  previous: Settings,
+  incoming: Settings,
+): Record<string, Record<ScopeField, string>> {
+  const previousLists = scopeLists(previous);
+  return Object.fromEntries(incoming.token_profiles.map((profile) => {
+    const saved = {
+      owners: profile.owners.join(", "),
+      authors: profile.authors.join(", "),
+      reviewers: profile.reviewers.join(", "),
+    };
+    const old = previousLists[profile.id];
+    const local = current[profile.id];
+    return [profile.id, {
+      owners: old?.owners === saved.owners ? local?.owners ?? saved.owners : saved.owners,
+      authors: old?.authors === saved.authors ? local?.authors ?? saved.authors : saved.authors,
+      reviewers: old?.reviewers === saved.reviewers ? local?.reviewers ?? saved.reviewers : saved.reviewers,
+    }];
+  }));
 }
 export function SettingsPage({
   settings,
@@ -46,37 +68,68 @@ export function SettingsPage({
   const [accountBusy, setAccountBusy] = useState(false);
   const [tab, setTab] = useState<typeof settingsTabs[number]["id"]>("general");
   const tabsId = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  const mounted = useRef(true);
+  const saveSerial = useRef(0);
+  const importRefreshSerial = useRef(0);
+  const editRevision = useRef(0);
+  const previousSettings = useRef(settings);
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      saveSerial.current += 1;
+      importRefreshSerial.current += 1;
+    };
+  }, []);
+  useEffect(() => {
+    const previous = previousSettings.current;
+    const wasClean = JSON.stringify(draft) === JSON.stringify(previous);
+    previousSettings.current = settings;
+    if (wasClean && !busy) {
+      setDraft(structuredClone(settings));
+      setLists((current) => reconcileScopeLists(current, previous, settings));
+    }
+  }, [settings]);
   useEffect(() => {
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
   }, [dirty, onDirtyChange]);
   function update(patch: Partial<Settings>) {
+    editRevision.current += 1;
     setDraft((s) => ({ ...s, ...patch }));
+    setError("");
     setSaved(false);
   }
   function updateProfile(id: string, patch: Partial<TokenProfile>) {
+    editRevision.current += 1;
     setDraft((value) => ({
       ...value,
       token_profiles: value.token_profiles.map((profile) =>
         profile.id === id ? { ...profile, ...patch } : profile,
       ),
     }));
+    setError("");
     setSaved(false);
   }
   function removeProfile(id: string) {
+    editRevision.current += 1;
     setDraft((value) => ({
       ...value,
       token_profiles: value.token_profiles.filter((profile) => profile.id !== id),
       ...(value.codex_bindings ? { codex_bindings: Object.fromEntries(Object.entries(value.codex_bindings).filter(([profileId]) => profileId !== id)) } : {}),
     }));
+    setError("");
     setSaved(false);
   }
   function removeAccountBindings(accountId: string) {
+    editRevision.current += 1;
     setDraft((value) => ({
       ...value,
       ...(value.codex_bindings ? { codex_bindings: Object.fromEntries(Object.entries(value.codex_bindings).filter(([, id]) => id !== accountId)) } : {}),
     }));
+    setError("");
     setSaved(false);
   }
   function updateScope(profile: TokenProfile, field: ScopeField, value: string) {
@@ -88,6 +141,8 @@ export function SettingsPage({
   }
   async function save() {
     if (busy || accountBusy) return;
+    setSaved(false);
+    setError("");
     const token_profiles = draft.token_profiles.map((profile) => ({
       ...profile,
       has_token: settings.token_profiles.some((saved) => saved.id === profile.id && saved.account.toLowerCase() === profile.account.toLowerCase() && saved.has_token),
@@ -99,8 +154,10 @@ export function SettingsPage({
       setError(errors.join(" "));
       return;
     }
+    const ticket = ++saveSerial.current;
+    const revision = editRevision.current;
+    const current = () => mounted.current && saveSerial.current === ticket;
     setBusy(true);
-    setError("");
     try {
       const stored = await onSave(next) ?? next;
       const clean = {
@@ -111,26 +168,37 @@ export function SettingsPage({
           token: undefined,
         })),
       };
-      setDraft(clean);
-      setLists(scopeLists(clean));
-      setSaved(true);
+      if (current() && editRevision.current === revision) {
+        setDraft(clean);
+        setLists(scopeLists(clean));
+        setSaved(true);
+      }
     } catch (e) {
-      setError(String(e));
+      if (current()) setError(noticeText("Could not save settings.", e));
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }
   function discard() {
+    editRevision.current += 1;
     setDraft(structuredClone(settings));
     setLists(scopeLists(settings));
     setError("");
     setSaved(false);
   }
   async function imported() {
+    const ticket = ++importRefreshSerial.current;
+    const revision = editRevision.current;
     const latest = await factoryApi.settings();
-    setDraft(latest);
-    setLists(scopeLists(latest));
-    setSaved(false);
+    if (
+      mounted.current &&
+      importRefreshSerial.current === ticket &&
+      editRevision.current === revision
+    ) {
+      setDraft(latest);
+      setLists(scopeLists(latest));
+      setSaved(false);
+    }
   }
   const split = (value: string) =>
     value
@@ -142,7 +210,9 @@ export function SettingsPage({
       <div className="page-title">
         <div>
           <span className="eyebrow">YOUR FACTORY ENGINE</span>
-          <h1>Settings</h1>
+          <h1 ref={heading} tabIndex={-1}>
+            Settings
+          </h1>
           <p>Connect GitHub accounts. Shape how your team works.</p>
         </div>
         <div className="flex gap-3">
@@ -165,9 +235,9 @@ export function SettingsPage({
           </button>
         </div>
       </div>
-      {error && <Notice close={() => setError("")}>{error}</Notice>}
+      {error && <Notice close={() => setError("")} focusAfterClose={() => heading.current}>{error}</Notice>}
       {saved && (
-        <Notice tone="success" close={() => setSaved(false)}>
+        <Notice tone="success" close={() => setSaved(false)} focusAfterClose={() => heading.current}>
           Settings saved.
         </Notice>
       )}
@@ -204,15 +274,22 @@ export function SettingsPage({
             profiles={draft.token_profiles}
             bindings={draft.codex_bindings ?? {}}
             disabled={busy || accountBusy}
-            onBusyChange={setAccountBusy}
+            onBusyChange={(value) => {
+              if (mounted.current) setAccountBusy(value);
+            }}
             onBindingChange={(profileId, accountId) => {
+              if (!mounted.current) return;
+              editRevision.current += 1;
               setDraft((value) => ({ ...value, codex_bindings: Object.fromEntries([
                 ...Object.entries(value.codex_bindings ?? {}).filter(([id]) => id !== profileId),
                 ...(accountId ? [[profileId, accountId]] : []),
               ]) }));
+              setError("");
               setSaved(false);
             }}
-            onAccountRemoved={removeAccountBindings}
+            onAccountRemoved={(accountId) => {
+              if (mounted.current) removeAccountBindings(accountId);
+            }}
           />}
       </div>
       <div className="settings-stack" role="tabpanel" id={`${tabsId}-github-panel`} aria-labelledby={`${tabsId}-github`} hidden={tab !== "github"}>
@@ -496,7 +573,7 @@ export function SettingsPage({
             />
           </div>
         </section>
-        <LegacyImport disabled={dirty} onImported={imported} />
+        <LegacyImport disabled={dirty} onImported={imported} active={tab === "general"} />
         <section className="storage-note">
           <Folder size={20} />
           <div>

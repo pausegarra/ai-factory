@@ -32,12 +32,46 @@ import type {
 import { TRIGGERS } from "../../domain/types";
 import { connectNodes, removeNode, validateFlow } from "../../domain/rules";
 import { Empty, Field, Notice } from "./ui";
+import { noticeText } from "./notice-content";
 import { AgentModelFields } from "./agent-model-fields";
 import { TokenAgentFields } from "./token-agent-fields";
 import { WorkflowActivationFields } from "./workflow-activation-fields";
 import { SkillSelectorDialog } from "./skill-selector-dialog";
 import { arrangeFlow, displayFlow, flowConnections, hasAutomaticLayout } from "../../application/flow-layout";
 type AgentNode = Node<{ step: FlowNode; index: number }, "agent">;
+type SkillCatalogState = {
+  contextKey: string;
+  skills: InstalledSkill[] | null;
+  loading: boolean;
+  error: string;
+};
+type SkillOpening = { ticket: number; nodeId: string; contextKey: string };
+const emptySkillCatalog: SkillCatalogState = {
+  contextKey: "",
+  skills: null,
+  loading: false,
+  error: "",
+};
+function makeSkillContextKey(
+  trigger: Trigger,
+  nodeId: string,
+  settings: Settings,
+  node?: FlowNode,
+) {
+  return JSON.stringify([
+    trigger,
+    nodeId,
+    settings.commands.codex,
+    settings.codex_bindings ?? {},
+    settings.token_profiles.map((profile) => profile.id),
+    node ? {
+      agent: node.agent,
+      model: node.model,
+      effort: node.effort,
+      token_overrides: node.token_overrides ?? {},
+    } : null,
+  ]);
+}
 function AgentBox({ data, selected }: NodeProps<AgentNode>) {
   return (
     <div className={`agent-node ${selected ? "selected" : ""}`}>
@@ -90,25 +124,124 @@ export function FlowsPage({
   const [selectedEdges, setSelectedEdges] = useState<string[]>([]);
   const [layoutRevision, setLayoutRevision] = useState(0);
   const [error, setError] = useState("");
+  const [stepError, setStepError] = useState<{ nodeId: string; message: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [schemaText, setSchemaText] = useState("");
   const [schemas, setSchemas] = useState<Record<string, string>>({});
-  const [skillCatalog, setSkillCatalog] = useState<InstalledSkill[] | null>(null);
-  const [skillCatalogLoading, setSkillCatalogLoading] = useState(false);
-  const [skillCatalogError, setSkillCatalogError] = useState("");
+  const [skillCatalog, setSkillCatalog] = useState<SkillCatalogState>(emptySkillCatalog);
   const [skillDialogNodeId, setSkillDialogNodeId] = useState("");
+  const heading = useRef<HTMLHeadingElement>(null);
+  const schemaField = useRef<HTMLTextAreaElement>(null);
+  const mounted = useRef(true);
+  const saveSerial = useRef(0);
+  const triggerVisit = useRef(0);
+  const skillVisit = useRef(0);
+  const skillRequest = useRef(0);
+  const skillOpening = useRef<SkillOpening | null>(null);
+  const latestSettings = useRef(settings);
+  const latestTrigger = useRef(trigger);
+  latestSettings.current = settings;
+  latestTrigger.current = trigger;
   const original = settings.flows.find((f) => f.id === trigger)!;
   const flow = displayFlow(draft?.id === trigger ? draft : original);
   // React Flow can emit node and edge removals in the same event.
   const latestFlow = useRef(flow);
   latestFlow.current = flow;
+  const latestFlowRef = latestFlow;
   const node = flow.nodes.find((n) => n.id === selected);
   const defaultCodexAccountId = settings.token_profiles
     .map((profile) => settings.codex_bindings && Object.hasOwn(settings.codex_bindings, profile.id) ? settings.codex_bindings[profile.id] : undefined)
     .find(Boolean);
   const skillDialogNode = flow.nodes.find((n) => n.id === skillDialogNodeId);
+  const currentSkillContext = skillDialogNodeId
+    ? makeSkillContextKey(trigger, skillDialogNodeId, settings, skillDialogNode)
+    : "";
+  const catalogIsCurrent = !!skillDialogNode && skillCatalog.contextKey === currentSkillContext;
+  const visibleSkillCatalog = catalogIsCurrent ? skillCatalog : emptySkillCatalog;
+  const skillCatalogLoading = !!skillDialogNode && (!catalogIsCurrent || visibleSkillCatalog.loading);
+  const skillCatalogError = visibleSkillCatalog.error;
+  const currentSkills = catalogIsCurrent ? skillCatalog.skills : null;
+
+  function currentSkillContextKey(nodeId: string) {
+    const currentNode = latestFlowRef.current.nodes.find((step) => step.id === nodeId);
+    return makeSkillContextKey(latestTrigger.current, nodeId, latestSettings.current, currentNode);
+  }
+
+  function invalidateSkillDialog() {
+    skillVisit.current += 1;
+    skillRequest.current += 1;
+    skillOpening.current = null;
+    setSkillDialogNodeId("");
+    setSkillCatalog(emptySkillCatalog);
+  }
+
+  async function refreshSkillCatalog() {
+    const opening = skillOpening.current;
+    if (!opening) return;
+    const request = ++skillRequest.current;
+    const current = () =>
+      mounted.current &&
+      skillOpening.current?.ticket === opening.ticket &&
+      skillRequest.current === request &&
+      currentSkillContextKey(opening.nodeId) === opening.contextKey &&
+      latestFlowRef.current.nodes.some((step) => step.id === opening.nodeId);
+    setSkillCatalog({ contextKey: opening.contextKey, skills: null, loading: true, error: "" });
+    if (!onLoadSkills) {
+      if (current()) {
+        setSkillCatalog({
+          contextKey: opening.contextKey,
+          skills: null,
+          loading: false,
+          error: noticeText("Could not load installed skills.", "Open AI Factory desktop to list installed skills."),
+        });
+      }
+      return;
+    }
+    try {
+      const skills = await onLoadSkills();
+      if (current()) setSkillCatalog({ contextKey: opening.contextKey, skills, loading: false, error: "" });
+    } catch (reason) {
+      if (current()) {
+        setSkillCatalog({
+          contextKey: opening.contextKey,
+          skills: null,
+          loading: false,
+          error: noticeText("Could not load installed skills.", reason),
+        });
+      }
+    }
+  }
+
+  function openSkillSelector(nodeId: string) {
+    if (busy) return;
+    const selectedNode = latestFlow.current.nodes.find((step) => step.id === nodeId);
+    if (!selectedNode) return;
+    const contextKey = makeSkillContextKey(trigger, nodeId, settings, selectedNode);
+    const opening = { ticket: ++skillVisit.current, nodeId, contextKey };
+    skillOpening.current = opening;
+    setSkillDialogNodeId(nodeId);
+    setSkillCatalog({ contextKey, skills: null, loading: true, error: "" });
+    void refreshSkillCatalog();
+  }
   const dirty = draft != null;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      saveSerial.current += 1;
+      triggerVisit.current += 1;
+      skillVisit.current += 1;
+      skillRequest.current += 1;
+      skillOpening.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const opening = skillOpening.current;
+    if (opening && (!skillDialogNode || opening.contextKey !== currentSkillContext)) {
+      invalidateSkillDialog();
+    }
+  }, [currentSkillContext, skillDialogNodeId]);
   useEffect(() => {
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
@@ -121,6 +254,7 @@ export function FlowsPage({
     if (busy) return;
     latestFlow.current = value;
     setDraft(value);
+    setError("");
     setSaved(false);
   }
   function updateTopology(next: Flow) {
@@ -137,42 +271,26 @@ export function FlowsPage({
       update(arrangeFlow(flow));
       setLayoutRevision((value) => value + 1);
       setError("");
-    } catch (error) { setError((error as Error).message); }
+    } catch (error) { setError(noticeText("Could not update workflow.", error)); }
   }
   function updateNode(patch: Partial<FlowNode>) {
     updateNodeById(selected, patch);
   }
   function updateNodeById(id: string, patch: Partial<FlowNode>) {
     if (busy) return;
+    if (
+      skillDialogNodeId === id &&
+      !Object.keys(patch).every((key) => key === "skills")
+    ) invalidateSkillDialog();
     const current = latestFlow.current;
     update({
       ...current,
       nodes: current.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n)),
     });
   }
-  async function refreshSkillCatalog() {
-    if (!onLoadSkills) {
-      setSkillCatalogError("Open AI Factory desktop to list installed skills.");
-      return;
-    }
-    setSkillCatalogLoading(true);
-    setSkillCatalogError("");
-    try {
-      setSkillCatalog(await onLoadSkills());
-    } catch (error) {
-      setSkillCatalogError((error as Error).message);
-    } finally {
-      setSkillCatalogLoading(false);
-    }
-  }
-  function openSkillSelector(nodeId: string) {
-    if (busy) return;
-    setSkillDialogNodeId(nodeId);
-    if (skillCatalog === null && !skillCatalogLoading)
-      void refreshSkillCatalog();
-  }
   function select(id: string) {
     if (busy) return;
+    invalidateSkillDialog();
     setSelectedEdges([]);
     setSelected(id);
     setSkillDialogNodeId("");
@@ -180,7 +298,7 @@ export function FlowsPage({
     setSchemaText(
       schemas[id] ?? JSON.stringify(n?.result_schema || {}, null, 2),
     );
-    setError("");
+    setStepError((previous) => previous?.nodeId === id ? previous : null);
   }
   function switchTrigger(id: Trigger) {
     if (busy) return;
@@ -188,17 +306,22 @@ export function FlowsPage({
       setError("Save or discard your changes before switching triggers.");
       return;
     }
+    invalidateSkillDialog();
     setTrigger(id);
+    triggerVisit.current += 1;
+    saveSerial.current += 1;
     setSelectedEdges([]);
     setSkillDialogNodeId("");
     setDraft(null);
     setSchemas({});
     setSelected("");
     setError("");
+    setStepError(null);
     setSaved(false);
   }
   function add() {
     if (busy) return;
+    invalidateSkillDialog();
     const id = `step_${crypto.randomUUID().slice(0, 8)}`;
     const next: FlowNode = {
       id,
@@ -218,45 +341,55 @@ export function FlowsPage({
   }
   function connect(c: Connection) {
     if (busy) return;
-    if (!c.source || !c.target) return;
     try {
       updateTopology(connectNodes(latestFlow.current, c.source, c.target));
-      setError("");
     } catch (e) {
-      setError((e as Error).message);
+      setError(noticeText("Could not update workflow.", e));
     }
   }
   async function save() {
     if (busy) return;
+    setSaved(false);
+    setError("");
+    setStepError(null);
     for (const n of flow.nodes) {
       if (schemas[n.id] !== undefined) {
         try {
           JSON.parse(schemas[n.id]);
-        } catch {
-          setError(`${n.name}: the schema needs valid JSON before saving.`);
+        } catch (reason) {
+          setSelected(n.id);
+          setSchemaText(schemas[n.id]);
+          setStepError({
+            nodeId: n.id,
+            message: noticeText("The result schema needs valid JSON before saving.", reason),
+          });
           return;
         }
       }
     }
     const errors = validateFlow(flow);
     if (errors.length) {
-      setError(errors.join(" "));
+      setError(noticeText("Could not update workflow.", errors.join(" ")));
       return;
     }
+    const ticket = ++saveSerial.current;
+    const visit = triggerVisit.current;
+    const current = () => mounted.current && saveSerial.current === ticket && triggerVisit.current === visit;
     setBusy(true);
-    setError("");
     try {
       await onSave({
         ...settings,
         flows: settings.flows.map((f) => (f.id === trigger ? flow : f)),
       });
-      setDraft(null);
-      setSchemas({});
-      setSaved(true);
+      if (current()) {
+        setDraft(null);
+        setSchemas({});
+        setSaved(true);
+      }
     } catch (e) {
-      setError(String(e));
+      if (current()) setError(noticeText("Could not save workflow.", e));
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }
   const nodes: AgentNode[] = flow.nodes.map((step, index) => ({
@@ -283,7 +416,9 @@ export function FlowsPage({
       <div className="page-title">
         <div>
           <span className="eyebrow">DESIGN YOUR PRODUCTION LINE</span>
-          <h1>Workflows</h1>
+          <h1 ref={heading} tabIndex={-1}>
+            Workflows
+          </h1>
           <p>Three entry points. Your way of building.</p>
         </div>
         <div className="flex gap-3">
@@ -297,6 +432,8 @@ export function FlowsPage({
                 setSchemas({});
                 setSelected("");
                 setError("");
+                setStepError(null);
+                setSaved(false);
               }}
             >
               Discard
@@ -312,9 +449,9 @@ export function FlowsPage({
           </button>
         </div>
       </div>
-      {error && <Notice close={() => setError("")}>{error}</Notice>}
+      {error && <Notice close={() => setError("")} focusAfterClose={() => heading.current}>{error}</Notice>}
       {saved && (
-        <Notice tone="success" close={() => setSaved(false)}>
+        <Notice tone="success" close={() => setSaved(false)} focusAfterClose={() => heading.current}>
           Workflow saved. New tasks will use this version.
         </Notice>
       )}
@@ -371,8 +508,8 @@ export function FlowsPage({
                 edges={edges}
                 nodeTypes={nodeTypes}
                 onNodeClick={(_, n) => select(n.id)}
-                onPaneClick={() => { if (busy) return; setSelected(""); setSelectedEdges([]); }}
-                onEdgeClick={() => { if (!busy) setSelected(""); }}
+                onPaneClick={() => { if (busy) return; invalidateSkillDialog(); setSelected(""); setSelectedEdges([]); setStepError(null); }}
+                onEdgeClick={() => { if (!busy) { invalidateSkillDialog(); setSelected(""); setStepError(null); } }}
                 onConnect={connect}
                 isValidConnection={(connection) => {
                   if (!connection.source || !connection.target || !flow.nodes.some((n) => n.id === connection.source) || !flow.nodes.some((n) => n.id === connection.target)) return false;
@@ -454,13 +591,13 @@ export function FlowsPage({
             </div>
           </div>
           {node && (
-            <aside className="node-inspector">
+            <aside className="node-inspector" key={JSON.stringify([trigger, node.id])}>
               <div className="inspector-heading">
                 <span className="eyebrow">STEP SETTINGS</span>
                 <button
                   className="icon-button"
                   aria-label="Close inspector"
-                  onClick={() => { if (!busy) setSelected(""); }}
+                  onClick={() => { if (!busy) { invalidateSkillDialog(); setSelected(""); setStepError(null); } }}
                 >
                   <X size={18} />
                 </button>
@@ -522,6 +659,7 @@ export function FlowsPage({
                 </button>
                 <Field label="Result schema · JSON">
                   <textarea
+                    ref={schemaField}
                     className="code-input"
                     rows={6}
                     value={schemaText}
@@ -530,17 +668,26 @@ export function FlowsPage({
                       setSchemaText(e.target.value);
                       setSchemas((v) => ({ ...v, [selected]: e.target.value }));
                       setDraft(flow);
+                      setError("");
                       setSaved(false);
                       try {
                         const parsed = JSON.parse(e.target.value);
                         updateNode({ result_schema: parsed });
-                        setError("");
-                      } catch {
-                        setError("The schema needs valid JSON before saving.");
+                        setStepError(null);
+                      } catch (reason) {
+                        setStepError({
+                          nodeId: selected,
+                          message: noticeText("The result schema needs valid JSON before saving.", reason),
+                        });
                       }
                     }}
                   />
                 </Field>
+                {stepError?.nodeId === node.id && (
+                  <Notice close={() => setStepError(null)} focusAfterClose={() => schemaField.current}>
+                    {stepError.message}
+                  </Notice>
+                )}
                 <div className="node-id">
                   <Code size={14} />
                   {node.id}
@@ -549,8 +696,10 @@ export function FlowsPage({
                   className="button button-danger w-full"
                   onClick={() => {
                     if (busy) return;
+                    invalidateSkillDialog();
                     updateTopology(removeNode(flow, node.id));
                     setSelected("");
+                    setStepError(null);
                   }}
                 >
                   <Trash size={16} />
@@ -581,12 +730,12 @@ export function FlowsPage({
       {skillDialogNode && (
         <SkillSelectorDialog
           key={skillDialogNode.id}
-          skills={skillCatalog}
+          skills={currentSkills}
           selectedSkills={skillDialogNode.skills}
           loading={skillCatalogLoading}
           error={skillCatalogError}
           onRetry={() => void refreshSkillCatalog()}
-          onCancel={() => setSkillDialogNodeId("")}
+          onCancel={invalidateSkillDialog}
           onApply={(skills) => {
             const previous = skillDialogNode.skills;
             const unchanged =
@@ -596,7 +745,7 @@ export function FlowsPage({
                   previous.length === skills.length &&
                   previous.every((id) => skills.includes(id));
             if (!unchanged) updateNodeById(skillDialogNode.id, { skills });
-            setSkillDialogNodeId("");
+            invalidateSkillDialog();
           }}
         />
       )}

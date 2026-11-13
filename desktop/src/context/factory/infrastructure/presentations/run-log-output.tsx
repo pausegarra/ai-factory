@@ -5,6 +5,7 @@ import { LiveResource } from "../../application/live-resource";
 import { RunLogProjection } from "../../application/services/run-log-projection";
 import { factoryApi } from "../ipc/factory-api";
 import { Notice } from "./ui";
+import { noticeText } from "./notice-content";
 import { RunLogViewer } from "./run-log-viewer";
 
 const EMPTY_DOCUMENT: LogDocument = { raw: "", eof: false, entries: [] };
@@ -45,7 +46,7 @@ export function RunLogOutput({ runId, nodeId, mode, onModeChange, follow, onRead
       },
       (reason) => {
         setDocument(projection.update(reader.snapshot()));
-        setError(`Log read failed: ${String(reason)}`);
+        setError(noticeText("Could not read run logs.", reason));
         readError.current();
       },
     );

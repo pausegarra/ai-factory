@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Ref } from "react";
 import {
   ArrowClockwise,
   ArrowLeft,
@@ -21,6 +21,7 @@ import { LiveResource } from "../../application/live-resource";
 import { Badge, date, duration, Empty, Notice } from "./ui";
 import { DeleteRunDialog } from "./delete-run-dialog";
 import { RunLogOutput } from "./run-log-output";
+import { noticeText } from "./notice-content";
 export function RunTable({
   runs,
   onSelect,
@@ -232,27 +233,61 @@ function RunDetailContent({
   const [deleting, setDeleting] = useState(false);
   const inFlight = useRef(false);
   const mounted = useRef(true);
+  const actionSerial = useRef(0);
   const callbacks = useRef({ onDeleted, onUnavailable });
   callbacks.current = { onDeleted, onUnavailable };
   const detailResource = useRef<LiveResource<RunView> | null>(null);
-  const progress = useRef<HTMLParagraphElement>(null);
-  const [error, setError] = useState("");
+  const backButton = useRef<HTMLButtonElement>(null);
+  const runHeading = useRef<HTMLHeadingElement>(null);
+  const retryDeletionButton = useRef<HTMLButtonElement>(null);
+  const focusedDetailBeforeExit = useRef<HTMLElement | null>(null);
+  const deleteReasonId = useId();
+  const runFeedbackId = useId();
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [nodeId, setNodeId] = useState("");
   const [logView, setLogView] = useState<LogViewMode>("readable");
   const [busy, setBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const visibleNodes = useMemo(() => detail ? orderRunSteps(detail) : [], [detail]);
+  function rememberDetailFocusBeforeExit() {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    const inRunFeedback = [
+      `${runFeedbackId}-load-error`,
+      `${runFeedbackId}-action-error`,
+    ].some((id) => document.getElementById(id)?.contains(active));
+    if (
+      active === runHeading.current ||
+      active === backButton.current ||
+      active === retryDeletionButton.current ||
+      inRunFeedback ||
+      active.closest(".run-page-title, .detail-grid, [role='alertdialog']")
+    ) {
+      focusedDetailBeforeExit.current = active;
+    }
+  }
+  useLayoutEffect(() => {
+    const previous = focusedDetailBeforeExit.current;
+    if (!previous) return;
+    focusedDetailBeforeExit.current = null;
+    if (!previous.isConnected && document.activeElement === document.body) {
+      backButton.current?.focus();
+    }
+  }, [detail, view]);
   useEffect(() => {
     mounted.current = true;
     setDetail(null);
     setView(null);
     setNodeId("");
-    setError("");
+    setLoadError("");
+    setActionError("");
     const resource = new LiveResource(
       {
         listen: (cb) =>
           factoryApi.subscribe((e) => {
             if (e.run_id === id && ["run_deleted", "run_deletion_pending", "run_deletion_failed"].includes(e.kind)) {
+              rememberDetailFocusBeforeExit();
               setDetail(null); setNodeId(""); setConfirm(false);
               if (e.kind === "run_deleted" && !inFlight.current) callbacks.current.onUnavailable?.(id);
             }
@@ -261,16 +296,18 @@ function RunDetailContent({
         load: () => factoryApi.detail(id),
       },
       (next) => {
+        if (next.state !== "available") rememberDetailFocusBeforeExit();
+        setLoadError("");
         setView(next);
         setDetail(next.state === "available" ? next.detail : null);
         if (next.state !== "available") { setNodeId(""); setConfirm(false); }
         if (next.state === "missing" && !inFlight.current) callbacks.current.onUnavailable?.(id);
       },
-      (e) => setError(String(e)),
+      (e) => setLoadError(noticeText("Could not load run details.", e)),
     );
     detailResource.current = resource;
     void resource.start();
-    return () => { mounted.current = false; resource.stop(); };
+    return () => { mounted.current = false; actionSerial.current += 1; resource.stop(); };
   }, [id]);
   useEffect(() => {
     if (!detail) return;
@@ -281,63 +318,84 @@ function RunDetailContent({
     });
   }, [detail, visibleNodes]);
   async function action(kind: "cancel" | "retry") {
+    const ticket = ++actionSerial.current;
+    const current = () => mounted.current && actionSerial.current === ticket;
     setBusy(true);
-    setError("");
+    setActionError("");
     try {
       if (kind === "cancel") await factoryApi.cancel(id);
-      else onSelect(await factoryApi.retry(id));
+      else {
+        const nextId = await factoryApi.retry(id);
+        if (current()) onSelect(nextId);
+      }
     } catch (e) {
-      setError(String(e));
+      if (current()) {
+        setActionError(
+          noticeText(
+            kind === "cancel" ? "Could not cancel run." : "Could not retry run.",
+            e,
+          ),
+        );
+      }
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }
   async function remove() {
     if (inFlight.current) return;
+    const ticket = ++actionSerial.current;
+    const current = () => mounted.current && actionSerial.current === ticket;
     inFlight.current = true;
     onDeletionStarted?.(id);
-    setConfirm(false); setDeleting(true); setError("");
+    if (document.activeElement?.closest('[role="alertdialog"]')) runHeading.current?.focus();
+    setConfirm(false); setDeleting(true); setActionError("");
     try {
       const outcome = await factoryApi.deleteRun(id);
       if (outcome.state === "deleted") callbacks.current.onDeleted?.(id);
-      else if (mounted.current) {
-          setView({ state: "deleting", deletion: outcome.deletion }); setDetail(null); setNodeId("");
+      else if (current()) {
+        rememberDetailFocusBeforeExit();
+        setView({ state: "deleting", deletion: outcome.deletion }); setDetail(null); setNodeId("");
       }
     } catch (e) {
       // A transport error does not establish whether the irreversible commit ran.
       try {
         const next = await factoryApi.detail(id);
         if (next.state === "missing") callbacks.current.onDeleted?.(id);
-        else if (mounted.current) {
+        else if (current()) {
+          if (next.state !== "available") rememberDetailFocusBeforeExit();
           setView(next); setDetail(next.state === "available" ? next.detail : null);
-          setError(next.state === "available" ? String(e) : "");
+          setActionError(next.state === "available" ? noticeText("Could not delete run.", e) : "");
         }
-      } catch { if (mounted.current) setError(String(e)); }
+      } catch { if (current()) setActionError(noticeText("Could not delete run.", e)); }
     } finally {
       inFlight.current = false;
       onDeletionSettled?.(id);
-      if (mounted.current) setDeleting(false);
+      if (current()) setDeleting(false);
     }
   }
-  useEffect(() => { if (deleting) progress.current?.focus(); }, [deleting, !!detail, view?.state]);
   if (view?.state === "deleting") return <>
-    <button className="text-button mb-6" onClick={onBack}>Back to runs</button>
-    <h1>Deletion pending</h1><p>{view.deletion.title}</p>
+    <button ref={backButton} className="text-button mb-6" onClick={onBack}>Back to runs</button>
+    <h1 ref={runHeading} tabIndex={-1}>Deletion pending</h1><p>{view.deletion.title}</p>
     <p>{view.deletion.repository} #{view.deletion.number} · Attempt {view.deletion.attempt}</p><code>{id}</code>
     <Notice>{view.deletion.last_error || "Cleanup is pending."} Some files may already be deleted. There is no restoration.</Notice>
-    {error && <Notice>{error}</Notice>}
-    <p ref={progress} tabIndex={-1} role="status">{deleting ? "Deleting..." : "Retry deletion to finish cleanup."}</p>
-    <button className="button button-danger" disabled={deleting} onClick={() => void remove()}>Retry deletion</button>
+    {loadError && <Notice id={`${runFeedbackId}-load-error`} close={() => setLoadError("")} focusAfterClose={() => runHeading.current}>
+      {loadError}<button type="button" className="text-button" onClick={() => void detailResource.current?.refresh()}>Retry</button>
+    </Notice>}
+    {actionError && <Notice id={`${runFeedbackId}-action-error`} close={() => setActionError("")} focusAfterClose={() => runHeading.current}>{actionError}</Notice>}
+    {deleting ? <Notice tone="info">Deleting…</Notice> : <Notice tone="info" live={false}>Retry deletion to finish cleanup.</Notice>}
+    <button ref={retryDeletionButton} className="button button-danger" disabled={deleting} onClick={() => void remove()}>Retry deletion</button>
   </>;
-  if (view?.state === "missing") return <><button className="text-button" onClick={onBack}>Back to runs</button><Notice>This run is no longer available.</Notice></>;
+  if (view?.state === "missing") return <><button ref={backButton} className="text-button" onClick={onBack}>Back to runs</button><Notice tone="info">This run is no longer available.</Notice></>;
   if (!detail)
     return (
       <>
-        <button className="text-button mb-6" onClick={onBack}>
+        <button ref={backButton} className="text-button mb-6" onClick={onBack}>
           <ArrowLeft />
           Back to runs
         </button>
-        {error ? <Notice>{error}</Notice> : deleting ? <p ref={progress} tabIndex={-1} role="status">Deleting...</p> : <div className="skeleton h-64" />}
+        {loadError ? <Notice id={`${runFeedbackId}-load-error`} close={() => setLoadError("")} focusAfterClose={() => backButton.current}>
+          {loadError}<button type="button" className="text-button" onClick={() => void detailResource.current?.refresh()}>Retry</button>
+        </Notice> : deleting ? <Notice tone="info">Deleting…</Notice> : <div className="skeleton h-64" />}
       </>
     );
   const { run } = detail;
@@ -347,22 +405,23 @@ function RunDetailContent({
   const uniqueNodeIds = new Set(visibleNodes.map(node => node.id)).size === visibleNodes.length;
   return (
     <>
-      <button className="text-button mb-6" onClick={onBack}>
+      <button ref={backButton} className="text-button mb-6" onClick={onBack}>
         <ArrowLeft size={16} />
         All runs
       </button>
-      <div className="page-title">
+      <div className="page-title run-page-title">
         <div>
           <span className="eyebrow">
             {run.repository} · #{run.number}
           </span>
-          <h1 className="run-detail-title">{run.title}</h1>
+          <h1 ref={runHeading} tabIndex={-1} className="run-detail-title">{run.title}</h1>
           <p>
             {TRIGGERS[run.trigger_id]?.label} · Attempt {run.attempt} ·{" "}
             {date(run.created_at)}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="run-action-group">
+          <div className="run-actions">
           <Badge status={run.status} />
           <button
             className="button button-secondary"
@@ -373,13 +432,19 @@ function RunDetailContent({
             {busy ? "Processing…" : active ? "Cancel" : "Retry"}
           </button>
           <button className="button button-danger" disabled={busy || deleting || !eligible}
-            aria-describedby={!eligible ? "delete-run-reason" : undefined} onClick={() => setConfirm(true)}>Delete run</button>
+            aria-describedby={!eligible ? deleteReasonId : undefined} onClick={() => setConfirm(true)}>Delete run</button>
+          </div>
+          {!eligible && <Notice id={deleteReasonId} tone="info" live={false}>
+            {active ? "Cancel this run before deleting it." : "This run cannot be deleted in its current state."}
+          </Notice>}
         </div>
       </div>
-      {!eligible && <p id="delete-run-reason">{active ? "Cancel this run before deleting it." : "This run cannot be deleted in its current state."}</p>}
-      {deleting && <p role="status" ref={progress} tabIndex={-1}>Deleting...</p>}
+      {deleting && <Notice tone="info">Deleting…</Notice>}
       {confirm && <DeleteRunDialog run={run} busy={deleting} onCancel={() => setConfirm(false)} onConfirm={() => void remove()} />}
-      {error && <Notice close={() => setError("")}>{error}</Notice>}
+      {loadError && <Notice id={`${runFeedbackId}-load-error`} close={() => setLoadError("")} focusAfterClose={() => runHeading.current}>
+        {loadError}<button type="button" className="text-button" onClick={() => void detailResource.current?.refresh()}>Retry</button>
+      </Notice>}
+      {actionError && <Notice id={`${runFeedbackId}-action-error`} close={() => setActionError("")} focusAfterClose={() => runHeading.current}>{actionError}</Notice>}
       {run.error && <Notice>{run.error}</Notice>}
       <div className="detail-grid">
         <section className="panel timeline">
