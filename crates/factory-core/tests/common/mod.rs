@@ -70,6 +70,49 @@ pub fn open_with_api(root: PathBuf, base: &str) -> Result<Arc<Factory>> {
     Factory::open_with_credentials(root, base, credentials)
 }
 
+pub fn seed_codex_account(factory: &Factory, id: &str) {
+    let root = PathBuf::from(factory.snapshot().unwrap().service.app_data_dir);
+    let home = root.join("agent-accounts/codex").join(id);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("auth.json"),
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-only"}}"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [
+            root.join("agent-accounts"),
+            root.join("agent-accounts/codex"),
+            home.clone(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::set_permissions(
+            home.join("auth.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    let db = rusqlite::Connection::open(root.join("factory.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_accounts(id TEXT PRIMARY KEY,json TEXT NOT NULL)",
+    )
+    .unwrap();
+    db.execute("INSERT OR REPLACE INTO agent_accounts VALUES(?1,?2)",rusqlite::params![id,serde_json::json!({"id":id,"agent":"codex","label":"Fixture Codex","email":"fixture@example.test","status":"ready","error":null}).to_string()]).unwrap();
+}
+
+pub fn bind_fixture_codex(factory: &Factory, settings: &mut factory_core::Settings) {
+    let id = "9ab14479-4d99-41c7-b347-e5b3acffb316";
+    seed_codex_account(factory, id);
+    for profile in &settings.token_profiles {
+        settings
+            .codex_bindings
+            .insert(profile.id.clone(), id.into());
+    }
+}
+
 #[cfg(unix)]
 pub fn remote_git(root: &std::path::Path, source: &std::path::Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;

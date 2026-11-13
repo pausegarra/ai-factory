@@ -49,6 +49,7 @@ impl QueuedWorkerScan {
 }
 
 pub struct Factory {
+    pub(crate) accounts: super::agent_accounts::AccountManager,
     _process_lock: std::fs::File,
     pub(crate) root: PathBuf,
     pub(crate) github_base: String,
@@ -130,6 +131,7 @@ impl Factory {
         };
         Ok(Arc::new(Self {
             _process_lock: process_lock,
+            accounts: super::agent_accounts::AccountManager::default(),
             root,
             github_base: base.into(),
             store,
@@ -149,18 +151,39 @@ impl Factory {
         self.store.public_settings()
     }
     pub async fn agent_models(&self, agent: &str) -> Result<Vec<AgentModel>> {
+        self.agent_models_for_profile(agent, None).await
+    }
+    pub async fn agent_models_for_profile(
+        &self,
+        agent: &str,
+        token_profile_id: Option<&str>,
+    ) -> Result<Vec<AgentModel>> {
         let settings = self.store.public_settings()?;
         let executable = match agent {
             "codex" => &settings.commands.codex,
             "opencode" => &settings.commands.opencode,
             _ => anyhow::bail!("Unsupported agent"),
         };
+        let lease = if agent == "codex" {
+            let account = match token_profile_id {
+                Some(profile) => settings.codex_bindings.get(profile),
+                None => settings
+                    .token_profiles
+                    .iter()
+                    .find_map(|profile| settings.codex_bindings.get(&profile.id)),
+            }
+            .context("Assign a Codex account in Settings → Agents to load models")?;
+            Some(self.lease_codex_account(account)?)
+        } else {
+            None
+        };
         tokio::select! {
             _ = self.stop.cancelled() => anyhow::bail!("Factory is stopping"),
-            result = crate::context::factory::infrastructure::processes::agent_models::discover(agent, executable, &self.root) => result,
+            result = crate::context::factory::infrastructure::processes::agent_models::discover_with_home(agent, executable, &self.root, lease.as_ref().map(|lease| lease.home.as_path())) => result,
         }
     }
     pub fn save_settings(&self, mut s: Settings) -> Result<Settings> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
         for profile in &mut s.token_profiles {
             profile.account = profile.account.to_lowercase();
             for values in [
@@ -179,6 +202,7 @@ impl Factory {
             p.repository = p.repository.to_lowercase();
         }
         s.validate()?;
+        self.validate_codex_bindings(&s)?;
         self.store.save_settings(&s)?;
         self.emit("settings_changed", None, None);
         self.wake.notify_one();
@@ -570,6 +594,7 @@ impl Factory {
                 worker.cancel.cancel();
             }
         }
+        self.accounts.shutdown().await;
         for _ in 0..100 {
             if self.active.lock().unwrap().is_empty() {
                 break;

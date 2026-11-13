@@ -9,6 +9,7 @@ use tauri::{
     Emitter, Manager, State,
 };
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_opener::OpenerExt;
 
 struct DesktopState {
     factory: Arc<Factory>,
@@ -78,12 +79,61 @@ async fn save_settings(
 async fn get_agent_models(
     state: State<'_, DesktopState>,
     agent: String,
+    token_profile_id: Option<String>,
 ) -> Result<Vec<factory_core::AgentModel>, String> {
     state
         .factory
-        .agent_models(&agent)
+        .agent_models_for_profile(&agent, token_profile_id.as_deref())
         .await
         .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn get_agent_accounts(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<factory_core::AgentAccount>, String> {
+    let factory = state.factory.clone();
+    blocking(move || factory.agent_accounts()).await
+}
+
+#[tauri::command]
+async fn start_codex_login(
+    state: State<'_, DesktopState>,
+    label: String,
+) -> Result<factory_core::CodexLogin, String> {
+    state
+        .factory
+        .start_codex_login(label)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn remove_agent_account(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> Result<(), String> {
+    state
+        .factory
+        .remove_agent_account(&account_id)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn open_codex_login(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> Result<(), String> {
+    // Resolve only a URL returned by the pending, validated native OAuth flow.
+    let url = state
+        .factory
+        .codex_login_url(&account_id)
+        .map_err(|error| format!("{error:#}"))?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "Cannot open the Codex sign in page in your browser".into())
 }
 
 #[tauri::command]
@@ -188,6 +238,7 @@ fn request_exit(app: &tauri::AppHandle) {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_window(app)
         }))
@@ -257,6 +308,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_agent_models,
+            get_agent_accounts,
+            start_codex_login,
+            remove_agent_account,
+            open_codex_login,
             get_installed_skills,
             save_settings,
             get_snapshot,

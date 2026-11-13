@@ -29,6 +29,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS credential_refs (profile_id TEXT PRIMARY KEY,account TEXT NOT NULL,reference TEXT NOT NULL UNIQUE);
    CREATE TABLE IF NOT EXISTS credential_gc (reference TEXT PRIMARY KEY);")?;
         super::run_deletions::migrate(&mut db)?;
+        super::agent_accounts::migrate(&db)?;
         let s = Self {
             db: Mutex::new(db),
             credentials,

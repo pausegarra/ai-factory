@@ -229,6 +229,7 @@ fn fixture(script: &str, limit: usize) -> (tempfile::TempDir, std::sync::Arc<Fac
     });
     s.flows[0].nodes.truncate(1);
     s.flows[0].nodes[0].depends_on.clear();
+    common::bind_fixture_codex(&f, &mut s);
     f.save_settings(s).unwrap();
     (dir, f)
 }
@@ -443,6 +444,9 @@ printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"dat
             );
             assert!(prompt.contains("downstream workflow steps"));
             assert!(prompt.contains("skills"));
+            assert!(prompt.contains("Do not launch or open GUI applications"));
+            assert!(prompt.contains("Code-level verification is allowed"));
+            assert!(prompt.contains("do not block only because a GUI check was not performed"));
             assert!(prompt.contains("status=blocked"));
             assert!(prompt.contains("Do not expand the assigned role"));
             assert!(prompt.contains(
@@ -1136,11 +1140,22 @@ fn workspace_recovery_removes_links_without_touching_external_content() {
     );
 }
 #[cfg(unix)]
-#[path = "core/result_repair.rs"]
-mod result_repair;
+#[path = "core/node_output.rs"]
+mod node_output;
+#[cfg(unix)]
+#[path = "core/output_limits.rs"]
+mod output_limits;
+
+#[cfg(unix)]
+#[path = "core/artifact_delivery.rs"]
+mod artifact_delivery;
 #[cfg(unix)]
 #[path = "core/review_rework.rs"]
 mod review_rework;
 #[cfg(unix)]
 #[path = "core/skills.rs"]
 mod skills;
+
+#[cfg(unix)]
+#[path = "core/codex_accounts_execution.rs"]
+mod codex_accounts_execution;

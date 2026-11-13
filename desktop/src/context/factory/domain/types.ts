@@ -1,5 +1,17 @@
 export type Trigger = "new_issue" | "pr_approved" | "pr_review";
 export type Agent = "codex" | "opencode";
+export interface AgentAccount {
+  id: string;
+  agent: "codex";
+  label: string;
+  email: string | null;
+  status: "pending" | "ready" | "failed";
+  error: string | null;
+}
+export interface CodexLogin {
+  account: AgentAccount;
+  auth_url: string;
+}
 export interface AgentModel {
   id: string;
   name: string;
@@ -52,6 +64,7 @@ export interface Project {
 }
 export interface Settings {
   token_profiles: TokenProfile[];
+  codex_bindings?: Record<string, string>;
   projects: Project[];
   commands: { codex: string; opencode: string; git: string };
   poll_interval_seconds: number;

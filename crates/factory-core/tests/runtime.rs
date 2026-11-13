@@ -119,6 +119,7 @@ async fn fixture() -> (
         flow.nodes.truncate(1);
         flow.nodes[0].depends_on.clear();
     }
+    common::bind_fixture_codex(&factory, &mut settings);
     factory.save_settings(settings).unwrap();
     (dir, factory, sha, server)
 }

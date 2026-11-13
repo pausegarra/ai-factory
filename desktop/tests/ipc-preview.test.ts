@@ -7,3 +7,10 @@ it("does not pretend to delete in browser preview", async () => {
   await expect(factoryApi.deleteRun("run-1")).rejects.toThrow(/desktop/);
   expect(invoke).not.toHaveBeenCalled();
 });
+it("provides empty managed accounts in preview and requires desktop OAuth", async () => {
+  await expect(factoryApi.agentAccounts()).resolves.toEqual([]);
+  await expect(factoryApi.startCodexLogin("Work")).rejects.toThrow(/desktop/);
+  await expect(factoryApi.openCodexLogin("account-1")).rejects.toThrow(/desktop/);
+  await expect(factoryApi.removeAgentAccount("account-1")).rejects.toThrow(/desktop/);
+  expect(invoke).not.toHaveBeenCalled();
+});

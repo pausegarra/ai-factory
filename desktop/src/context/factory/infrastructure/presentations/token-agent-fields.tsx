@@ -2,10 +2,11 @@ import type { Agent, AgentConfig, FlowNode, Settings } from "../../domain/types"
 import { AgentModelFields } from "./agent-model-fields";
 import { Field } from "./ui";
 
-export function TokenAgentFields({ node, profiles, commands, onChange }: {
+export function TokenAgentFields({ node, profiles, commands, bindings = {}, onChange }: {
   node: FlowNode;
   profiles: Settings["token_profiles"];
   commands: Settings["commands"];
+  bindings?: Settings["codex_bindings"];
   onChange: (patch: Partial<FlowNode>) => void;
 }) {
   const overrides = node.token_overrides ?? {};
@@ -38,7 +39,7 @@ export function TokenAgentFields({ node, profiles, commands, onChange }: {
                 <option value="opencode">OpenCode</option>
               </select>
             </Field>
-            {config && <AgentModelFields node={config} command={commands[config.agent]} onChange={(patch) => update(profile.id, { ...config, ...patch })} />}
+            {config && <AgentModelFields node={config} command={commands[config.agent]} tokenProfileId={profile.id} boundAccountId={Object.hasOwn(bindings, profile.id) ? bindings[profile.id] : undefined} onChange={(patch) => update(profile.id, { ...config, ...patch })} />}
           </fieldset>
         );
       })}

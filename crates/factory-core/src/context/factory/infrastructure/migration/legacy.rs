@@ -349,6 +349,7 @@ fn parse_nodes(workflow: &Value, base: &Path) -> Result<Vec<FlowNode>> {
             access: text(v, "access").into(),
             prompt,
             result_schema: schema,
+            codex_account_id: None,
             depends_on,
             position: Position {
                 x: 80. + index as f64 * 280.,

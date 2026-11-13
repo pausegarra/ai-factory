@@ -4,7 +4,7 @@ Desktop app for local GitHub automation through visual workflows and CLI agents.
 
 ## Run locally
 
-Install Node.js 22.12+, Rust 1.93.1+, Git and the [native Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Install and authenticate Codex CLI or OpenCode CLI for the agents you use.
+Install Node.js 22.12+, Rust 1.93.1+, Git and the [native Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Install the Codex CLI or OpenCode CLI for the agents you use. Connect Codex accounts in Settings → Agents; authenticate OpenCode through its default CLI.
 
 ```sh
 npm ci
@@ -16,13 +16,17 @@ npm run dev
 
 ## Set up your factory
 
-1. Add GitHub token profiles in Settings. Each token must belong to its configured login. Multiple accounts are supported; the issue author or assigned reviewer selects the account for a run.
+1. Add GitHub token profiles in Settings → GitHub accounts. Each token must belong to its configured login. Multiple accounts are supported; the issue author or assigned reviewer selects the account for a run.
 2. Set GitHub owners, allowed authors and allowed reviewers inside each token profile. A profile searches only its own owners with its own token. Include its GitHub login in allowed authors for issues and approval handling, or allowed reviewers for review requests. Empty owners disable discovery for that profile; an empty reviewer list skips its review request discovery.
-3. Repositories are downloaded automatically from GitHub using the event actor's token. No local clone or folder mapping is required.
+3. In Settings → Agents, connect one or more Codex accounts through browser OAuth, assign an account to each GitHub token profile, then save. A GitHub profile without an assigned Codex account blocks Codex nodes before CLI execution. OpenCode keeps its default CLI account and needs no assignment. Repositories are downloaded automatically from GitHub using the event actor's token. No local clone or folder mapping is required.
 4. Edit the three Flows. Add/delete/drag nodes, connect dependencies, select Codex or OpenCode, model, effort, access, prompt and result JSON Schema. Save to apply changes to new runs.
 5. Set global concurrency and GitHub polling interval. Agents run without a duration limit and can be cancelled manually. Enable startup at login if required.
 
 Tokens are never returned to the UI after storage. An empty replacement field preserves the existing token; removing its profile removes the stored credential. Tokens need access to the repositories and the corresponding contents, issues and pull request operations. Factory verifies token identity and uses process-local Git credentials without changing global account settings.
+
+Codex OAuth uses the installed CLI's native app-server login flow. Each connected account has a private home under `agent-accounts/codex/<account-id>` in the application data directory. Codex writes and refreshes its own `auth.json`; Factory stores account metadata and profile assignments, and never copies or replaces global Codex or Orca credentials. Each Codex subprocess receives that account's `CODEX_HOME`, file credential storage and no inherited API-key override. Model and skill discovery use the same managed account. Base workflow model menus use the first assigned GitHub profile; profile overrides use their own assigned account.
+
+Account assignments are frozen when a run is admitted. Reassigning a profile affects new runs and manual retries; queued and running attempts keep their original account. Accounts referenced by queued or active workers, or by model discovery, cannot be removed until those operations finish. Removing an unused account cancels any pending login, deletes its private home and clears its assignments. An unavailable account blocks its Codex node without falling back to global CLI auth. Connect and assign accounts before enabling Codex workflows after upgrading.
 
 Permission lists are scoped to each profile, not shared across accounts. For example, a personal profile can watch `pausegarra` while a work profile watches `ITACCIONA`; neither token searches the other profile's owners. Search failures remain isolated from unrelated accounts and workflows.
 
@@ -85,7 +89,9 @@ Closing the window leaves Factory in the system tray. Choose **Quit AI Factory**
 
 ## Agent results and GitHub actions
 
-Codex uses `codex exec --json`, access-specific sandboxing and an output schema. OpenCode uses `opencode run --format json`, model/variant and per-node tool permissions. The prompt includes event context, workspace, project memory and dependency results.
+Codex uses `codex exec --json`, access-specific sandboxing and an output schema. OpenCode uses `opencode run --format json`, model/variant and per-node tool permissions. The prompt includes event context, workspace, project memory and dependency results. Each node execution invokes its agent once. There is no automatic response-repair or format-retry call. Codex receives its native `--output-schema`; OpenCode receives the final-response contract in both the task prompt and its configured agent system prompt. OpenCode's `--format json` controls CLI events and does not provide schema-constrained model output. Before returning, agents must check their complete JSON envelope against the supplied schema. Invalid first responses fail the node and skip its dependents; Factory retains `<node>.invalid-response.txt` and `<node>.validation-error.txt` in session history. Manual run retries and reviewer-requested content corrections retain their existing behavior.
+
+CLI output limits are nonfatal. Lines larger than 4 MiB are discarded through the next newline or EOF with a warning in the session log; both output streams keep draining. In-memory capture retains at most 64 MiB or 8192 complete lines, while the latest final-response candidate is retained separately so trailing diagnostics cannot evict it. Ordinary session log lines remain on disk with secrets redacted. These warnings do not fail a node or skip its dependents; process errors and final-result validation still apply.
 
 ```json
 {
@@ -98,7 +104,9 @@ Codex uses `codex exec --json`, access-specific sandboxing and an output schema.
 
 Valid statuses are `succeeded`, `blocked` and `failed`. `data` must satisfy the node schema. `data.approved=false` cannot be declared successful. Artifacts include `path`, `sha256` and `kind`; Factory validates authorized paths, existence and hashes.
 
-Artifact `kind` is descriptive metadata, not verification evidence. Factory replaces missing or blank categories with the neutral value `artifact`, and accepts a legacy `type` category when `kind` is absent. This normalization does not alter status, verification limitations, approval decisions or requested actions. Formatting repairs preserve the exact multiset of artifact paths and hashes and any originally declared categories; missing category metadata alone is not a workflow blocker. The canonical response must still pass the node schema and every artifact must pass filesystem and hash validation.
+Artifact `kind` is descriptive metadata, not verification evidence. Factory replaces missing or blank categories with the neutral value `artifact`, and accepts a legacy `type` category when `kind` is absent. This normalization does not alter status, verification limitations, approval decisions or requested actions. Missing category metadata alone is not a workflow blocker; normalization preserves supplied paths, hashes and categories. The canonical response must still pass the node schema and every artifact must pass filesystem and hash validation.
+
+Artifact references may arrive as an array, a single reference or a named/grouped collection. Factory parses the first response into a canonical artifact array without another agent invocation. Changing representation or group labels cannot make unchanged files appear modified. Every reference still requires string `path` and `sha256` fields; malformed entries are rejected rather than silently dropped. Prefer absolute paths. Relative paths resolve against both the workspace and per-run project memory; paths found in both roots are rejected as ambiguous. A file with `sha256: ""` gets its hash calculated from its actual bytes; any nonempty supplied hash must match. A directory with an empty hash expands recursively into regular-file artifacts, each archived with its computed hash. Empty directories, directory hashes, symlinks, parent traversal, external paths and special files are rejected. Filesystem errors identify the offending reference. This deterministic processing does not alter node status, approval decisions, verification limitations or requested GitHub actions.
 
 Agents request GitHub operations through `data`; the engine performs REST calls with the actor token:
 
@@ -115,7 +123,7 @@ Default flow prompts explain these contracts. No `gh` process is used by the des
 
 Every node also receives a shared unattended execution instruction, including nodes in saved or custom workflows. Agents complete their assigned role without asking for human spec/plan approval, clarification or execution-mode choices: spec authors deliver the specification, planners deliver the plan, builders finish implementation/build/verification, and reviewers return a decision. Skills' interactive checkpoints are delegated to downstream workflow reviews. Nonblocking ambiguity is resolved with documented assumptions; genuine blockers return a structured `blocked` result instead of waiting for a reply. Access restrictions and actual upstream review decisions still apply. Codex uses `approval_policy="never"`; OpenCode runs automatically with its question tool denied.
 
-Node skill selections apply to execution as part of the saved workflow snapshot. Omitted `skills` keeps native discovery (`Select all`); an explicit array exposes only those installed skill IDs, and `[]` disables skills for that node. OpenCode receives native skill permission rules. Codex enumerates its actual workspace catalog through `skills/list`, then receives per-process skill configuration overrides. Only selected names, descriptions and manifest paths enter the node prompt; skill bodies remain loaded on demand. Selections also apply to response repair attempts. A missing selected skill or unsupported Codex discovery fails the node before agent execution rather than falling back to unrestricted skills. These filters control native skill discovery and invocation; existing filesystem/tool access restrictions still define what the agent can read or execute.
+Node skill selections apply to execution as part of the saved workflow snapshot. Omitted `skills` keeps native discovery (`Select all`); an explicit array exposes only those installed skill IDs, and `[]` disables skills for that node. OpenCode receives native skill permission rules. Codex enumerates its actual workspace catalog through `skills/list`, then receives per-process skill configuration overrides. Only selected names, descriptions and manifest paths enter the node prompt; skill bodies remain loaded on demand. Invalid output never starts an additional agent execution or skill-discovery process. A missing selected skill or unsupported Codex discovery fails the node before agent execution rather than falling back to unrestricted skills. These filters control native skill discovery and invocation; existing filesystem/tool access restrictions still define what the agent can read or execute.
 
 ## Local data and migration
 

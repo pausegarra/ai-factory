@@ -1,5 +1,6 @@
 use super::{Commands, Flow, Project, Settings, TokenProfile};
 use serde::{Deserialize, Deserializer};
+use std::collections::BTreeMap;
 
 // Legacy lists are accepted only at this input boundary. Canonical settings
 // always serialize scopes on each profile, including explicit empty lists.
@@ -10,6 +11,7 @@ pub(super) struct SettingsInput {
     authors: Vec<String>,
     reviewers: Vec<String>,
     token_profiles: Vec<TokenProfileInput>,
+    codex_bindings: BTreeMap<String, String>,
     projects: Vec<Project>,
     commands: Commands,
     poll_interval_seconds: u64,
@@ -45,6 +47,7 @@ impl Default for SettingsInput {
             authors: vec![],
             reviewers: vec![],
             token_profiles: vec![],
+            codex_bindings: defaults.codex_bindings,
             projects: defaults.projects,
             commands: defaults.commands,
             poll_interval_seconds: defaults.poll_interval_seconds,
@@ -77,6 +80,7 @@ impl From<SettingsInput> for Settings {
             .collect();
         Self {
             token_profiles,
+            codex_bindings: input.codex_bindings,
             projects: input.projects,
             commands: input.commands,
             poll_interval_seconds: input.poll_interval_seconds,

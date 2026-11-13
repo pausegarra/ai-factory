@@ -25,6 +25,7 @@ impl SkillPolicy {
         executable: &str,
         selection: Option<&[String]>,
         workspace: &Path,
+        codex_home: Option<&Path>,
         cancel: &CancellationToken,
     ) -> Result<Self> {
         let Some(selection) = selection else {
@@ -70,7 +71,7 @@ impl SkillPolicy {
         }
         let mut codex_rules = Vec::new();
         if agent == "codex" {
-            for path in discover_codex(executable, workspace, cancel).await? {
+            for path in discover_codex(executable, workspace, codex_home, cancel).await? {
                 let enabled = selected
                     .iter()
                     .any(|skill| same_path(&path, &skill.manifest_path));
@@ -140,7 +141,7 @@ impl SkillPolicy {
         Ok(())
     }
 
-    pub fn configure_opencode(&self, permissions: &mut Value, allow_resources: bool) {
+    pub fn configure_opencode(&self, permissions: &mut Value) {
         let Some(selected) = &self.selected else {
             return;
         };
@@ -148,14 +149,12 @@ impl SkillPolicy {
         skill_rules.insert("*".into(), json!("deny"));
         for skill in selected {
             skill_rules.insert(skill.opencode_id.clone(), json!("allow"));
-            if allow_resources {
-                if let Some(directory) = skill.manifest_path.parent() {
-                    let pattern = format!("{}/**", directory.display());
-                    // Skills and their supporting references are read-only inputs.
-                    permissions["external_directory"][&pattern] = json!("allow");
-                    set_path_permission(permissions, "read", &pattern, "allow");
-                    set_path_permission(permissions, "edit", &pattern, "deny");
-                }
+            if let Some(directory) = skill.manifest_path.parent() {
+                let pattern = format!("{}/**", directory.display());
+                // Skills and their supporting references are read-only inputs.
+                permissions["external_directory"][&pattern] = json!("allow");
+                set_path_permission(permissions, "read", &pattern, "allow");
+                set_path_permission(permissions, "edit", &pattern, "deny");
             }
         }
         permissions["skill"] = Value::Object(skill_rules);
@@ -185,6 +184,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 async fn discover_codex(
     executable: &str,
     workspace: &Path,
+    codex_home: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<Vec<PathBuf>> {
     let mut command = Command::new(resolve_command(executable));
@@ -197,6 +197,10 @@ async fn discover_codex(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     clean_env(&mut command);
+    if let Some(home) = codex_home {
+        super::agents::configure_codex_home(&mut command, home);
+        command.args(["--config", "cli_auth_credentials_store=\"file\""]);
+    }
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]

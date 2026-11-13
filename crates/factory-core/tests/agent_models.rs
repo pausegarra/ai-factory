@@ -17,6 +17,13 @@ fn fixture(script: &str) -> (tempfile::TempDir, Arc<Factory>) {
     let mut settings = factory.settings().unwrap();
     settings.commands.codex = executable.to_string_lossy().into();
     settings.commands.opencode = settings.commands.codex.clone();
+    settings.token_profiles.push(TokenProfile {
+        id: "alice".into(),
+        label: "Fixture".into(),
+        account: "alice".into(),
+        ..Default::default()
+    });
+    common::bind_fixture_codex(&factory, &mut settings);
     factory.save_settings(settings).unwrap();
     (dir, factory)
 }
@@ -104,11 +111,11 @@ async fn catalog_errors_never_return_server_output_or_credentials() {
 }
 
 #[tokio::test]
-#[ignore = "Requires installed and authenticated Codex and OpenCode CLIs"]
-async fn installed_agent_catalogs() {
+#[ignore = "Requires an installed and authenticated OpenCode CLI"]
+async fn installed_opencode_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().join("data")).unwrap();
-    for agent in ["codex", "opencode"] {
+    for agent in ["opencode"] {
         let models = factory.agent_models(agent).await.unwrap();
         assert!(!models.is_empty());
         assert!(models
@@ -120,6 +127,51 @@ async fn installed_agent_catalogs() {
             models.iter().filter(|m| !m.efforts.is_empty()).count()
         );
     }
+}
+
+#[tokio::test]
+async fn codex_catalog_uses_each_profiles_assigned_home_without_default_fallback() {
+    let script = r#"
+while IFS= read -r request; do
+ case "$request" in
+ *'"method":"initialize"'*) echo '{"id":1,"result":{}}';;
+ *'"method":"model/list"'*) printf '{"id":2,"result":{"data":[{"model":"%s"}],"nextCursor":null}}\n' "${CODEX_HOME##*/}";;
+ esac
+done
+"#;
+    let (_dir, factory) = fixture(script);
+    let second_account = "d84dc485-aee3-403f-80eb-ed4ea73b5455";
+    common::seed_codex_account(&factory, second_account);
+    let mut settings = factory.settings().unwrap();
+    let first_account = settings.codex_bindings["alice"].clone();
+    for name in ["bob", "unassigned"] {
+        settings.token_profiles.push(TokenProfile {
+            id: name.into(),
+            label: name.into(),
+            account: name.into(),
+            ..Default::default()
+        });
+    }
+    settings
+        .codex_bindings
+        .insert("bob".into(), second_account.into());
+    factory.save_settings(settings).unwrap();
+    for (profile, expected) in [("alice", first_account.as_str()), ("bob", second_account)] {
+        let models = factory
+            .agent_models_for_profile("codex", Some(profile))
+            .await
+            .unwrap();
+        assert_eq!(models[0].id, expected);
+    }
+    assert_eq!(
+        factory.agent_models("codex").await.unwrap()[0].id,
+        first_account
+    );
+    let error = factory
+        .agent_models_for_profile("codex", Some("unassigned"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Assign a Codex account"));
 }
 
 #[tokio::test]

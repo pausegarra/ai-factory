@@ -12,11 +12,24 @@ use tokio::{
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 pub async fn discover(agent: &str, executable: &str, directory: &Path) -> Result<Vec<AgentModel>> {
+    discover_with_home(agent, executable, directory, None).await
+}
+
+pub(crate) async fn discover_with_home(
+    agent: &str,
+    executable: &str,
+    directory: &Path,
+    home: Option<&Path>,
+) -> Result<Vec<AgentModel>> {
     ensure!(["codex", "opencode"].contains(&agent), "Unsupported agent");
     let password = uuid::Uuid::new_v4().to_string();
     let mut command = Command::new(resolve_command(executable));
     if agent == "codex" {
         command.args(["app-server", "--stdio"]);
+        if let Some(home) = home {
+            super::agents::configure_codex_home(&mut command, home);
+            command.args(["--config", "cli_auth_credentials_store=\"file\""]);
+        }
     } else {
         command
             .args(["serve", "--hostname", "127.0.0.1", "--port", "0"])
