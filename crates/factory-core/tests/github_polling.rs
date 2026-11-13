@@ -113,8 +113,8 @@ fn approval_events(factory: &Factory) -> Vec<TriggerEvent> {
 #[tokio::test]
 async fn approval_commands_require_exact_authorized_comments_and_capture_intent() {
     for (body, author, state, merged, reviewed, expected) in [
-        (" release ", "ALICE", "open", false, false, "release"),
-        (" ReLeAsE ", "alice", "closed", true, false, "release"),
+        (" release ", "ALICE", "open", false, false, ""),
+        (" ReLeAsE ", "alice", "closed", true, false, ""),
         ("OK", "alice", "open", false, false, "ok"),
         ("OK, publish", "alice", "open", false, false, ""),
         ("release please", "alice", "open", false, false, ""),
@@ -124,7 +124,7 @@ async fn approval_commands_require_exact_authorized_comments_and_capture_intent(
         ("release", "mallory", "closed", true, true, ""),
         ("unrelated", "alice", "open", false, true, "review"),
         ("release", "mallory", "open", false, true, "review"),
-        ("release", "alice", "open", false, true, "release"),
+        ("release", "alice", "open", false, true, "review"),
     ] {
         let mut pull = pr();
         pull["state"] = json!(state);
@@ -166,7 +166,7 @@ async fn approval_commands_require_exact_authorized_comments_and_capture_intent(
 }
 
 #[tokio::test]
-async fn release_comments_upgrade_ok_once_and_cannot_approve_another_head() {
+async fn release_comments_never_upgrade_approval_or_authorize_another_head() {
     let state = Arc::new(Mutex::new((
         pr(),
         vec![json!({"id":7,"body":"OK","user":{"login":"alice"}})],
@@ -184,83 +184,27 @@ async fn release_comments_upgrade_ok_once_and_cannot_approve_another_head() {
             .push(json!({"id":8,"body":"release","user":{"login":"alice"}}));
     }
     factory.poll_now().await.unwrap();
-    let events = approval_events(&factory);
-    assert_eq!(
-        events.len(),
-        2,
-        "fresh release upgrades prior OK on merged PR"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.payload["approval"]["command"] == "release")
-            .count(),
-        1
-    );
-    factory.poll_now().await.unwrap();
-    assert_eq!(approval_events(&factory).len(), 2, "release deduplicated");
+    assert_eq!(approval_events(&factory).len(), 1);
     {
         let mut state = state.lock().unwrap();
         state.0["state"] = json!("open");
         state.0["merged"] = json!(false);
         state.0["head"]["sha"] = json!("b".repeat(40));
+        state
+            .1
+            .push(json!({"id":9,"body":"release","user":{"login":"alice"}}));
     }
     factory.poll_now().await.unwrap();
-    assert_eq!(
-        approval_events(&factory).len(),
-        2,
-        "consumed release cannot authorize another head"
-    );
+    assert_eq!(approval_events(&factory).len(), 1);
     state
         .lock()
         .unwrap()
         .1
-        .push(json!({"id":9,"body":"release","user":{"login":"alice"}}));
+        .push(json!({"id":10,"body":"OK","user":{"login":"alice"}}));
     factory.poll_now().await.unwrap();
-    assert_eq!(
-        approval_events(&factory).len(),
-        3,
-        "new release binds new head"
-    );
+    assert_eq!(approval_events(&factory).len(), 2);
 }
 
-#[tokio::test]
-async fn release_dominates_simultaneous_ok_and_review_regardless_of_comment_order() {
-    for release_first in [true, false] {
-        let mut comments = vec![
-            json!({"id":7,"body":"release","user":{"login":"alice"}}),
-            json!({"id":8,"body":"OK","user":{"login":"alice"}}),
-        ];
-        if !release_first {
-            comments.reverse();
-        }
-        let reviews = vec![json!({"state":"APPROVED","commit_id":"a".repeat(40)})];
-        let state = Arc::new(Mutex::new((pr(), comments, reviews)));
-        let (dir, factory) = approval_fixture(state).await;
-        factory.poll_now().await.unwrap();
-        let events = approval_events(&factory);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].payload["approval"]["command"], "release");
-        assert_eq!(events[0].payload["approval"]["comment_id"], 7);
-        let store =
-            factory_core::context::factory::infrastructure::repositories::store::Store::open(
-                dir.path(),
-            )
-            .unwrap();
-        for id in [7, 8] {
-            assert!(store
-                .observation(&format!("approval-comment:acme/repo#5:{id}"))
-                .unwrap()
-                .is_some());
-        }
-        factory.poll_now().await.unwrap();
-        assert_eq!(
-            approval_events(&factory).len(),
-            1,
-            "review cannot enqueue another merge after release approval"
-        );
-    }
-}
 #[tokio::test]
 async fn issue_prefix_and_refresh_checked_locally_with_actor_token() {
     let refreshed = Arc::new(Mutex::new(false));

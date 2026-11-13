@@ -426,16 +426,22 @@ git commit -m 'fix: resolve PR conflicts'
 "#;
 
 #[tokio::test]
-async fn release_authorization_does_not_survive_a_published_conflict_correction() {
+async fn version_bump_waits_for_fresh_approval_after_conflict_correction() {
     let mut f = Fixture::new().await;
-    f.event.payload["approval"] = json!({"command":"release","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    f.event.payload["approval"] =
+        json!({"command":"ok","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    let mut settings = f.factory.settings().unwrap();
+    let mut bump = Settings::default().flows[1].nodes[1].clone();
+    bump.depends_on = vec!["merge".into()];
+    settings.flows[1].nodes.push(bump);
+    f.factory.save_settings(settings).unwrap();
     f.agent(REPAIR, json!({"update_pr":{}}));
     let d = f.run().await;
     assert_eq!(d.run.status, "blocked", "{d:?}");
     assert_eq!(
         d.nodes
             .iter()
-            .find(|node| node.id == "factory_release")
+            .find(|node| node.id == "version_bump")
             .unwrap()
             .status,
         "skipped"
@@ -445,18 +451,23 @@ async fn release_authorization_does_not_survive_a_published_conflict_correction(
 }
 
 #[tokio::test]
-async fn release_step_never_starts_after_failed_merge() {
+async fn version_bump_never_starts_after_failed_merge() {
     let mut f = Fixture::new().await;
-    f.event.payload["approval"] = json!({"command":"release","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
-    one_node_approval_flow(&f);
-    // Fixture denies merge; release preparation must never reach GitHub.
+    f.event.payload["approval"] =
+        json!({"command":"ok","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    let mut settings = f.factory.settings().unwrap();
+    let mut bump = Settings::default().flows[1].nodes[1].clone();
+    bump.depends_on = vec!["merge".into()];
+    settings.flows[1].nodes.push(bump);
+    f.factory.save_settings(settings).unwrap();
+    // Fixture denies merge; version preparation must never reach GitHub.
     f.agent("", json!({"merge":{"method":"squash"}}));
     let d = f.run().await;
     assert_eq!(d.run.status, "failed", "{d:?}");
     assert_eq!(
         d.nodes
             .iter()
-            .find(|node| node.id == "factory_release")
+            .find(|node| node.id == "version_bump")
             .unwrap()
             .status,
         "skipped"

@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ActiveWorker {
+    event_id: String,
     trigger_id: String,
     cancel: CancellationToken,
 }
@@ -592,7 +593,12 @@ impl Factory {
             .values()
             .filter(|worker| worker.trigger_id == detail.run.trigger_id)
             .count();
+        // A cancelled/terminal worker keeps its event reserved until process and
+        // workspace cleanup finish, even when global capacity has spare slots.
         if active.contains_key(id)
+            || active
+                .values()
+                .any(|worker| worker.event_id == detail.run.event_id)
             || active.len() >= settings.max_concurrent
             || used >= trigger_limit
         {
@@ -602,6 +608,7 @@ impl Factory {
         active.insert(
             id.into(),
             ActiveWorker {
+                event_id: detail.run.event_id,
                 trigger_id: detail.run.trigger_id,
                 cancel: cancel.clone(),
             },

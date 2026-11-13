@@ -114,7 +114,7 @@ fn safe_error_summary(error: &str) -> &'static str {
     } else if error.contains("merge and source branch cleanup were not confirmed") {
         "Merge or branch cleanup was not confirmed."
     } else if error.contains("publication was not confirmed") {
-        "Release publication was not confirmed."
+        "Version publication was not confirmed."
     } else {
         "Execution reported an error. See run details."
     }
