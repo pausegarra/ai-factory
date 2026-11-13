@@ -64,6 +64,12 @@ History, session logs, structured results and project memory stay outside tempor
 
 Overview and Runs show queued, active and historical tasks. Run details include step states, session identity, results and live logs, with cancel/retry actions. Rust emits Tauri events for creation, lifecycle changes and output. The UI subscribes before reading its initial snapshot and repeats reads if events arrive during a request. Event lag forces resynchronization.
 
+Need attention counts events with an unresolved failed, interrupted or blocked
+attempt. A later successful attempt of the same event clears its contribution;
+queued, running and cancelled retries do not. Historical attempt totals stay
+unchanged. The count uses visible history: deleting a resolving success can make
+an older visible failure need attention again.
+
 **Delete run** permanently removes one stopped attempt and its local logs, results,
 artifacts, private memory and remaining managed workspace. Cancel queued or running
 runs first, then wait for their processes and cleanup to finish. Confirm deletion
