@@ -14,3 +14,9 @@ it("provides empty managed accounts in preview and requires desktop OAuth", asyn
   await expect(factoryApi.removeAgentAccount("account-1")).rejects.toThrow(/desktop/);
   expect(invoke).not.toHaveBeenCalled();
 });
+it("loads empty notification preferences and refuses preview writes without invoking native commands", async () => {
+  const settings = await factoryApi.settings();
+  expect(settings.notification_connectors).toEqual([]);
+  await expect(factoryApi.saveSettings(settings)).rejects.toThrow(/desktop/);
+  expect(invoke).not.toHaveBeenCalled();
+});

@@ -17,7 +17,7 @@ impl Store {
         let raw: Option<String> = db
             .query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0))
             .optional()?;
-        let settings = raw
+        let mut settings = raw
             .map(|s| serde_json::from_str(&s))
             .transpose()?
             .unwrap_or_default();
@@ -32,6 +32,10 @@ impl Store {
             ))
         })?;
         let refs = rows.collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        super::secure_notifications::annotate(
+            &mut settings,
+            &super::secure_notifications::read_refs(&db)?,
+        );
         Ok((settings, refs))
     }
     fn credential_refs(&self) -> Result<HashMap<String, Reference>> {
@@ -110,6 +114,12 @@ impl Store {
             ensure!(
                 self.secret(&reference.key)?.is_some(),
                 "Cannot display historical logs: a stored GitHub credential is missing"
+            );
+        }
+        for reference in self.notification_refs()?.values() {
+            ensure!(
+                self.secret(reference)?.is_some(),
+                "Cannot display historical logs: a stored notification credential is missing"
             );
         }
         Ok(())
@@ -225,24 +235,7 @@ impl Store {
                 {
                     Some(existing.key.clone())
                 } else {
-                    let key = uuid::Uuid::new_v4().to_string();
-                    // Durable staging record: a crash before the reference swap cannot orphan a token.
-                    self.db
-                        .lock()
-                        .unwrap()
-                        .execute("INSERT INTO credential_gc VALUES(?1)", [&key])?;
-                    self.credentials.set(&key, &token)
-                        .map_err(|_| anyhow::anyhow!("Cannot save token in OS credential store; unlock it and retry. Settings were not changed"))?;
-                    let verified = self.credentials.get(&key).map_err(|_| {
-                        anyhow::anyhow!(
-                            "Cannot verify saved OS credential. Settings were not changed"
-                        )
-                    })?;
-                    ensure!(
-                        verified.as_deref() == Some(&token),
-                        "OS credential verification failed. Settings were not changed"
-                    );
-                    self.secret_cache.lock().unwrap().insert(key.clone(), token);
+                    let key = self.stage_secret(&token)?;
                     Some(key)
                 }
             } else {
@@ -262,6 +255,27 @@ impl Store {
         Ok((clean, refs))
     }
 
+    pub(super) fn stage_secret(&self, token: &str) -> Result<String> {
+        let key = uuid::Uuid::new_v4().to_string();
+        self.db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO credential_gc VALUES(?1)", [&key])?;
+        self.credentials.set(&key, token).map_err(|_| anyhow::anyhow!("Cannot save token in OS credential store; unlock it and retry. Settings were not changed"))?;
+        let verified = self.credentials.get(&key).map_err(|_| {
+            anyhow::anyhow!("Cannot verify saved OS credential. Settings were not changed")
+        })?;
+        ensure!(
+            verified.as_deref() == Some(token),
+            "OS credential verification failed. Settings were not changed"
+        );
+        self.secret_cache
+            .lock()
+            .unwrap()
+            .insert(key.clone(), token.into());
+        Ok(key)
+    }
+
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
         self.write_with_settings(Some(settings), |_| Ok(()))
     }
@@ -274,9 +288,16 @@ impl Store {
         let _guard = self.settings_lock.lock().unwrap();
         let result = (|| {
             let prepared = settings.map(|s| self.prepare_settings(s)).transpose()?;
+            let notifications = settings
+                .map(|s| self.prepare_notification_settings(s))
+                .transpose()?;
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
-            if let Some((clean, refs)) = prepared {
+            if let Some((mut clean, refs)) = prepared {
+                if let Some(notifications) = notifications {
+                    super::secure_notifications::write_notification_refs(&tx, &notifications)?;
+                    clean.notification_connectors = notifications.connectors;
+                }
                 tx.execute(
                     "INSERT OR IGNORE INTO credential_gc SELECT reference FROM credential_refs",
                     [],
@@ -306,7 +327,7 @@ impl Store {
     fn collect_credentials(&self) {
         let pending = (|| -> Result<Vec<String>> {
             let db = self.db.lock().unwrap();
-            let mut query = db.prepare("SELECT reference FROM credential_gc WHERE reference NOT IN (SELECT reference FROM credential_refs)")?;
+            let mut query = db.prepare("SELECT reference FROM credential_gc WHERE reference NOT IN (SELECT reference FROM credential_refs UNION SELECT reference FROM notification_credential_refs)")?;
             let rows = query.query_map([], |row| row.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })();

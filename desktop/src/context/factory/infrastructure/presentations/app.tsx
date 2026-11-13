@@ -5,6 +5,7 @@ import {
   ChartBar,
   Factory,
   Gear,
+  Bell,
   GitBranch,
   Lightning,
   SidebarSimple,
@@ -18,6 +19,7 @@ import { LiveResource } from "../../application/live-resource";
 import { OverviewPage } from "./overview";
 import { RunsPage, RunDetailPage } from "./runs";
 import { FlowsPage } from "./flows";
+import { NotificationsPage } from "./notifications";
 import { SettingsPage } from "./settings";
 import { Notice } from "./ui";
 import { noticeDetail, noticeText } from "./notice-content";
@@ -30,10 +32,12 @@ const nav = [
   { id: "overview", label: "Overview", icon: ChartBar },
   { id: "runs", label: "Runs", icon: Lightning },
   { id: "flows", label: "Workflows", icon: GitBranch },
+  { id: "notifications", label: "Notifications", icon: Bell },
   { id: "settings", label: "Settings", icon: Gear },
 ];
 export function App() {
   const [page, setPage] = useState("overview");
+  const settingsEpoch = useRef(0);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -83,7 +87,7 @@ export function App() {
     if (alive.current) setReload(value => value + 1);
   }
   const [hasUnsaved, setHasUnsaved] = useState(false);
-  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [savingPage, setSavingPage] = useState(false);
   const [pendingPage, setPendingPage] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [reload, setReload] = useState(0);
@@ -96,16 +100,17 @@ export function App() {
             if (e.kind !== "log") cb();
           }),
         load: async () => {
+          const epoch = settingsEpoch.current;
           const selection = selected.current;
           const [settings, snapshot] = await Promise.all([
             factoryApi.settings(),
             factoryApi.snapshot(),
           ]);
-          return { settings, snapshot, selection };
+          return { settings, snapshot, selection, epoch };
         },
       },
       (data) => {
-        setSettings(data.settings);
+        if (data.epoch === settingsEpoch.current) setSettings(data.settings);
         setSnapshot(data.snapshot);
         if (data.selection && selected.current === data.selection &&
           !data.snapshot.runs.some(run => run.id === data.selection!.id) &&
@@ -122,12 +127,19 @@ export function App() {
     return () => live.stop();
   }, [reload]);
   async function saveSettings(value: Settings) {
-    const result = await factoryApi.saveSettings(value);
-    setSettings(result);
-    return result;
+    settingsEpoch.current += 1;
+    try {
+      const result = await factoryApi.saveSettings(value);
+      settingsEpoch.current += 1;
+      if (alive.current) setSettings(result);
+      return result;
+    } catch (error) {
+      settingsEpoch.current += 1;
+      throw error;
+    }
   }
   function navigate(value: string) {
-    if (savingWorkflow) return;
+    if (savingPage) return;
     if (value === page) return;
     if (hasUnsaved) {
       setPendingPage(value);
@@ -178,7 +190,7 @@ export function App() {
           {nav.map((item) => (
             <button
               key={item.id}
-              disabled={savingWorkflow}
+              disabled={savingPage}
               aria-current={page === item.id ? "page" : undefined}
               className={`nav-item ${page === item.id ? "active" : ""}`}
               onClick={() => navigate(item.id)}
@@ -357,8 +369,10 @@ export function App() {
               onSave={saveSettings}
               onLoadSkills={factoryApi.installedSkills}
               onDirtyChange={setHasUnsaved}
-              onBusyChange={setSavingWorkflow}
+              onBusyChange={setSavingPage}
             />
+          ) : page === "notifications" ? (
+            <NotificationsPage settings={settings} onSave={saveSettings} onDirtyChange={setHasUnsaved} onBusyChange={setSavingPage} />
           ) : (
             <SettingsPage
               settings={settings}
@@ -414,9 +428,9 @@ export function App() {
               </button>
               <button
                 className="button button-primary"
-                disabled={savingWorkflow}
+                disabled={savingPage}
                 onClick={() => {
-                  if (savingWorkflow) return;
+                  if (savingPage) return;
                   commitContext(pendingPage);
                   setHasUnsaved(false);
                   setPendingPage(null);

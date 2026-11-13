@@ -649,3 +649,16 @@ it("does not carry a model catalog error from one selected workflow step to anot
   expect(screen.queryByText(/first step catalog denied/)).toBeNull();
   expect(screen.queryByText(/Could not load Codex models\./)).toBeNull();
 });
+
+it("preserves connectors refreshed while general settings are dirty", async () => {
+  const original = settings();
+  const onSave = vi.fn(async (value: Settings) => value);
+  const view = render(<SettingsPage settings={original} onSave={onSave} appDir="/fixture/data" />);
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
+  const connector = {id:"external-team",label:"Team",enabled:false,events:[],type:"telegram",config:{chat_id:"",has_token:false}};
+  view.rerender(<SettingsPage settings={{...original, notification_connectors:[connector]}} onSave={onSave} appDir="/fixture/data" />);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  expect(onSave.mock.calls[0][0].max_concurrent).toBe(5);
+  expect(onSave.mock.calls[0][0].notification_connectors).toEqual([connector]);
+});

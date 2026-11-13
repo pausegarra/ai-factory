@@ -7,6 +7,7 @@ pub mod context {
             pub mod entities {
                 pub(crate) mod agent_account;
                 pub mod models;
+                pub mod notification_connector;
                 pub mod run_deletion;
                 pub(crate) mod run_transition;
             }
@@ -16,18 +17,21 @@ pub mod context {
                 pub mod delete_run;
             }
             pub mod interfaces {
+                pub mod notification_transport;
                 pub mod run_cleanup;
                 pub mod run_notification_sink;
             }
             pub mod dto {
                 pub mod agent_account;
                 pub mod agent_model;
+                pub mod connector_notification;
                 pub mod installed_skill;
                 pub(crate) mod pr_workspace;
                 pub mod run_notification;
             }
             pub mod services {
                 pub(crate) mod agent_accounts;
+                pub(crate) mod connector_notifications;
                 pub mod factory;
                 pub(crate) mod reviews;
                 pub(crate) mod run_notifications;
@@ -47,6 +51,7 @@ pub mod context {
                 pub(crate) mod agent_accounts;
                 pub(crate) mod pr_origins;
                 pub(crate) mod run_deletions;
+                pub(crate) mod secure_notifications;
                 pub mod secure_settings;
                 pub mod store;
             }
@@ -55,6 +60,7 @@ pub mod context {
             }
             pub mod rest_clients {
                 pub mod github;
+                pub mod telegram;
             }
             pub mod processes {
                 pub mod agent_models;
@@ -80,4 +86,11 @@ pub use context::factory::application::dto::agent_account::{AgentAccount, CodexL
 pub use context::factory::application::dto::run_notification::RunNotification;
 pub use context::factory::application::interfaces::run_notification_sink::{
     NoopRunNotificationSink, RunNotificationSink,
+};
+
+pub use context::factory::domain::entities::notification_connector::*;
+
+pub use context::factory::application::dto::connector_notification::NotificationDestination;
+pub use context::factory::application::interfaces::notification_transport::{
+    DeliveryFailure, NotificationTransport,
 };
