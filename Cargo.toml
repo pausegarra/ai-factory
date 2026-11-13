@@ -7,3 +7,8 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Keep host proc-macro libraries loadable by rustc on macOS. Product binaries
+# still use the release stripping setting above.
+[profile.release.build-override]
+strip = "none"

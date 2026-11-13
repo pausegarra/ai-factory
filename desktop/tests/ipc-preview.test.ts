@@ -20,3 +20,19 @@ it("loads empty notification preferences and refuses preview writes without invo
   await expect(factoryApi.saveSettings(settings)).rejects.toThrow(/desktop/);
   expect(invoke).not.toHaveBeenCalled();
 });
+it("exposes empty capacity and inherited trigger limits in preview", async () => {
+  const settings = await factoryApi.settings();
+  const snapshot = await factoryApi.snapshot();
+  expect(settings.trigger_max_concurrent).toEqual({});
+  expect(snapshot.capacity.global).toEqual({ active: 0, limit: 4 });
+  expect(snapshot.capacity.by_trigger).toEqual({
+    new_issue: { active: 0, limit: 4 },
+    pr_review: { active: 0, limit: 4 },
+    pr_approved: { active: 0, limit: 4 },
+  });
+  snapshot.capacity.by_trigger.new_issue.active = 30;
+  settings.trigger_max_concurrent!.pr_review = 1;
+  expect((await factoryApi.snapshot()).capacity.by_trigger.new_issue.active).toBe(0);
+  expect((await factoryApi.settings()).trigger_max_concurrent).toEqual({});
+  expect(invoke).not.toHaveBeenCalled();
+});

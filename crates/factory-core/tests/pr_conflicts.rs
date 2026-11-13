@@ -904,6 +904,11 @@ async fn preparation_rejects_base_ref_moving_between_api_read_and_fetch() {
 #[tokio::test]
 async fn queued_approval_prepares_live_base_only_after_previous_merge_and_cleanup() {
     let f = Fixture::new().await;
+    let mut limits = f.factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    f.factory.save_settings(limits).unwrap();
     let merged = f.add_second_approval();
     std::fs::write(f.dir.path().join("allow-merge"), "").unwrap();
     std::fs::write(f.dir.path().join("allow-delete"), "").unwrap();
@@ -987,6 +992,11 @@ async fn queued_approval_prepares_live_base_only_after_previous_merge_and_cleanu
 #[tokio::test]
 async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
     let f = Fixture::new().await;
+    let mut limits = f.factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    f.factory.save_settings(limits).unwrap();
     let moved_head = f.add_second_approval();
     one_node_approval_flow(&f);
     f.agent(blocked_approval_agent(), json!({}));
@@ -1030,6 +1040,11 @@ async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
 #[tokio::test]
 async fn failed_merge_action_releases_next_queued_approval_without_advancing_base() {
     let f = Fixture::new().await;
+    let mut limits = f.factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    f.factory.save_settings(limits).unwrap();
     f.add_second_approval();
     f.agent(blocked_approval_agent(), json!({}));
     let first = f.factory.enqueue(f.event.clone()).unwrap().unwrap();

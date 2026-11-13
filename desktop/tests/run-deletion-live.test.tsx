@@ -1,3 +1,4 @@
+import { capacityFixture } from "./fixtures/capacity";
 import { afterEach, beforeEach, it, expect, vi } from "vitest";
 import { render, screen, cleanup, fireEvent, act, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -29,7 +30,7 @@ const other: RunDetail = {
   ...detail,
   run: { ...detail.run, id: "run-2", title: "Other attempt" },
 };
-const empty: Snapshot = { runs: [], deletions: [], metrics: { total: 0, queued: 0, running: 0,
+const empty: Snapshot = { capacity: capacityFixture({}, 1), runs: [], deletions: [], metrics: { total: 0, queued: 0, running: 0,
   succeeded: 0, failed: 0, cancelled: 0, interrupted: 0 }, service: { running: true,
   polling: false, last_poll_at: null, last_error: null, app_data_dir: "/isolated" } };
 beforeEach(() => {

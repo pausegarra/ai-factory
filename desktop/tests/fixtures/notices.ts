@@ -1,3 +1,4 @@
+import { capacityFixture } from "./capacity";
 import type { Settings, Snapshot } from "../../src/context/factory/domain/types";
 
 export function noticeSettings(): Settings {
@@ -18,6 +19,7 @@ export function noticeSettings(): Settings {
 
 export function noticeSnapshot(lastError: string | null = null): Snapshot {
   return {
+    capacity: capacityFixture(),
     runs: [],
     deletions: [],
     metrics: {

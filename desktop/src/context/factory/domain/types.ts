@@ -71,6 +71,7 @@ export interface Settings {
   codex_yolo?: boolean;
   poll_interval_seconds: number;
   max_concurrent: number;
+  trigger_max_concurrent?: Partial<Record<Trigger, number>>;
   start_at_login: boolean;
   flows: Flow[];
 }
@@ -137,7 +138,13 @@ export interface RunDetail {
   flow: Flow;
   nodes: NodeRun[];
 }
+export interface CapacityUsage { active: number; limit: number }
+export interface ExecutionCapacity {
+  global: CapacityUsage;
+  by_trigger: Record<Trigger, CapacityUsage>;
+}
 export interface Snapshot {
+  capacity: ExecutionCapacity;
   runs: Run[];
   deletions: RunDeletion[];
   metrics: {

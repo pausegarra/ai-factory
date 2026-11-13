@@ -1,4 +1,4 @@
-import type { Flow, Settings } from "./types";
+import { TRIGGERS, type Flow, type Settings } from "./types";
 export type ActivationStatus = "Enabled" | "Disabled globally" | "Disabled for this account";
 export function profilePreference(flow: Flow, profileId: string): boolean {
   const map = flow.profile_activation;
@@ -109,6 +109,18 @@ export function validateSettings(s: Settings): string[] {
     s.max_concurrent > 64
   )
     errors.push("Concurrency must be an integer from 1 to 64.");
+  const limits = s.trigger_max_concurrent;
+  if (limits !== undefined) {
+    if (!limits || typeof limits !== "object" || Array.isArray(limits)) {
+      errors.push("Trigger concurrency must be an object.");
+    } else {
+      for (const [id, limit] of Object.entries(limits)) {
+        if (!Object.hasOwn(TRIGGERS, id)) errors.push(`Unknown concurrency trigger: ${id}.`);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 64)
+          errors.push(`Concurrency for ${id} must be an integer from 1 to 64.`);
+      }
+    }
+  }
   if (!Number.isInteger(s.poll_interval_seconds) || s.poll_interval_seconds < 1)
     errors.push("Poll interval must be a positive integer.");
   if (Object.values(s.commands).some((v) => !v.trim()))

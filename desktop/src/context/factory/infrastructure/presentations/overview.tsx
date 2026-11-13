@@ -36,7 +36,9 @@ export function OverviewPage({
     ["running", "queued"].includes(r.status),
   );
   const recent = snapshot.runs.slice(0, 5);
-  const limit = settings.max_concurrent;
+  const capacity = snapshot.capacity;
+  const limit = capacity.global.limit;
+  const used = capacity.global.active;
   return (
     <>
       <div className="page-title">
@@ -61,7 +63,7 @@ export function OverviewPage({
             label: "Running",
             value: metrics.running,
             icon: <Lightning size={20} />,
-            note: `of ${limit} available slots`,
+            note: "runs executing",
             tone: "orange",
           },
           {
@@ -163,25 +165,39 @@ export function OverviewPage({
             <span>{metrics.total} total tasks</span>
           </div>
         </section>
-        <section className="panel capacity-panel">
+        <section className="panel capacity-panel" aria-label="Capacity">
           <div className="panel-heading">
             <h2>Capacity</h2>
             <span className="muted">GLOBAL</span>
           </div>
-          <div className="capacity-value">
-            <strong>{metrics.running}</strong>
-            <span>/ {limit}</span>
+          <div className="capacity-value" aria-label="Global capacity">
+            <strong>{used}</strong>
+            <span> / {limit}</span>
           </div>
           <div className="capacity-slots">
             {Array.from({ length: Math.min(limit, 16) }, (_, i) => (
-              <span key={i} className={i < metrics.running ? "used" : ""} />
+              <span key={i} className={i < used ? "used" : ""} />
             ))}
           </div>
           <p>
-            {metrics.running
-              ? `${Math.max(0, limit - metrics.running)} slots available for new tasks.`
+            {used
+              ? `${Math.max(0, limit - used)} slots available for new tasks.`
               : "All execution slots are available."}
           </p>
+          <dl>
+            {([
+              ["new_issue", "New issue"],
+              ["pr_review", "PR review"],
+              ["pr_approved", "PR approved"],
+            ] as const).map(([trigger, label]) => (
+              <div key={trigger}>
+                <dt>{label}</dt>
+                <dd aria-label={`${label} capacity`}>
+                  {capacity.by_trigger[trigger].active} / {capacity.by_trigger[trigger].limit}
+                </dd>
+              </div>
+            ))}
+          </dl>
           <div className="capacity-agents">
             <span>
               <span className="agent-mini">C</span>Codex <small>CLI</small>
