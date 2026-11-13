@@ -470,7 +470,7 @@ async fn approvals_wait_without_blocking_other_triggers_and_resume_in_stable_ord
         (run.created_at, run.id)
     });
     std::fs::write(run_memory(dir.path(), &first).join("release"), "").unwrap();
-    status(&factory, &first, "succeeded").await;
+    status(&factory, &first, "blocked").await;
     for (index, id) in pending.iter().enumerate() {
         started(dir.path(), id).await;
         if index == 0 {
@@ -480,7 +480,7 @@ async fn approvals_wait_without_blocking_other_triggers_and_resume_in_stable_ord
             );
         }
         std::fs::write(run_memory(dir.path(), id).join("release"), "").unwrap();
-        status(&factory, id, "succeeded").await;
+        status(&factory, id, "blocked").await;
     }
 
     for ((id, flow), event) in [&second, &third].iter().zip(saved_flows).zip(saved_events) {
@@ -558,7 +558,7 @@ async fn blocked_and_failed_approvals_release_the_next_queued_worker() {
         status(&factory, &first, terminal).await;
         started(dir.path(), &next).await;
         std::fs::write(run_memory(dir.path(), &next).join("release"), "").unwrap();
-        status(&factory, &next, "succeeded").await;
+        status(&factory, &next, "blocked").await;
         factory.shutdown().await;
         server.abort();
     }
@@ -640,7 +640,7 @@ async fn global_capacity_one_still_serializes_other_triggers_with_approval() {
     assert_eq!(factory.snapshot().unwrap().metrics.running, 1);
 
     std::fs::write(run_memory(dir.path(), &approval).join("release"), "").unwrap();
-    status(&factory, &approval, "succeeded").await;
+    status(&factory, &approval, "blocked").await;
     started(dir.path(), &issue).await;
     std::fs::write(run_memory(dir.path(), &issue).join("release"), "").unwrap();
     status(&factory, &issue, "succeeded").await;

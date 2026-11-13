@@ -180,7 +180,7 @@ impl Store {
             tx.query_row("SELECT event_id FROM runs WHERE id=?1", [id], |r| r.get(0))?;
         tx.execute("UPDATE dedup SET run_id='consumed' WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
-        tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3) OR substr(key,1,length(?4))=?4 OR substr(key,1,length(?5))=?5",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:")])?;
+        tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:")])?;
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;
         // Keep the event consumed while any attempt still owns it, including
         // attempts whose cleanup is pending. Release it with the last deletion.
@@ -346,7 +346,13 @@ mod tests {
                 &serde_json::json!({"late":"writer"})
             )
             .is_err());
-        for prefix in ["pr-workspace", "pr-update"] {
+        for prefix in [
+            "pr-workspace",
+            "pr-update",
+            "pr-merge",
+            "release-workspace",
+            "pr-release",
+        ] {
             assert!(store
                 .observe(
                     &format!("{prefix}:{id}"),
@@ -387,6 +393,9 @@ mod tests {
             format!("identity:{id}-neighbor"),
             format!("pr-workspace:{id}-neighbor"),
             format!("pr-update:{id}-neighbor"),
+            format!("pr-merge:{id}-neighbor"),
+            format!("release-workspace:{id}-neighbor"),
+            format!("pr-release:{id}-neighbor"),
             format!("review-feedback:{id}-neighbor:n"),
             format!("review-history:{id}-neighbor:n"),
             "approval-comment:acme/repo#1:7".into(),
@@ -577,6 +586,9 @@ mod tests {
             format!("identity:{id}"),
             format!("pr-workspace:{id}"),
             format!("pr-update:{id}"),
+            format!("pr-merge:{id}"),
+            format!("release-workspace:{id}"),
+            format!("pr-release:{id}"),
             format!("review-feedback:{id}:builder"),
             format!("review-history:{id}:round1"),
         ];

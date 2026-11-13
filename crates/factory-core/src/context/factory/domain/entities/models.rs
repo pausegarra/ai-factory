@@ -1,10 +1,12 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 
 mod default_prompts;
 mod settings_input;
+
+pub(crate) const RELEASE_NODE_ID: &str = "factory_release";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "settings_input::SettingsInput")]
@@ -164,7 +166,7 @@ impl Default for Settings {
                 .enumerate()
                 .map(|(i, (id, prompt, access, deps))| FlowNode {
                     id: id.into(),
-                    name: id.replace('_', " "),
+                    name: if id == "publish" && name == "Approved PR" { "Merge".into() } else { id.replace('_', " ") },
                     agent: "codex".into(),
                     model: String::new(),
                     effort: String::new(),
@@ -173,7 +175,7 @@ impl Default for Settings {
                     codex_account_id: None,
                     access: access.into(),
                     prompt: prompt.into(),
-                    result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"},"publish":false,"update_pr":false,"merge":false,"review":false,"comment":false}})}else{empty_schema()},
+                    result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"},"publish":false,"update_pr":false,"merge":false,"review":false,"comment":false,"release":false}})}else{empty_schema()},
                     depends_on: deps.into_iter().map(String::from).collect(),
                     position: Position {
                         x: 80. + i as f64 * 280.,
@@ -367,6 +369,34 @@ impl Settings {
     }
 }
 impl Flow {
+    pub(crate) fn for_event(&self, event: &TriggerEvent) -> Result<Self> {
+        let mut flow = self.clone();
+        if !event.release_requested() {
+            return Ok(flow);
+        }
+        ensure!(
+            flow.nodes.iter().all(|node| node.id != RELEASE_NODE_ID),
+            "Reserved release node ID"
+        );
+        let mut release = flow
+            .nodes
+            .iter()
+            .rev()
+            .find(|node| node.access == "write")
+            .context("Release requires a write node in the approved PR flow")?
+            .clone();
+        release.id = RELEASE_NODE_ID.into();
+        release.name = "Publish release".into();
+        release.prompt = default_prompts::RELEASE_PR.into();
+        release.result_schema = json!({"type":"object"});
+        // Release has its own contract; merge-specific skills must not redefine it.
+        release.skills = Some(vec![]);
+        release.depends_on = flow.nodes.iter().map(|node| node.id.clone()).collect();
+        release.position.x += 280.;
+        flow.nodes.push(release);
+        Ok(flow)
+    }
+
     pub fn activation_for(&self, actor: &str, profiles: &[TokenProfile]) -> ActivationState {
         if !self.enabled {
             return ActivationState::DisabledGlobally;
@@ -505,6 +535,19 @@ pub struct TriggerEvent {
     pub payload: Value,
 }
 impl TriggerEvent {
+    pub fn release_requested(&self) -> bool {
+        let approval = &self.payload["approval"];
+        self.trigger_id == "pr_approved"
+            && approval["command"] == "release"
+            && self.head_sha.len() == 40
+            && self.head_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && approval["head_sha"] == self.head_sha
+            && approval["actor"]
+                .as_str()
+                .is_some_and(|actor| actor.eq_ignore_ascii_case(&self.actor))
+            && approval["comment_id"].as_u64().is_some()
+    }
+
     pub fn issue(repo: &str, number: u64, title: &str, actor: &str, body: &str) -> Self {
         Self {
             event_id: format!("issue:{repo}#{number}"),

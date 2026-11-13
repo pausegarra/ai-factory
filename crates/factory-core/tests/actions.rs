@@ -134,6 +134,50 @@ fn seed_run(f: &Factory, e: &TriggerEvent, id: &str) {
 }
 
 #[tokio::test]
+async fn release_action_requires_explicit_comment_authorization_before_any_http() {
+    let (_dir, f) = factory("http://127.0.0.1:9");
+    let e = event("pr_approved");
+    seed_run(&f, &e, "release-denied");
+    let api = Github::with_base("alice-token", "http://127.0.0.1:9").unwrap();
+    let error = api.publish_actions(&f, &e, "release-denied", "factory_release", Path::new("."),
+        &result(json!({"release":{"tag":"1.2.3","title":"1.2.3","body":"Fix","bump":"patch","reason":"bug fix"}})))
+        .await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Release requires an authorized release comment"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn release_action_is_reserved_for_its_own_node_and_cannot_combine_actions() {
+    let (_dir, f) = factory("http://127.0.0.1:9");
+    let mut e = event("pr_approved");
+    e.payload = json!({"approval":{"command":"release","actor":e.actor,"head_sha":e.head_sha,"comment_id":9}});
+    seed_run(&f, &e, "release-node");
+    let api = Github::with_base("alice-token", "http://127.0.0.1:9").unwrap();
+    for (node, data, message) in [
+        (
+            "publish",
+            json!({"release":{}}),
+            "Only the assigned release node can publish a release",
+        ),
+        (
+            "factory_release",
+            json!({"release":{},"merge":{}}),
+            "release cannot be combined with other actions",
+        ),
+    ] {
+        let error = api
+            .publish_actions(&f, &e, "release-node", node, Path::new("."), &result(data))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{error:#}");
+    }
+}
+
+#[tokio::test]
 async fn request_accepts_empty_204_and_keeps_json_contract() {
     let script = Script::start(vec![
         Step::new("DELETE", "/empty", Reply::Raw(204, vec![])),
