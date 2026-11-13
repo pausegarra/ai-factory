@@ -189,7 +189,7 @@ mod tests {
                 "",
             ))?
             .unwrap();
-        assert!(f.register_queued_worker(&id, 4)?.is_some());
+        assert!(f.register_queued_worker(&id)?.is_some());
         f.cancel(&id)?;
         assert!(f
             .delete_run(&id)
@@ -217,9 +217,9 @@ mod tests {
             .unwrap();
         let stale = f.snapshot()?.runs.remove(0);
         f.cancel(&id)?;
-        assert!(f.register_queued_worker(&stale.id, 4)?.is_none());
+        assert!(f.register_queued_worker(&stale.id)?.is_none());
         f.delete_run(&id)?;
-        assert!(f.register_queued_worker(&stale.id, 4)?.is_none());
+        assert!(f.register_queued_worker(&stale.id)?.is_none());
         assert!(f.active.lock().unwrap().is_empty());
         let id = f
             .enqueue(TriggerEvent::issue(
@@ -232,12 +232,12 @@ mod tests {
             .unwrap();
         let gate = f.lifecycle_gate.lock().unwrap();
         assert!(
-            f.register_queued_worker(&id, 4)?.is_none(),
+            f.register_queued_worker(&id)?.is_none(),
             "scheduler must defer rather than block on an import"
         );
         drop(gate);
-        assert!(f.register_queued_worker(&id, 4)?.is_some());
-        assert!(f.register_queued_worker(&id, 4)?.is_none());
+        assert!(f.register_queued_worker(&id)?.is_some());
+        assert!(f.register_queued_worker(&id)?.is_none());
         f.active.lock().unwrap().remove(&id);
         Ok(())
     }

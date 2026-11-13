@@ -346,7 +346,7 @@ mod lease_tests {
             .insert(&event, &flow, 1, false)
             .unwrap()
             .unwrap();
-        factory.register_queued_worker(&run, 1).unwrap().unwrap();
+        factory.register_queued_worker(&run).unwrap().unwrap();
         factory.cancel(&run).unwrap();
         assert!(factory.remove_agent_account(&account.id).await.is_err());
         factory.active.lock().unwrap().remove(&run);

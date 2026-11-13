@@ -9,7 +9,7 @@ mod settings_input;
 pub(crate) const RELEASE_NODE_ID: &str = "factory_release";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(from = "settings_input::SettingsInput")]
+#[serde(try_from = "settings_input::SettingsInput")]
 pub struct Settings {
     pub notification_connectors: Vec<super::notification_connector::NotificationConnector>,
     pub token_profiles: Vec<TokenProfile>,
@@ -20,6 +20,7 @@ pub struct Settings {
     pub codex_yolo: bool,
     pub poll_interval_seconds: u64,
     pub max_concurrent: usize,
+    pub trigger_max_concurrent: BTreeMap<String, usize>,
     pub start_at_login: bool,
     pub flows: Vec<Flow>,
 }
@@ -199,6 +200,7 @@ impl Default for Settings {
             codex_yolo: false,
             poll_interval_seconds: 15,
             max_concurrent: 4,
+            trigger_max_concurrent: BTreeMap::new(),
             start_at_login: false,
             flows: vec![
                 mk(
@@ -265,6 +267,37 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn validate_concurrency(&self) -> Result<()> {
+        ensure!(
+            (1..=64).contains(&self.max_concurrent),
+            "Concurrency must be between 1 and 64"
+        );
+        for (id, limit) in &self.trigger_max_concurrent {
+            ensure!(
+                ["new_issue", "pr_review", "pr_approved"].contains(&id.as_str()),
+                "Unknown concurrency trigger: {id}"
+            );
+            ensure!(
+                (1..=64).contains(limit),
+                "Concurrency for {id} must be between 1 and 64"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn concurrency_for(&self, trigger_id: &str) -> Result<usize> {
+        self.validate_concurrency()?;
+        ensure!(
+            ["new_issue", "pr_review", "pr_approved"].contains(&trigger_id),
+            "Unknown concurrency trigger: {trigger_id}"
+        );
+        Ok(self
+            .trigger_max_concurrent
+            .get(trigger_id)
+            .copied()
+            .unwrap_or(self.max_concurrent))
+    }
+
     pub fn flow_for_actor(&self, template: &Flow, actor: &str) -> Flow {
         let mut flow = template.for_actor(actor, &self.token_profiles);
         let account = self
@@ -283,10 +316,7 @@ impl Settings {
     }
     pub fn validate(&self) -> Result<()> {
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
-        ensure!(
-            (1..=64).contains(&self.max_concurrent),
-            "Concurrency must be between 1 and 64"
-        );
+        self.validate_concurrency()?;
         ensure!(
             self.poll_interval_seconds > 0,
             "Poll interval must be positive"
@@ -630,11 +660,22 @@ pub struct ServiceStatus {
     pub app_data_dir: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapacityUsage {
+    pub active: usize,
+    pub limit: usize,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionCapacity {
+    pub global: CapacityUsage,
+    pub by_trigger: BTreeMap<String, CapacityUsage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub runs: Vec<Run>,
     #[serde(default)]
     pub deletions: Vec<crate::RunDeletion>,
     pub metrics: Metrics,
+    pub capacity: ExecutionCapacity,
     pub service: ServiceStatus,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

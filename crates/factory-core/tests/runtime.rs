@@ -390,6 +390,11 @@ async fn graceful_shutdown_stops_descendants_and_leaves_no_running_history() {
 #[tokio::test]
 async fn approvals_wait_without_blocking_other_triggers_and_resume_in_stable_order() {
     let (dir, factory, sha, server) = fixture().await;
+    let mut limits = factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    factory.save_settings(limits).unwrap();
     install_signalled_agent(dir.path());
     let mut settings = factory.settings().unwrap();
     settings.poll_interval_seconds = 3600;
@@ -535,6 +540,11 @@ async fn approvals_wait_without_blocking_other_triggers_and_resume_in_stable_ord
 async fn blocked_and_failed_approvals_release_the_next_queued_worker() {
     for (outcome, terminal) in [("blocked", "blocked"), ("failed", "failed")] {
         let (dir, factory, sha, server) = fixture().await;
+        let mut limits = factory.settings().unwrap();
+        limits
+            .trigger_max_concurrent
+            .insert("pr_approved".into(), 1);
+        factory.save_settings(limits).unwrap();
         install_outcome_agent(dir.path());
         let first = factory
             .enqueue(runtime_event("pr_approved", 1, &sha))
@@ -567,6 +577,11 @@ async fn blocked_and_failed_approvals_release_the_next_queued_worker() {
 #[tokio::test]
 async fn cancelling_queued_approval_does_not_stop_active_descendant_and_next_runs_after_drain() {
     let (_dir, factory, sha, server) = fixture().await;
+    let mut limits = factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    factory.save_settings(limits).unwrap();
     let first = factory
         .enqueue(runtime_event("pr_approved", 1, &sha))
         .unwrap()
@@ -858,4 +873,311 @@ async fn notification_runtime_no_sink_or_closed_receiver_does_not_change_executi
         assert!(run.error.is_none());
         assert!(run.workspace.is_none());
     }
+}
+
+async fn finish_capacity_fixture(
+    dir: &Path,
+    factory: &Factory,
+    ids: &[String],
+    server: tokio::task::JoinHandle<()>,
+) {
+    for id in ids {
+        if ["queued", "running"].contains(&factory.run_detail(id).unwrap().run.status.as_str()) {
+            factory.cancel(id).unwrap();
+        }
+    }
+    factory.shutdown().await;
+    assert_eq!(factory.snapshot().unwrap().capacity.global.active, 0);
+    for id in ids {
+        assert!(!dir.join("data/workspaces").join(id).exists());
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+fn assert_waiting_for_capacity(dir: &Path, factory: &Factory, id: &str) {
+    let detail = factory.run_detail(id).unwrap();
+    assert_eq!(detail.run.status, "queued");
+    assert!(detail.run.started_at.is_none());
+    assert!(detail.run.workspace.is_none());
+    assert!(!run_memory(dir, id).join("started").exists());
+    assert!(!dir.join("data/workspaces").join(id).exists());
+}
+
+async fn capacity_active(factory: &Factory, trigger: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let capacity = factory.snapshot().unwrap().capacity;
+            assert_eq!(
+                capacity.global.active,
+                capacity
+                    .by_trigger
+                    .values()
+                    .map(|usage| usage.active)
+                    .sum::<usize>()
+            );
+            if capacity.by_trigger[trigger].active == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn configured_approval_capacity_two_runs_two_agents_and_queues_the_third() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    let mut s = factory.settings().unwrap();
+    s.max_concurrent = 8;
+    s.poll_interval_seconds = 3600;
+    s.trigger_max_concurrent.insert("pr_approved".into(), 2);
+    factory.save_settings(s).unwrap();
+    let mut ids: Vec<_> = (101..=103)
+        .map(|n| {
+            factory
+                .enqueue(runtime_event("pr_approved", n, &sha))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    ids.sort_by_key(|id| {
+        let run = factory.run_detail(id).unwrap().run;
+        (run.created_at, run.id)
+    });
+    factory.start();
+    started(dir.path(), &ids[0]).await;
+    started(dir.path(), &ids[1]).await;
+    assert_waiting_for_capacity(dir.path(), &factory, &ids[2]);
+    let before = factory.snapshot().unwrap().capacity;
+    assert_eq!(before.global.active, 2);
+    assert_eq!(before.by_trigger["pr_approved"].active, 2);
+    let clones = std::fs::read_to_string(dir.path().join("clone-args.log")).unwrap();
+    assert_eq!(clones.lines().filter(|line| *line == "clone").count(), 2);
+    std::fs::write(run_memory(dir.path(), &ids[0]).join("release"), "").unwrap();
+    started(dir.path(), &ids[2]).await;
+    assert_eq!(
+        factory.snapshot().unwrap().capacity.by_trigger["pr_approved"].active,
+        2
+    );
+    finish_capacity_fixture(dir.path(), &factory, &ids, server).await;
+}
+
+#[tokio::test]
+async fn trigger_capacity_saturation_does_not_block_other_categories() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    let mut s = factory.settings().unwrap();
+    s.max_concurrent = 8;
+    s.poll_interval_seconds = 3600;
+    s.trigger_max_concurrent = [
+        ("new_issue".into(), 1),
+        ("pr_review".into(), 2),
+        ("pr_approved".into(), 2),
+    ]
+    .into();
+    factory.save_settings(s).unwrap();
+    let mut issues: Vec<_> = (111..=113)
+        .map(|n| {
+            factory
+                .enqueue(runtime_event("new_issue", n, &sha))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    issues.sort_by_key(|id| {
+        let run = factory.run_detail(id).unwrap().run;
+        (run.created_at, run.id)
+    });
+    let review = factory
+        .enqueue(runtime_event("pr_review", 114, &sha))
+        .unwrap()
+        .unwrap();
+    let approval = factory
+        .enqueue(runtime_event("pr_approved", 115, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    for id in [&issues[0], &review, &approval] {
+        started(dir.path(), id).await;
+    }
+    assert_waiting_for_capacity(dir.path(), &factory, &issues[1]);
+    assert_waiting_for_capacity(dir.path(), &factory, &issues[2]);
+    assert_eq!(factory.snapshot().unwrap().capacity.global.active, 3);
+    factory.cancel(&issues[0]).unwrap();
+    started(dir.path(), &issues[1]).await;
+    assert_eq!(
+        factory.snapshot().unwrap().capacity.by_trigger["new_issue"].active,
+        1
+    );
+    issues.extend([review, approval]);
+    finish_capacity_fixture(dir.path(), &factory, &issues, server).await;
+}
+
+#[tokio::test]
+async fn capacity_increase_and_reduction_apply_to_existing_queue() {
+    for global in [false, true] {
+        let (dir, factory, sha, server) = fixture().await;
+        install_signalled_agent(dir.path());
+        let mut s = factory.settings().unwrap();
+        s.max_concurrent = if global { 2 } else { 8 };
+        s.poll_interval_seconds = 3600;
+        s.trigger_max_concurrent
+            .insert("new_issue".into(), if global { 8 } else { 2 });
+        factory.save_settings(s.clone()).unwrap();
+        let mut ids: Vec<_> = (121..=125)
+            .map(|n| {
+                factory
+                    .enqueue(runtime_event("new_issue", n, &sha))
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        ids.sort_by_key(|id| {
+            let run = factory.run_detail(id).unwrap().run;
+            (run.created_at, run.id)
+        });
+        factory.start();
+        started(dir.path(), &ids[0]).await;
+        started(dir.path(), &ids[1]).await;
+        if global {
+            s.max_concurrent = 1;
+        } else {
+            s.trigger_max_concurrent.insert("new_issue".into(), 1);
+        }
+        factory.save_settings(s.clone()).unwrap();
+        let reduced = factory.snapshot().unwrap().capacity;
+        assert_eq!(reduced.global.active, 2);
+        assert_eq!(
+            if global {
+                reduced.global.limit
+            } else {
+                reduced.by_trigger["new_issue"].limit
+            },
+            1
+        );
+        assert_eq!(factory.run_detail(&ids[0]).unwrap().run.status, "running");
+        assert_eq!(factory.run_detail(&ids[1]).unwrap().run.status, "running");
+        std::fs::write(run_memory(dir.path(), &ids[0]).join("release"), "").unwrap();
+        capacity_active(&factory, "new_issue", 1).await;
+        assert_waiting_for_capacity(dir.path(), &factory, &ids[2]);
+        std::fs::write(run_memory(dir.path(), &ids[1]).join("release"), "").unwrap();
+        started(dir.path(), &ids[2]).await;
+        assert_waiting_for_capacity(dir.path(), &factory, &ids[3]);
+        if global {
+            s.max_concurrent = 3;
+        } else {
+            s.trigger_max_concurrent.insert("new_issue".into(), 3);
+        }
+        factory.save_settings(s).unwrap();
+        started(dir.path(), &ids[3]).await;
+        started(dir.path(), &ids[4]).await;
+        assert_eq!(factory.snapshot().unwrap().capacity.global.active, 3);
+        finish_capacity_fixture(dir.path(), &factory, &ids, server).await;
+    }
+}
+
+#[tokio::test]
+async fn global_capacity_release_starts_another_trigger_without_new_event() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    let mut s = factory.settings().unwrap();
+    s.max_concurrent = 1;
+    s.poll_interval_seconds = 3600;
+    s.trigger_max_concurrent = [
+        ("new_issue".into(), 8),
+        ("pr_review".into(), 8),
+        ("pr_approved".into(), 8),
+    ]
+    .into();
+    factory.save_settings(s).unwrap();
+    let approval = factory
+        .enqueue(runtime_event("pr_approved", 131, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    started(dir.path(), &approval).await;
+    let issue = factory
+        .enqueue(runtime_event("new_issue", 132, &sha))
+        .unwrap()
+        .unwrap();
+    assert_waiting_for_capacity(dir.path(), &factory, &issue);
+    factory.cancel(&approval).unwrap();
+    started(dir.path(), &issue).await;
+    assert_eq!(factory.snapshot().unwrap().capacity.global.active, 1);
+    finish_capacity_fixture(dir.path(), &factory, &[approval, issue], server).await;
+}
+
+#[tokio::test]
+async fn retry_shares_its_trigger_capacity_at_runtime() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    let mut s = factory.settings().unwrap();
+    s.max_concurrent = 2;
+    s.poll_interval_seconds = 3600;
+    s.trigger_max_concurrent.insert("pr_review".into(), 1);
+    factory.save_settings(s).unwrap();
+    let previous = factory
+        .enqueue(runtime_event("pr_review", 141, &sha))
+        .unwrap()
+        .unwrap();
+    factory.cancel(&previous).unwrap();
+    let review = factory
+        .enqueue(runtime_event("pr_review", 142, &sha))
+        .unwrap()
+        .unwrap();
+    let issue = factory
+        .enqueue(runtime_event("new_issue", 143, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    started(dir.path(), &review).await;
+    started(dir.path(), &issue).await;
+    let retry = factory.retry(&previous).unwrap();
+    assert_waiting_for_capacity(dir.path(), &factory, &retry);
+    factory.cancel(&issue).unwrap();
+    capacity_active(&factory, "new_issue", 0).await;
+    assert_waiting_for_capacity(dir.path(), &factory, &retry);
+    factory.cancel(&review).unwrap();
+    started(dir.path(), &retry).await;
+    assert_eq!(
+        factory.snapshot().unwrap().capacity.by_trigger["pr_review"].active,
+        1
+    );
+    finish_capacity_fixture(
+        dir.path(),
+        &factory,
+        &[previous, review, issue, retry],
+        server,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn default_approval_capacity_inherits_global_instead_of_one() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_signalled_agent(dir.path());
+    assert!(factory
+        .settings()
+        .unwrap()
+        .trigger_max_concurrent
+        .is_empty());
+    let ids: Vec<_> = (151..=152)
+        .map(|n| {
+            factory
+                .enqueue(runtime_event("pr_approved", n, &sha))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    factory.start();
+    for id in &ids {
+        started(dir.path(), id).await;
+    }
+    let capacity = factory.snapshot().unwrap().capacity;
+    assert_eq!(capacity.by_trigger["pr_approved"].limit, 4);
+    assert_eq!(capacity.by_trigger["pr_approved"].active, 2);
+    finish_capacity_fixture(dir.path(), &factory, &ids, server).await;
 }

@@ -18,6 +18,7 @@ pub(super) struct SettingsInput {
     codex_yolo: bool,
     poll_interval_seconds: u64,
     max_concurrent: usize,
+    trigger_max_concurrent: BTreeMap<String, usize>,
     start_at_login: bool,
     flows: Vec<Flow>,
 }
@@ -56,14 +57,17 @@ impl Default for SettingsInput {
             codex_yolo: defaults.codex_yolo,
             poll_interval_seconds: defaults.poll_interval_seconds,
             max_concurrent: defaults.max_concurrent,
+            trigger_max_concurrent: defaults.trigger_max_concurrent,
             start_at_login: defaults.start_at_login,
             flows: defaults.flows,
         }
     }
 }
 
-impl From<SettingsInput> for Settings {
-    fn from(input: SettingsInput) -> Self {
+impl TryFrom<SettingsInput> for Settings {
+    type Error = anyhow::Error;
+
+    fn try_from(input: SettingsInput) -> Result<Self, Self::Error> {
         let token_profiles = input
             .token_profiles
             .into_iter()
@@ -82,7 +86,7 @@ impl From<SettingsInput> for Settings {
                 profile
             })
             .collect();
-        Self {
+        let settings = Self {
             notification_connectors: input.notification_connectors,
             token_profiles,
             codex_bindings: input.codex_bindings,
@@ -91,8 +95,11 @@ impl From<SettingsInput> for Settings {
             codex_yolo: input.codex_yolo,
             poll_interval_seconds: input.poll_interval_seconds,
             max_concurrent: input.max_concurrent,
+            trigger_max_concurrent: input.trigger_max_concurrent,
             start_at_login: input.start_at_login,
             flows: input.flows,
-        }
+        };
+        settings.validate_concurrency()?;
+        Ok(settings)
     }
 }

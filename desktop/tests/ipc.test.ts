@@ -57,3 +57,19 @@ it("passes notification secrets only in explicit save input through existing IPC
   const loaded = await factoryApi.settings();
   expect(loaded.notification_connectors?.[0].config).toEqual({chat_id:"-1001",has_token:true});
 });
+it("transports independent ceilings and reserved capacity through existing IPC", async () => {
+  const { noticeSettings, noticeSnapshot } = await import("./fixtures/notices");
+  const settings = { ...noticeSettings(), max_concurrent: 8, trigger_max_concurrent: { new_issue: 4, pr_review: 4, pr_approved: 2 } };
+  vi.mocked(invoke).mockResolvedValueOnce(settings);
+  expect((await factoryApi.settings()).trigger_max_concurrent).toEqual({ new_issue: 4, pr_review: 4, pr_approved: 2 });
+  vi.mocked(invoke).mockResolvedValueOnce(settings);
+  expect((await factoryApi.saveSettings(settings)).trigger_max_concurrent).toEqual({ new_issue: 4, pr_review: 4, pr_approved: 2 });
+  expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
+  const snapshot = noticeSnapshot();
+  snapshot.capacity = { global: { active: 1, limit: 8 }, by_trigger: {
+    new_issue: { active: 0, limit: 4 }, pr_review: { active: 0, limit: 4 }, pr_approved: { active: 1, limit: 2 },
+  } };
+  vi.mocked(invoke).mockResolvedValueOnce(snapshot);
+  expect((await factoryApi.snapshot()).capacity).toEqual(snapshot.capacity);
+  expect(invoke).toHaveBeenLastCalledWith("get_snapshot");
+});
