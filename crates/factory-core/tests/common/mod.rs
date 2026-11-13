@@ -153,3 +153,5 @@ exec '{actual}' "$@"
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     wrapper
 }
+
+pub mod notifications;

@@ -1,4 +1,5 @@
 use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
+use crate::context::factory::domain::entities::run_transition::RunTransition;
 use crate::context::factory::infrastructure::filesystem::run_cleanup::LocalRunCleanup;
 use crate::context::factory::infrastructure::{
     processes::agents, repositories::store::Store, rest_clients::github::Github,
@@ -64,6 +65,7 @@ pub struct Factory {
     pub(crate) lifecycle_gate: Mutex<()>,
     pub(crate) deletion_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     pub(crate) cleanup: Arc<dyn RunCleanup>,
+    run_notification_sink: Mutex<Arc<dyn RunNotificationSink>>,
 }
 
 #[cfg(test)]
@@ -145,7 +147,29 @@ impl Factory {
             lifecycle_gate: Mutex::new(()),
             deletion_locks: Mutex::new(HashMap::new()),
             cleanup,
+            run_notification_sink: Mutex::new(Arc::new(NoopRunNotificationSink)),
         }))
+    }
+    /// Install an output port for future transitions; existing history is never replayed.
+    pub fn set_run_notification_sink(&self, sink: Arc<dyn RunNotificationSink>) {
+        *self.run_notification_sink.lock().unwrap() = sink;
+    }
+    fn publish_run_transition(&self, transition: Option<RunTransition>) {
+        let Some(transition) = transition else { return };
+        let Some(notification) = super::run_notifications::notification_for(&transition, |text| {
+            self.store.redact_cached(text)
+        }) else {
+            return;
+        };
+        let sink = self.run_notification_sink.lock().unwrap().clone();
+        sink.enqueue(notification);
+    }
+    pub(crate) fn claim_run_for_execution(&self, id: &str) -> Result<bool> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
+        let transition = self.store.claim_queued_transition(id)?;
+        let claimed = transition.is_some();
+        self.publish_run_transition(transition);
+        Ok(claimed)
     }
     pub fn settings(&self) -> Result<Settings> {
         self.store.public_settings()
@@ -370,7 +394,8 @@ impl Factory {
             r.finished_at = Some(now());
             r.current_step = None;
         }
-        self.store.save_run(&r)?;
+        let transition = self.store.save_run_transition(&r)?;
+        self.publish_run_transition(transition);
         if !["queued", "running"].contains(&status) {
             for mut n in self.store.nodes(id)? {
                 if ["pending", "running"].contains(&n.status.as_str()) {

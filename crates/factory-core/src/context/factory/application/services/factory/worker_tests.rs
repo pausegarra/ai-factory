@@ -569,3 +569,72 @@ fn reopening_keeps_queued_snapshots_order_and_consumed_approval_signals() {
         .unwrap()
         .is_none());
 }
+
+#[derive(Default)]
+struct NotificationRecorder(Mutex<Vec<RunNotification>>);
+impl RunNotificationSink for NotificationRecorder {
+    fn enqueue(&self, message: RunNotification) {
+        self.0.lock().unwrap().push(message);
+    }
+}
+#[test]
+fn notification_commit_failure_and_ui_events_do_not_emit() {
+    let (_dir, f) = setup();
+    let sink = Arc::new(NotificationRecorder::default());
+    f.set_run_notification_sink(sink.clone());
+    let id = queued(&f, "new_issue", 11);
+    f.store.db.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_notification BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+    assert!(f.set_run_status(&id, "running", None).is_err());
+    assert!(f.claim_run_for_execution(&id).is_err());
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "queued");
+    assert!(sink.0.lock().unwrap().is_empty());
+    f.store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_notification")
+        .unwrap();
+    assert!(f.claim_run_for_execution(&id).unwrap());
+    assert!(!f.claim_run_for_execution(&id).unwrap());
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+    sink.0.lock().unwrap().clear();
+    for kind in [
+        "resync",
+        "run_changed",
+        "node_changed",
+        "logs_changed",
+        "run_created",
+    ] {
+        f.emit(kind, Some(&id), None);
+    }
+    assert!(sink.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn notification_committed_result_precedes_node_write_failure() {
+    let (_dir, f) = setup();
+    let sink = Arc::new(NotificationRecorder::default());
+    f.set_run_notification_sink(sink.clone());
+    let id = queued(&f, "new_issue", 11);
+    f.store.db.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_node BEFORE UPDATE ON nodes BEGIN SELECT RAISE(ABORT, 'fixture node failure'); END;").unwrap();
+    assert!(f
+        .set_run_status(&id, "failed", Some("timeout".into()))
+        .is_err());
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "failed");
+    let messages = sink.0.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].status, "failed");
+    assert_eq!(
+        messages[0].body,
+        "acme/repo #11 · [AI] fixture · Execution timed out."
+    );
+    drop(messages);
+    f.store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_node")
+        .unwrap();
+    f.set_run_status(&id, "failed", None).unwrap();
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+}

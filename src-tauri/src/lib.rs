@@ -1,3 +1,12 @@
+mod context {
+    pub(crate) mod factory {
+        pub(crate) mod infrastructure {
+            pub(crate) mod notifications {
+                pub(crate) mod run_notifications;
+            }
+        }
+    }
+}
 mod lifecycle;
 mod startup;
 
@@ -247,6 +256,7 @@ pub fn run() {
             Some(vec!["--background"]),
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let root = app.path().app_data_dir()?;
             // Debug smoke tests use isolated state; released apps always use OS application data.
@@ -255,6 +265,10 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(root);
             let factory = Factory::open(root)?;
+            context::factory::infrastructure::notifications::run_notifications::install(
+                app.handle().clone(),
+                factory.as_ref(),
+            );
             let mut events = factory.subscribe();
             app.manage(DesktopState {
                 factory: factory.clone(),

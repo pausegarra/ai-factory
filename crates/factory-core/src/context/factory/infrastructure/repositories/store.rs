@@ -1,3 +1,4 @@
+use crate::context::factory::domain::entities::run_transition::RunTransition;
 use crate::*;
 use anyhow::{ensure, Context};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -334,16 +335,23 @@ impl Store {
         Ok(detail)
     }
     pub fn claim_queued(&self, id: &str) -> Result<bool> {
+        Ok(self.claim_queued_transition(id)?.is_some())
+    }
+    pub fn save_run(&self, run: &Run) -> Result<()> {
+        self.save_run_transition(run).map(|_| ())
+    }
+    pub(crate) fn claim_queued_transition(&self, id: &str) -> Result<Option<RunTransition>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let raw: Option<String> = tx
             .query_row("SELECT json FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)", [id], |r| r.get(0))
             .optional()?;
-        let Some(raw) = raw else { return Ok(false) };
+        let Some(raw) = raw else { return Ok(None) };
         let mut r: Run = serde_json::from_str(&raw)?;
         if r.status != "queued" {
-            return Ok(false);
+            return Ok(None);
         }
+        let previous_status = r.status.clone();
         r.status = "running".into();
         r.started_at = Some(now());
         tx.execute(
@@ -351,9 +359,12 @@ impl Store {
             params![serde_json::to_string(&r)?, id],
         )?;
         tx.commit()?;
-        Ok(true)
+        Ok(Some(RunTransition {
+            previous_status,
+            run: r,
+        }))
     }
-    pub fn save_run(&self, r: &Run) -> Result<()> {
+    pub(crate) fn save_run_transition(&self, r: &Run) -> Result<Option<RunTransition>> {
         let mut connection = self.db.lock().unwrap();
         let db = connection.transaction()?;
         let raw: Option<String> = db
@@ -362,11 +373,12 @@ impl Store {
         let previous: Run = serde_json::from_str(&raw.context("Run not found")?)?;
         if !["queued", "running"].contains(&previous.status.as_str()) && r.status != previous.status
         {
-            return Ok(());
+            return Ok(None);
         }
         // Workspace lifecycle has its own atomic update; stale status snapshots must not restore it.
         let mut r = r.clone();
         r.workspace = previous.workspace;
+        let changed = previous.status != r.status;
         ensure!(
             db.execute(
                 "UPDATE runs SET json=?1 WHERE id=?2",
@@ -375,7 +387,10 @@ impl Store {
             "Run not found"
         );
         db.commit()?;
-        Ok(())
+        Ok(changed.then_some(RunTransition {
+            previous_status: previous.status,
+            run: r,
+        }))
     }
     pub(crate) fn set_workspace(&self, id: &str, workspace: Option<&str>) -> Result<()> {
         ensure!(
@@ -541,6 +556,127 @@ impl Store {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    struct NotificationCredentials;
+    impl Credentials for NotificationCredentials {
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+    fn notification_store() -> (tempfile::TempDir, Arc<Store>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            Store::open_with_credentials(dir.path(), Arc::new(NotificationCredentials)).unwrap(),
+        );
+        let id = store
+            .insert(
+                &TriggerEvent::issue("acme/repo", 11, "[AI] fixture", "alice", ""),
+                &Settings::default().flows[0],
+                1,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        (dir, store, id)
+    }
+    #[test]
+    fn notification_transition_claim_returns_committed_snapshot() -> Result<()> {
+        let (_dir, store, id) = notification_store();
+        let t = store.claim_queued_transition(&id)?.expect("first claim");
+        assert_eq!(t.previous_status, "queued");
+        assert_eq!(t.run.status, "running");
+        assert_eq!(t.run.id, id);
+        assert!(t.run.started_at.is_some());
+        assert!(store.claim_queued_transition(&id)?.is_none());
+        assert_eq!(
+            serde_json::to_value(t.run)?,
+            serde_json::to_value(store.detail(&id)?.run)?
+        );
+        Ok(())
+    }
+    #[test]
+    fn notification_transition_claim_is_atomic() {
+        let (_dir, store, id) = notification_store();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (store, id, barrier) = (store.clone(), id.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.claim_queued_transition(&id).unwrap().is_some()
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .filter_map(|t| t.join().unwrap().then_some(()))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn notification_transition_save_reports_only_accepted_changes() -> Result<()> {
+        let (_dir, store, id) = notification_store();
+        store.claim_queued(&id)?;
+        let mut r = store.detail(&id)?.run;
+        r.status = "succeeded".into();
+        let t = store.save_run_transition(&r)?.unwrap();
+        assert_eq!(t.previous_status, "running");
+        assert_eq!(t.run.status, "succeeded");
+        r.error = Some("metadata only".into());
+        assert!(store.save_run_transition(&r)?.is_none());
+        r.status = "failed".into();
+        assert!(store.save_run_transition(&r)?.is_none());
+        assert_eq!(store.detail(&id)?.run.status, "succeeded");
+        let (_dir2, store2, id2) = notification_store();
+        let mut r = store2.detail(&id2)?.run;
+        r.status = "failed".into();
+        let t = store2.save_run_transition(&r)?.unwrap();
+        assert_eq!(t.previous_status, "queued");
+        assert!(t.run.started_at.is_none());
+        Ok(())
+    }
+    #[test]
+    fn notification_transition_save_preserves_workspace_and_hidden_deletion() -> Result<()> {
+        let (_dir, store, id) = notification_store();
+        let mut r = store.detail(&id)?.run;
+        store.set_workspace(&id, Some("fixture-workspace"))?;
+        r.status = "failed".into();
+        let t = store.save_run_transition(&r)?.unwrap();
+        assert_eq!(t.run.workspace.as_deref(), Some("fixture-workspace"));
+        assert_eq!(
+            serde_json::to_value(&t.run)?,
+            serde_json::to_value(store.detail(&id)?.run)?
+        );
+        store.prepare_deletion(&id)?;
+        assert!(store.claim_queued_transition(&id)?.is_none());
+        assert!(store.save_run_transition(&r).is_err());
+        Ok(())
+    }
+    #[test]
+    fn notification_transition_failed_commit_returns_no_change() -> Result<()> {
+        let (_dir, store, id) = notification_store();
+        store.db.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_notification BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;")?;
+        assert!(store.claim_queued_transition(&id).is_err());
+        let mut r = store.detail(&id)?.run;
+        r.status = "failed".into();
+        assert!(store.save_run_transition(&r).is_err());
+        assert_eq!(store.detail(&id)?.run.status, "queued");
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_notification")?;
+        assert!(store.claim_queued_transition(&id)?.is_some());
+        Ok(())
+    }
+
     #[test]
     fn stale_cancel_snapshot_keeps_archived_result() {
         let dir = tempfile::tempdir().unwrap();
