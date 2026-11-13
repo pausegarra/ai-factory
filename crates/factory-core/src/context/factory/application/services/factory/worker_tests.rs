@@ -1033,3 +1033,17 @@ fn snapshot_capacity_is_coherent_during_concurrent_settings_and_reservations() {
         writer.join().unwrap();
     });
 }
+
+#[test]
+fn cancelled_worker_blocks_same_event_retry_until_cleanup_with_spare_capacity() {
+    let (_dir, factory) = setup();
+    let active = queued(&factory, "pr_approved", 1);
+    assert!(factory.register_queued_worker(&active).unwrap().is_some());
+    factory.cancel(&active).unwrap();
+    let retry = factory.retry(&active).unwrap();
+    assert!(factory.register_queued_worker(&retry).unwrap().is_none());
+    let other = queued(&factory, "pr_approved", 2);
+    assert!(factory.register_queued_worker(&other).unwrap().is_some());
+    release_for_test(&factory, &active);
+    assert!(factory.register_queued_worker(&retry).unwrap().is_some());
+}

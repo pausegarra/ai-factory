@@ -478,10 +478,10 @@ export function FlowsPage({
         ))}
       </div>
       {trigger === "pr_approved" && (
-        <aside className="notice notice-info" aria-label="Approval and release">
+        <aside className="notice notice-info" aria-label="Approval and version bump">
           <div className="notice-content flex flex-col gap-2">
-            <p><strong><code>APPROVED</code> review or <code>OK</code> comment:</strong> approves the current PR version and merges its branch only.</p>
-            <p><strong><code>release</code> comment:</strong> also approves the PR, merges its branch, then bumps the version, pushes a tag and publishes a GitHub release.</p>
+            <p><strong><code>APPROVED</code> review or <code>OK</code> comment:</strong> approves the current PR version, merges its branch, then runs the version bump node.</p>
+            <p><strong>Version bump:</strong> inspects the merged diff and updates version files: major for incompatible changes, minor for new functionality, patch for fixes or maintenance. No tag or GitHub release is created.</p>
             <p>Comments must come from the authorized PR author.</p>
           </div>
         </aside>

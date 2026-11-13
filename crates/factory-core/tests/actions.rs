@@ -134,7 +134,7 @@ fn seed_run(f: &Factory, e: &TriggerEvent, id: &str) {
 }
 
 #[tokio::test]
-async fn release_action_requires_explicit_comment_authorization_before_any_http() {
+async fn release_action_is_rejected_before_any_http() {
     let (_dir, f) = factory("http://127.0.0.1:9");
     let e = event("pr_approved");
     seed_run(&f, &e, "release-denied");
@@ -145,13 +145,13 @@ async fn release_action_requires_explicit_comment_authorization_before_any_http(
     assert!(
         error
             .to_string()
-            .contains("Release requires an authorized release comment"),
+            .contains("Release actions are no longer supported"),
         "{error:#}"
     );
 }
 
 #[tokio::test]
-async fn release_action_is_reserved_for_its_own_node_and_cannot_combine_actions() {
+async fn version_action_is_reserved_for_its_own_node_and_cannot_combine_actions() {
     let (_dir, f) = factory("http://127.0.0.1:9");
     let mut e = event("pr_approved");
     e.payload = json!({"approval":{"command":"release","actor":e.actor,"head_sha":e.head_sha,"comment_id":9}});
@@ -160,13 +160,13 @@ async fn release_action_is_reserved_for_its_own_node_and_cannot_combine_actions(
     for (node, data, message) in [
         (
             "publish",
-            json!({"release":{}}),
-            "Only the assigned release node can publish a release",
+            json!({"bump_version":{}}),
+            "Only the assigned version node can publish a bump",
         ),
         (
-            "factory_release",
-            json!({"release":{},"merge":{}}),
-            "release cannot be combined with other actions",
+            "version_bump",
+            json!({"bump_version":{},"merge":{}}),
+            "bump_version cannot be combined with other actions",
         ),
     ] {
         let error = api

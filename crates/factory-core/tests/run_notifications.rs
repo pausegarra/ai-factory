@@ -89,7 +89,7 @@ fn notification_failed_and_blocked_have_safe_details() -> Result<()> {
         (
             "failed",
             Some("publication was not confirmed private"),
-            " · Release publication was not confirmed.",
+            " · Version publication was not confirmed.",
         ),
     ]
     .into_iter()

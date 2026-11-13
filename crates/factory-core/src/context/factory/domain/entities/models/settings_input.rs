@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Deserialize)]
 #[serde(default)]
 pub(super) struct SettingsInput {
+    approval_workflow_version: Option<u32>,
     notification_connectors: Vec<crate::NotificationConnector>,
     owners: Vec<String>,
     authors: Vec<String>,
@@ -46,6 +47,7 @@ impl Default for SettingsInput {
     fn default() -> Self {
         let defaults = Settings::default();
         Self {
+            approval_workflow_version: None,
             owners: vec![],
             authors: vec![],
             reviewers: vec![],
@@ -86,7 +88,14 @@ impl TryFrom<SettingsInput> for Settings {
                 profile
             })
             .collect();
+        let mut flows = input.flows;
+        if input.approval_workflow_version.is_none() {
+            for flow in &mut flows {
+                flow.migrate_approval_workflow();
+            }
+        }
         let settings = Self {
+            approval_workflow_version: 1,
             notification_connectors: input.notification_connectors,
             token_profiles,
             codex_bindings: input.codex_bindings,
@@ -97,7 +106,7 @@ impl TryFrom<SettingsInput> for Settings {
             max_concurrent: input.max_concurrent,
             trigger_max_concurrent: input.trigger_max_concurrent,
             start_at_login: input.start_at_login,
-            flows: input.flows,
+            flows,
         };
         settings.validate_concurrency()?;
         Ok(settings)
