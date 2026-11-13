@@ -67,6 +67,7 @@ export interface Settings {
   codex_bindings?: Record<string, string>;
   projects: Project[];
   commands: { codex: string; opencode: string; git: string };
+  codex_yolo?: boolean;
   poll_interval_seconds: number;
   max_concurrent: number;
   start_at_login: boolean;

@@ -1,16 +1,19 @@
+#[path = "core/codex_yolo.rs"]
+mod codex_yolo;
 mod common;
 use factory_core::*;
 use serde_json::json;
 
 #[tokio::test]
 #[cfg(unix)]
-async fn read_only_agent_cannot_request_merge_or_cleanup() {
+async fn read_only_agent_cannot_request_merge_or_cleanup_even_in_yolo_mode() {
     let (_dir, f) = fixture(
         r#"cat >/dev/null
 printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{"merge":{"method":"squash"}}}' > "$AI_FACTORY_RESULT_PATH""#,
         4,
     );
     let mut settings = f.settings().unwrap();
+    settings.codex_yolo = true;
     settings.flows[0].nodes[0].access = "read".into();
     settings.flows[0].nodes[0].result_schema = json!({"type":"object"});
     f.save_settings(settings).unwrap();
@@ -41,6 +44,113 @@ fn defaults_cover_three_triggers_and_concurrency() {
     assert_eq!(s.max_concurrent, 4);
     assert_eq!(s.flows.len(), 3);
     s.validate().unwrap();
+}
+
+#[test]
+fn default_review_prompts_match_static_and_test_execution_access() {
+    let settings = Settings::default();
+    for flow in &settings.flows {
+        for node in &flow.nodes {
+            if ["plan_review", "review_code", "review_architecture"].contains(&node.id.as_str()) {
+                assert_eq!(node.access, "read");
+                assert!(node.prompt.contains("read-only inspection"), "{}", node.id);
+                assert!(node.prompt.contains("Do not modify"), "{}", node.id);
+            }
+            if node.id == "review_tests" || flow.id == "pr_review" {
+                assert_eq!(node.access, "write", "{}/{}", flow.id, node.id);
+                assert!(node.prompt.contains("caches and logs"));
+                assert!(node.prompt.contains("Do not modify"));
+            }
+            if flow.id == "pr_review" {
+                assert!(node.prompt.contains("APPROVE requires status=succeeded"));
+                assert!(node
+                    .prompt
+                    .contains("REQUEST_CHANGES requires status=blocked"));
+                assert!(node.prompt.contains("COMMENT with status=blocked"));
+            }
+        }
+    }
+    settings.validate().unwrap();
+}
+
+#[test]
+fn approval_gate_schemas_allow_reports_but_reject_github_action_keys() {
+    let settings = Settings::default();
+    for node in &settings.flows[0].nodes {
+        if node.result_schema["properties"].get("approved").is_none() {
+            continue;
+        }
+        let validator = jsonschema::validator_for(&node.result_schema).unwrap();
+        assert!(validator.is_valid(&json!({
+            "approved": true,
+            "review_details": {"architecture": "checked", "scope": "checked"},
+            "findings": [],
+            "verification": {"mode": "static_read_only"}
+        })));
+        for key in ["publish", "update_pr", "merge", "review", "comment"] {
+            let mut data = json!({"approved": true});
+            data[key] = json!({"architecture": "descriptive report"});
+            assert!(
+                !validator.is_valid(&data),
+                "{}/{} accepted {key}",
+                settings.flows[0].id,
+                node.id
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn plan_review_report_cannot_be_dispatched_as_github_review() {
+    for field in ["review_details", "review"] {
+        let script = format!(
+            "cat >/dev/null\nprintf '%s' '{}' > \"$AI_FACTORY_RESULT_PATH\"",
+            json!({"status":"succeeded","summary":"approved plan","artifacts":[],"data":{"approved":true,field:{"architecture":"checked"}}})
+        );
+        let (_dir, factory) = fixture(&script, 4);
+        let mut settings = factory.settings().unwrap();
+        let mut gate = Settings::default().flows[0]
+            .nodes
+            .iter()
+            .find(|n| n.id == "plan_review")
+            .unwrap()
+            .clone();
+        gate.depends_on.clear();
+        // Preserve the fixture's isolated Codex account binding.
+        gate.codex_account_id = settings.flows[0].nodes[0].codex_account_id.clone();
+        settings.flows[0].nodes = vec![gate];
+        factory.save_settings(settings).unwrap();
+        let id = factory
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                420,
+                "[AI] plan report",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        let detail = terminal(&factory, &id).await;
+        factory.shutdown().await;
+        if field == "review_details" {
+            assert_eq!(detail.run.status, "succeeded", "{:?}", detail.nodes);
+            assert_eq!(
+                detail.nodes[0].result.as_ref().unwrap()["data"]["approved"],
+                true
+            );
+        } else {
+            assert_eq!(detail.run.status, "failed");
+            let error = detail.nodes[0].error.as_deref().unwrap();
+            assert!(error.contains("Invalid first node response"), "{error}");
+            assert!(error.contains("/data/review"), "{error}");
+            assert!(
+                !error.contains("Only review flow submits reviews"),
+                "{error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -406,7 +516,7 @@ printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"dat
                 node.id = role.into();
                 node.agent = agent.into();
                 node.access = if role == "reviewer" { "read" } else { "write" }.into();
-                node.prompt = format!("Act as {role}. Ask the user to approve before continuing.");
+                node.prompt = format!("Act as {role}. Ask the user to approve before continuing. No ejecutes comandos ni delegues.");
                 node.depends_on = if index == 0 {
                     vec![]
                 } else {
@@ -449,6 +559,15 @@ printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"dat
             assert!(prompt.contains("do not block only because a GUI check was not performed"));
             assert!(prompt.contains("status=blocked"));
             assert!(prompt.contains("Do not expand the assigned role"));
+            assert!(prompt.contains("Read-only inspection is allowed for every assigned role"));
+            assert!(prompt.contains("When an older node prompt forbids commands"));
+            assert!(prompt
+                .contains("Reading an artifact path is not the same as receiving its contents"));
+            assert!(prompt.contains("For read access, put findings in summary/data"));
+            assert!(prompt.contains("Analysis-only nodes without an approved field"));
+            assert!(prompt.contains("Reserved action keys in node data"));
+            assert!(prompt.contains("review_details"));
+            assert!(!prompt.contains("If review rejects changes return status=blocked."));
             assert!(prompt.contains(
                 "Never modify source repository or files outside authorized workspace/memory"
             ));

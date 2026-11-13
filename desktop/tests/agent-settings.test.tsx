@@ -20,6 +20,35 @@ function agents() { fireEvent.click(screen.getByRole("tab", { name: "Agents" }))
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(factoryApi.agentAccounts).mockResolvedValue([]); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
+it("keeps Codex YOLO off by default and stages changes until Save", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(<SettingsPage settings={settings()} onSave={save} appDir="/app" />);
+  const toggle = screen.getByRole("checkbox", { name: /^Codex YOLO mode/ }) as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  expect(screen.getByText(/all Codex steps.*full filesystem and network access/i)).toBeTruthy();
+  fireEvent.click(toggle);
+  expect(toggle.checked).toBe(true);
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+  expect(toggle.checked).toBe(false);
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledOnce());
+  expect(save.mock.calls[0][0].codex_yolo).toBe(true);
+});
+
+it("can save Codex YOLO disabled after loading enabled settings", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const initial = { ...settings(), codex_yolo: true };
+  render(<SettingsPage settings={initial} onSave={save} appDir="/app" />);
+  const toggle = screen.getByRole("checkbox", { name: /^Codex YOLO mode/ }) as HTMLInputElement;
+  expect(toggle.checked).toBe(true);
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledOnce());
+  expect(save.mock.calls[0][0].codex_yolo).toBe(false);
+});
+
 it("offers accessible Settings tabs and keeps agent auth outside GitHub profiles", async () => {
   render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
   const general = screen.getByRole("tab", { name: "General" });
