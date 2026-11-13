@@ -32,7 +32,7 @@ it.each(cases)("counts %s", (_name, statuses, expected) => {
 const identities: [string, string, Run["trigger_id"], string][] = [
   ["issue:owner/repo#26", "issue:other/repo#26", "new_issue", "other/repo"],
   ["issue:owner/repo#26", "approval:owner/repo#26@aaa", "pr_approved", "owner/repo"],
-  ["approval:owner/repo#26@aaa", "approval:owner/repo#26@bbb", "pr_approved", "owner/repo"],
+  ["approval:owner/repo#26@aaa", "approval:other/repo#26@bbb", "pr_approved", "other/repo"],
   ["review:owner/repo#26:alice:1", "review:owner/repo#26:bob:1", "pr_review", "owner/repo"],
   ["review:owner/repo#26:alice:1", "review:owner/repo#26:alice:2", "pr_review", "owner/repo"],
 ];
@@ -44,6 +44,41 @@ it.each(identities)("does not resolve %s with %s", (eventA, eventB, trigger, rep
     created_at: "2026-11-13T09:00:01Z", attempt: 2 });
   expect(countNeedsAttention([failedA, failedB])).toBe(2);
   expect(countNeedsAttention([failedA, failedB, successB])).toBe(1);
+});
+
+it.each([
+  ["success on another SHA", ["blocked", "blocked", "succeeded"], 0],
+  ["failure on another SHA", ["succeeded", "failed"], 1],
+  ["blocked on another SHA", ["succeeded", "blocked"], 1],
+  ["resolved again on another SHA", ["blocked", "succeeded", "failed", "succeeded"], 0],
+  ["queued on another SHA", ["blocked", "queued"], 1],
+  ["running on another SHA", ["blocked", "running"], 1],
+  ["cancelled on another SHA", ["blocked", "cancelled"], 1],
+  ["neutral after success on another SHA", ["blocked", "succeeded", "queued", "running", "cancelled"], 0],
+] as [string, string[], number][])("groups approvals: %s", (_name, statuses, expected) => {
+  const runs = history(statuses).map((item, index) => ({
+    ...item, trigger_id: "pr_approved" as const, attempt: 1,
+    event_id: `approval:owner/repo#26@sha-${index}`,
+  }));
+  expect(countNeedsAttention(runs)).toBe(expected);
+  expect(countNeedsAttention([...runs].reverse())).toBe(expected);
+});
+
+it("keeps approvals for different PR numbers independent", () => {
+  const [blocked, success] = history(["blocked", "succeeded"]).map((item, index) => ({
+    ...item, trigger_id: "pr_approved" as const, number: 26 + index,
+    event_id: `approval:owner/repo#${26 + index}@sha`,
+  }));
+  expect(countNeedsAttention([blocked, success])).toBe(1);
+});
+
+it("resolves approvals when repository casing changes", () => {
+  const runs = history(["blocked", "succeeded"]).map((item, index) => ({
+    ...item, trigger_id: "pr_approved" as const,
+    repository: index ? "Owner/Repo" : "owner/repo",
+    event_id: `approval:${index ? "Owner/Repo" : "owner/repo"}#26@sha-${index}`,
+  }));
+  expect(countNeedsAttention(runs)).toBe(0);
 });
 
 const orders: { name: string; runs: Run[]; expected: number }[] = [

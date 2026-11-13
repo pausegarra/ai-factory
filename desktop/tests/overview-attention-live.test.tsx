@@ -72,6 +72,20 @@ it("keeps attention until the retry run succeeds and updates without polling", a
   expect(factoryApi.logs).not.toHaveBeenCalled();
 });
 
+it("resolves approval attention live after success on another SHA and reopens on a later failure", async () => {
+  const [blocked, success, failed] = history(["blocked", "succeeded", "failed"]).map((item, index) => ({
+    ...item, trigger_id: "pr_approved" as const, attempt: 1,
+    event_id: `approval:owner/repo#26@sha-${index}`,
+  }));
+  await start(snapshot([blocked]));
+  expect(attention()).toBe("01");
+  await apply(snapshot([success, blocked]), "run_changed", success.id);
+  await waitFor(() => expect(attention()).toBe("00"));
+  await apply(snapshot([failed, success, blocked]), "run_changed", failed.id);
+  await waitFor(() => expect(attention()).toBe("01"));
+  expect(factoryApi.poll).not.toHaveBeenCalled();
+});
+
 it("loads resolved history initially, after navigation and after remount", async () => {
   const value = snapshot(history(["failed", "succeeded"]));
   const view = await start(value);
@@ -136,11 +150,11 @@ it("keeps the previous nonzero counter on transport failure, then recovers by re
   expect(attention()).toBe("01");
   vi.mocked(factoryApi.snapshot).mockRejectedValueOnce(new Error("fixture snapshot denied"));
   await act(async () => { emit("resync"); });
-  await screen.findByText("Error: fixture snapshot denied");
+  await screen.findByText(/fixture snapshot denied/);
   expect(attention()).toBe("01");
   await apply(snapshot(history(["failed", "succeeded"])), "resync");
   await waitFor(() => expect(attention()).toBe("00"));
-  expect(screen.queryByText("Error: fixture snapshot denied")).toBeNull();
+  expect(screen.queryByText(/fixture snapshot denied/)).toBeNull();
 });
 
 it.each(["pending", "failed"] as const)("uses visible history when deletion is %s", async state => {

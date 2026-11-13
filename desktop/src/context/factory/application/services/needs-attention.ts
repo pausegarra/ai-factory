@@ -18,14 +18,18 @@ function compare(a: Candidate, b: Candidate): number {
   return a.run.id === b.run.id ? 0 : a.run.id < b.run.id ? -1 : 1;
 }
 
-/** Count unresolved events from the complete visible history without changing it. */
+/** Count unresolved work from the complete visible history without changing it. */
 export function countNeedsAttention(runs: readonly Run[]): number {
   const latest = new Map<string, Candidate>();
   for (const run of runs) {
     if (["queued", "running", "cancelled"].includes(run.status)) continue;
+    // Approval events include the head SHA; a later commit can resolve the same PR.
+    const key = run.trigger_id === "pr_approved"
+      ? JSON.stringify(["pr_approved", run.repository.toLowerCase(), run.number])
+      : JSON.stringify(["event", run.event_id]);
     const next = candidate(run);
-    const previous = latest.get(run.event_id);
-    if (!previous || compare(next, previous) > 0) latest.set(run.event_id, next);
+    const previous = latest.get(key);
+    if (!previous || compare(next, previous) > 0) latest.set(key, next);
   }
   let count = 0;
   for (const { run } of latest.values()) {
