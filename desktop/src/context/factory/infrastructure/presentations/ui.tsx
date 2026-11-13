@@ -1,11 +1,12 @@
 import {
   cloneElement,
   isValidElement,
+  useRef,
   useId,
   type ReactNode,
   type ReactElement,
 } from "react";
-import { ArrowRight, Check, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowRight, Check, Info, WarningCircle, X } from "@phosphor-icons/react";
 export const STATUS: Record<string, string> = {
   queued: "Queued",
   running: "Running",
@@ -29,25 +30,49 @@ export function Notice({
   children,
   tone = "error",
   close,
+  id,
+  live = true,
+  focusAfterClose,
 }: {
   children: ReactNode;
   tone?: "error" | "success" | "info";
   close?: () => void;
+  id?: string;
+  live?: boolean;
+  focusAfterClose?: () => HTMLElement | null;
 }) {
+  const container = useRef<HTMLDivElement>(null);
+  function dismiss() {
+    const focusedNotice = container.current?.contains(document.activeElement) ?? false;
+    close?.();
+    if (!focusedNotice || !focusAfterClose) return;
+    const target = focusAfterClose();
+    if (target?.isConnected && !target.matches(":disabled")) target.focus();
+  }
+
   return (
     <div
-      role={tone === "error" ? "alert" : "status"}
+      ref={container}
+      id={id}
+      role={live ? (tone === "error" ? "alert" : "status") : undefined}
       className={`notice notice-${tone}`}
     >
-      {tone === "success" ? <Check size={18} /> : <WarningCircle size={18} />}
-      <span>{children}</span>
+      {tone === "success" ? (
+        <Check size={18} aria-hidden="true" />
+      ) : tone === "info" ? (
+        <Info size={18} aria-hidden="true" />
+      ) : (
+        <WarningCircle size={18} aria-hidden="true" />
+      )}
+      <span className="notice-content">{children}</span>
       {close && (
         <button
+          type="button"
           className="icon-button"
-          onClick={close}
+          onClick={dismiss}
           aria-label="Dismiss notice"
         >
-          <X size={16} />
+          <X size={16} aria-hidden="true" />
         </button>
       )}
     </div>

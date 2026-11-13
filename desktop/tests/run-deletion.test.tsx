@@ -36,6 +36,6 @@ it("blocks cancellation and duplicate submission while busy", () => {
   const cancel = vi.fn(); const confirm = vi.fn();
   render(<DeleteRunDialog run={run} busy onCancel={cancel} onConfirm={confirm} />);
   fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
-  fireEvent.click(screen.getByRole("button", { name: "Deleting..." }));
+  fireEvent.click(screen.getByRole("button", { name: "Deleting…" }));
   expect(cancel).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
 });

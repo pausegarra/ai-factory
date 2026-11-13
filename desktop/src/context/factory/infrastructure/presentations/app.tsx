@@ -20,6 +20,7 @@ import { RunsPage, RunDetailPage } from "./runs";
 import { FlowsPage } from "./flows";
 import { SettingsPage } from "./settings";
 import { Notice } from "./ui";
+import { noticeDetail, noticeText } from "./notice-content";
 type RunSelection = { id: string; revision: number };
 type RunFeedback = {
   tone: "success" | "info";
@@ -35,7 +36,12 @@ export function App() {
   const [page, setPage] = useState("overview");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [syncFailure, setSyncFailure] = useState<{ detail: string } | null>(null);
+  const syncSerial = useRef(0);
+  const syncInFlight = useRef(false);
+  const main = useRef<HTMLElement>(null);
+  const syncButton = useRef<HTMLButtonElement>(null);
   const [selection, setSelection] = useState<RunSelection | null>(null);
   const selected = useRef<RunSelection | null>(null);
   const sequence = useRef(0);
@@ -49,7 +55,7 @@ export function App() {
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; };
+    return () => { alive.current = false; syncSerial.current += 1; };
   }, []);
   function commitContext(value: string, next: RunSelection | null = null) {
     selected.current = next;
@@ -106,9 +112,11 @@ export function App() {
           !data.snapshot.deletions.some(item => item.run_id === data.selection!.id)) {
           unavailable(data.selection.id, false, data.selection);
         }
-        setError("");
+        setLoadError("");
       },
-      (e) => setError(String(e)),
+      (e) => {
+        if (alive.current) setLoadError(noticeText("Could not load Factory data.", e));
+      },
     );
     void live.start();
     return () => live.stop();
@@ -128,16 +136,27 @@ export function App() {
     commitContext(value);
   }
   async function poll() {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
+    const ticket = ++syncSerial.current;
+    const current = () => alive.current && syncSerial.current === ticket;
     setPolling(true);
-    setError("");
+    setSyncFailure(null);
     try {
       await factoryApi.poll();
     } catch (e) {
-      setError(String(e));
+      if (current()) setSyncFailure({ detail: noticeDetail(e) });
     } finally {
-      setPolling(false);
+      syncInFlight.current = false;
+      if (current()) {
+        setPolling(false);
+        setReload((value) => value + 1);
+      }
     }
   }
+  const serviceDetail = noticeDetail(snapshot?.service.last_error);
+  const duplicateSync =
+    syncFailure !== null && serviceDetail !== "" && syncFailure.detail === serviceDetail;
   const totalActive = snapshot
     ? snapshot.metrics.running + snapshot.metrics.queued
     : 0;
@@ -217,6 +236,7 @@ export function App() {
               {native ? "Local connection" : "Desktop preview"}
             </span>
             <button
+              ref={syncButton}
               className="button button-topbar"
               disabled={!native || polling || !!snapshot?.service.polling}
               onClick={() => void poll()}
@@ -232,6 +252,8 @@ export function App() {
           </div>
         </header>
         <main
+          ref={main}
+          tabIndex={-1}
           id="main-content"
           className={`main-content ${page === "flows" ? "flow-page" : ""}`}
         >
@@ -245,10 +267,14 @@ export function App() {
               <span className="preview-tag">PREVIEW</span>
             </div>
           )}
-          {error && (
-            <Notice close={() => setError("")}>
-              {error}
+          {loadError && (
+            <Notice
+              close={() => setLoadError("")}
+              focusAfterClose={() => main.current}
+            >
+              {loadError}
               <button
+                type="button"
                 className="text-button"
                 onClick={() => setReload((x) => x + 1)}
               >
@@ -256,8 +282,23 @@ export function App() {
               </button>
             </Notice>
           )}
-          {snapshot?.service.last_error && (
-            <Notice>GitHub sync failed: {snapshot.service.last_error}</Notice>
+          {syncFailure && !duplicateSync && (
+            <Notice
+              close={() => setSyncFailure(null)}
+              focusAfterClose={() => {
+                const button = syncButton.current;
+                return button?.isConnected && !button.disabled
+                  ? button
+                  : main.current;
+              }}
+            >
+              {noticeText("GitHub sync failed.", syncFailure.detail)}
+            </Notice>
+          )}
+          {serviceDetail && (
+            <Notice>
+              {noticeText("Factory reported a problem.", serviceDetail)}
+            </Notice>
           )}
           {!settings || !snapshot ? (
             <div className="loading-view">
@@ -320,7 +361,6 @@ export function App() {
             />
           ) : (
             <SettingsPage
-              key={settings.token_profiles.map((t) => t.id).join(",")}
               settings={settings}
               onSave={saveSettings}
               appDir={snapshot.service.app_data_dir}

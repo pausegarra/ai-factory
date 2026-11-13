@@ -32,6 +32,22 @@ it("resolves attention while keeping historical metrics and failed rows", () => 
   expect(value).toEqual(before);
 });
 
+it("resolves blocked approvals after success on a new SHA while preserving history", () => {
+  const runs = history(["blocked", "blocked", "succeeded"]).map((item, index) => ({
+    ...item, trigger_id: "pr_approved" as const,
+    event_id: `approval:owner/repo#26@${index < 2 ? "old-sha" : "new-sha"}`,
+    attempt: index === 1 ? 3 : 1,
+  }));
+  const value = snapshot(runs);
+  const before = structuredClone(value);
+  render(<OverviewPage snapshot={value} settings={settings} onPage={() => {}} onRun={() => {}} />);
+  expect(metric("Need attention")).toBe("00");
+  expect(metric("Completed")).toBe("01");
+  expect(screen.getAllByText("Blocked")).toHaveLength(2);
+  expect(screen.getByText("3 total tasks")).toBeTruthy();
+  expect(value).toEqual(before);
+});
+
 it("uses all visible history beyond the five recent rows", () => {
   const recent = Array.from({ length: 5 }, (_, i) => run(`recent-${i}`, "succeeded", { event_id: `recent-${i}` }));
   const resolved = history(["failed", "succeeded"], "resolved-event");

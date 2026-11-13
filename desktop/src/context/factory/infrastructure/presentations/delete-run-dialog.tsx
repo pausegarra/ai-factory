@@ -32,7 +32,7 @@ export function DeleteRunDialog({ run, busy, onCancel, onConfirm }: {
       <p id="delete-run-description">This permanently deletes this run and its local logs, results, artifacts, memory and remaining workspace. This cannot be undone. GitHub resources, other runs and shared import archives are kept. If no other attempts remain, eligible work can run again on the next sync.</p>
       <div className="dialog-actions">
         <button ref={cancel} className="button button-secondary" disabled={busy} onClick={onCancel}>Cancel</button>
-        <button className="button button-danger" disabled={busy} onClick={onConfirm}>{busy ? "Deleting..." : "Delete run"}</button>
+        <button className="button button-danger" disabled={busy} onClick={onConfirm}>{busy ? "Deleting…" : "Delete run"}</button>
       </div>
     </section>
   </div>;

@@ -23,13 +23,28 @@ it("keeps saved choices on discovery failure and allows retry", async () => {
   vi.mocked(factoryApi.agentModels).mockRejectedValueOnce(new Error("CLI unavailable")).mockResolvedValueOnce([{id:"saved",name:"Saved",efforts:["high"]}]);
   const change=vi.fn();
   render(<AgentModelFields node={{...node,model:"saved",effort:"high"}} command="codex" onChange={change} />);
-  expect((await screen.findByRole("alert")).textContent).toContain("CLI unavailable");
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not load Codex models.");
+  expect(alert.textContent).toContain("CLI unavailable");
   expect((screen.getByLabelText("Model") as HTMLSelectElement).value).toBe("saved");
   expect(change).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button",{name:"Refresh agent models"}));
   await screen.findByRole("option",{name:"Saved"});
   expect((screen.getByLabelText("Effort") as HTMLSelectElement).disabled).toBe(false);
   expect((screen.getByLabelText("Effort") as HTMLSelectElement).value).toBe("high");
+});
+it("does not show a previous command error while the current catalog is loading", async () => {
+  let finish!: (value: AgentModel[]) => void;
+  vi.mocked(factoryApi.agentModels)
+    .mockRejectedValueOnce(new Error("old command denied"))
+    .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const view = render(<AgentModelFields node={node} command="codex" onChange={vi.fn()} />);
+  await screen.findByText(/old command denied/);
+  view.rerender(<AgentModelFields node={node} command="codex --new-profile" onChange={vi.fn()} />);
+  expect((await screen.findByRole("status")).textContent).toContain("Loading Codex models…");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText(/old command denied/)).toBeNull();
+  await act(async () => finish([]));
 });
 it("offers only default effort when the selected model has no variants", async () => {
   vi.mocked(factoryApi.agentModels).mockResolvedValue([{id:"plain",name:"Plain",efforts:[]}]);
