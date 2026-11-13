@@ -93,7 +93,7 @@ export const TRIGGERS: Record<
     label: "PR approved",
     short: "PR approved",
     description:
-      "Current head approvals or OK comments from authorized authors.",
+      "Current head approvals or OK comments merge the PR. A release comment also publishes a release.",
   },
   pr_review: {
     label: "Review requested",
