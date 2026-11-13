@@ -18,6 +18,8 @@ it("keeps preview guidance without deletion feedback or native events", async ()
   } as unknown as typeof ResizeObserver;
   render(<App />);
   await screen.findByRole("heading", { name: "Factory overview." });
+  const attentionCard = screen.getByText("Need attention").closest("section");
+  expect(attentionCard?.querySelector("strong")?.textContent).toBe("00");
   for (const page of ["Runs", "Workflows", "Settings", "Overview", "Runs"]) {
     fireEvent.click(screen.getByRole("button", { name: page }));
     expect(screen.getByText(/Interface preview\. Live data and runs/)).toBeTruthy();

@@ -15,6 +15,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Settings, Snapshot } from "../../domain/types";
 import { TRIGGERS } from "../../domain/types";
+import { countNeedsAttention } from "../../application/services/needs-attention";
 import { RunTable } from "./runs";
 import { date, Empty } from "./ui";
 export function OverviewPage({
@@ -79,7 +80,7 @@ export function OverviewPage({
           },
           {
             label: "Need attention",
-            value: metrics.failed + metrics.interrupted,
+            value: countNeedsAttention(snapshot.runs),
             icon: <WarningCircle size={20} />,
             note: "failed or interrupted",
             tone: "",
