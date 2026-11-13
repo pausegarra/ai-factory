@@ -481,6 +481,14 @@ export function SettingsPage({
           </div>
           <div className="startup-setting">
             <Toggle
+              checked={draft.codex_yolo ?? false}
+              onChange={(checked) => update({ codex_yolo: checked })}
+              label="Codex YOLO mode"
+              description="Run all Codex steps without sandboxing or approval prompts, with full filesystem and network access. macOS permissions still apply."
+            />
+          </div>
+          <div className="startup-setting">
+            <Toggle
               checked={draft.start_at_login}
               onChange={(checked) => update({ start_at_login: checked })}
               label="Launch at login"
