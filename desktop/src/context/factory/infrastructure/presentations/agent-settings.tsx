@@ -3,6 +3,7 @@ import { ArrowSquareOut, ArrowsClockwise, Plus, Robot, Terminal, Trash } from "@
 import type { AgentAccount, TokenProfile } from "../../domain/types";
 import { factoryApi, native } from "../ipc/factory-api";
 import { Field, Notice } from "./ui";
+import { noticeText } from "./notice-content";
 
 interface AgentsSettingsProps {
   profiles: TokenProfile[];
@@ -37,25 +38,47 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
   const [label, setLabel] = useState("");
   const [loading, setLoading] = useState(true);
   const [mutating, setMutating] = useState(false);
-  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const heading = useRef<HTMLHeadingElement>(null);
   const alive = useRef(false);
   const revision = useRef(0);
   const inFlight = useRef(false);
   const accountMutation = useRef(false);
+  const reloadSerial = useRef(0);
+  const reloadRequested = useRef(false);
 
   const reload = useCallback(async () => {
-    if (inFlight.current || accountMutation.current) return;
+    if (accountMutation.current) return;
+    if (inFlight.current) {
+      reloadRequested.current = true;
+      return;
+    }
     inFlight.current = true;
+    reloadRequested.current = false;
+    const ticket = ++reloadSerial.current;
     const currentRevision = revision.current;
-    setLoading(true);
+    const current = () => alive.current && ticket === reloadSerial.current;
+    if (alive.current) {
+      setLoading(true);
+      setLoadError("");
+    }
     try {
       const result = await factoryApi.agentAccounts();
-      if (alive.current && currentRevision === revision.current) setAccounts(result);
-    } catch (e) {
-      if (alive.current && currentRevision === revision.current) setError(String(e));
+      if (current() && currentRevision === revision.current) {
+        setAccounts(result);
+        setLoadError("");
+      }
+    } catch (reason) {
+      if (current() && currentRevision === revision.current) {
+        setLoadError(noticeText("Could not load Codex accounts.", reason));
+      }
     } finally {
       inFlight.current = false;
-      if (alive.current) setLoading(false);
+      if (current()) setLoading(false);
+      if (reloadRequested.current && alive.current && !accountMutation.current) {
+        void reload();
+      }
     }
   }, []);
 
@@ -64,6 +87,7 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
     void reload();
     return () => {
       alive.current = false;
+      reloadSerial.current += 1;
     };
   }, [reload]);
 
@@ -74,18 +98,25 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
     return () => window.clearInterval(timer);
   }, [pending, mutating, reload]);
 
-  async function mutate(action: () => Promise<void>) {
+  async function mutate(
+    action: (setFailureTitle: (title: string) => void) => Promise<void>,
+    initialFailureTitle: string,
+  ) {
     if (accountMutation.current || disabled) return;
     accountMutation.current = true;
     revision.current += 1;
     const currentRevision = revision.current;
+    let failureTitle = initialFailureTitle;
+    const setFailureTitle = (title: string) => { failureTitle = title; };
     setMutating(true);
     onBusyChange(true);
-    setError("");
+    setActionError("");
     try {
-      await action();
-    } catch (e) {
-      if (alive.current && currentRevision === revision.current) setError(String(e));
+      await action(setFailureTitle);
+    } catch (reason) {
+      if (alive.current && currentRevision === revision.current) {
+        setActionError(noticeText(failureTitle, reason));
+      }
     } finally {
       accountMutation.current = false;
       onBusyChange(false);
@@ -96,14 +127,15 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
   async function addAccount() {
     const name = label.trim();
     if (!name) return;
-    await mutate(async () => {
+    await mutate(async (setFailureTitle) => {
       const login = await factoryApi.startCodexLogin(name);
       if (alive.current) {
         setAccounts((previous) => [...previous.filter((account) => account.id !== login.account.id), login.account]);
         setLabel("");
       }
+      setFailureTitle("Could not continue Codex sign-in.");
       await factoryApi.openCodexLogin(login.account.id);
-    });
+    }, "Could not add Codex account.");
   }
 
   async function removeAccount(accountId: string) {
@@ -111,7 +143,7 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
       await factoryApi.removeAgentAccount(accountId);
       onAccountRemoved(accountId);
       if (alive.current) setAccounts((previous) => previous.filter((account) => account.id !== accountId));
-    });
+    }, "Could not remove Codex account.");
   }
 
   const readyAccounts = accounts.filter((account) => account.status === "ready");
@@ -121,15 +153,26 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
       <div className="section-intro">
         <div className="section-icon"><Robot size={20} /></div>
         <div>
-          <h2 id="codex-settings-heading">Codex</h2>
+          <h2 id="codex-settings-heading" ref={heading} tabIndex={-1}>
+            Codex
+          </h2>
           <p>Connect Codex accounts with OAuth. Assign an account to each GitHub profile.</p>
         </div>
-        <button className="button button-secondary" disabled={loading || locked || !native} onClick={() => { setError(""); void reload(); }}>
+        <button type="button" className="button button-secondary" disabled={loading || locked || !native} onClick={() => void reload()}>
           <ArrowsClockwise size={16} />Reload accounts
         </button>
       </div>
       {!native && <Notice tone="info">Open AI Factory desktop to connect Codex accounts. OAuth is unavailable in browser preview.</Notice>}
-      {error && <Notice close={() => setError("")}>{error}</Notice>}
+      {loadError && (
+        <Notice close={() => setLoadError("")} focusAfterClose={() => heading.current}>
+          {loadError}
+        </Notice>
+      )}
+      {actionError && (
+        <Notice close={() => setActionError("")} focusAfterClose={() => heading.current}>
+          {actionError}
+        </Notice>
+      )}
       <form className="agent-account-form" onSubmit={(event) => { event.preventDefault(); void addAccount(); }}>
         <Field label="Account label" hint="Choose a name to distinguish your Codex accounts.">
           <input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Personal or work" maxLength={100} disabled={locked || !native} />
@@ -151,8 +194,8 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
             </div>
             <span className={`status status-${account.status === "ready" ? "succeeded" : account.status}`}><span />{account.status === "ready" ? "Ready" : account.status === "pending" ? "Pending" : "Failed"}</span>
             <div className="agent-account-actions">
-              {account.status === "pending" && <button className="button button-secondary" disabled={locked} onClick={() => void mutate(() => factoryApi.openCodexLogin(account.id))}><ArrowSquareOut size={16} />Continue sign-in</button>}
-              <button className="icon-button danger" disabled={locked} aria-label={account.status === "pending" ? `Cancel sign-in for ${account.label}` : `Remove account ${account.label}`} onClick={() => void removeAccount(account.id)}><Trash size={18} /></button>
+              {account.status === "pending" && <button type="button" className="button button-secondary" disabled={locked} onClick={() => void mutate(() => factoryApi.openCodexLogin(account.id), "Could not continue Codex sign-in.")}><ArrowSquareOut size={16} />Continue sign-in</button>}
+              <button type="button" className="icon-button danger" disabled={locked} aria-label={account.status === "pending" ? `Cancel sign-in for ${account.label}` : `Remove account ${account.label}`} onClick={() => void removeAccount(account.id)}><Trash size={18} /></button>
             </div>
           </article>
         )) : (

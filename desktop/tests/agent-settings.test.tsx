@@ -99,8 +99,28 @@ it("retains account and bindings when active-account deletion fails", async () =
   await screen.findByText("person@example.com");
   fireEvent.click(screen.getByRole("button", { name: "Remove account Work Codex" }));
   await screen.findByText(/Account is used by an active run/);
+  expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("Could not remove Codex account.");
   expect((screen.getByLabelText("Codex account for Work (@worker)") as HTMLSelectElement).value).toBe("codex-work");
   expect(screen.getByText("person@example.com")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+  expect(document.querySelector(".notice[role='alert']")).toBeNull();
+  expect(screen.getByText("person@example.com")).toBeTruthy();
+  expect((screen.getByLabelText("Codex account for Work (@worker)") as HTMLSelectElement).value).toBe("codex-work");
+});
+
+it("clears a recovered account-load error without removing account diagnostics", async () => {
+  vi.mocked(factoryApi.agentAccounts)
+    .mockRejectedValueOnce(new Error("fixture account load denied"))
+    .mockResolvedValueOnce([{ ...account("pending", "pending"), error: "Complete sign-in in your browser" }]);
+  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  agents();
+  await waitFor(() => expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("fixture account load denied"));
+  expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("Could not load Codex accounts.");
+  fireEvent.click(screen.getByRole("button", { name: "Reload accounts" }));
+  await screen.findByText("Complete sign-in in your browser");
+  await waitFor(() => expect(factoryApi.agentAccounts).toHaveBeenCalledTimes(2));
+  expect(document.querySelector(".notice[role='alert']")).toBeNull();
+  expect(screen.getByText("Complete sign-in in your browser")).toBeTruthy();
 });
 
 it("removes stale bindings when deleting a GitHub profile and supports Discard", async () => {
@@ -178,9 +198,23 @@ it("retains pending connection when native browser opening fails", async () => {
   fireEvent.change(screen.getByLabelText("Account label"), { target: { value: "Work Codex" } });
   fireEvent.click(screen.getByRole("button", { name: "Add Codex account" }));
   await screen.findByText(/Browser could not open/);
+  expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("Could not continue Codex sign-in.");
   expect(screen.getByText("Pending")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Continue sign-in" }));
   await waitFor(() => expect(factoryApi.openCodexLogin).toHaveBeenCalledTimes(2));
+});
+
+it("labels account creation failures and keeps the current account list", async () => {
+  vi.mocked(factoryApi.agentAccounts).mockResolvedValue([account()]);
+  vi.mocked(factoryApi.startCodexLogin).mockRejectedValueOnce(new Error("fixture OAuth start denied"));
+  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  agents();
+  await screen.findByText("person@example.com");
+  fireEvent.change(screen.getByLabelText("Account label"), { target: { value: "New account" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add Codex account" }));
+  await waitFor(() => expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("Could not add Codex account."));
+  expect(screen.getByText("person@example.com")).toBeTruthy();
+  expect(factoryApi.openCodexLogin).not.toHaveBeenCalled();
 });
 
 it("preserves unrelated drafts when account removal finishes after switching tabs", async () => {

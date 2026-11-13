@@ -2,6 +2,7 @@ import { beforeAll, afterEach, it, expect, vi } from "vitest";
 import {
   cleanup,
   render,
+  act,
   screen,
   fireEvent,
   waitFor,
@@ -11,6 +12,7 @@ import userEvent from "@testing-library/user-event";
 import { SettingsPage } from "../src/context/factory/infrastructure/presentations/settings";
 import { FlowsPage } from "../src/context/factory/infrastructure/presentations/flows";
 import { factoryApi } from "../src/context/factory/infrastructure/ipc/factory-api";
+import { deferred } from "./fixtures/notices";
 import type { Settings } from "../src/context/factory/domain/types";
 beforeAll(() => {
   globalThis.ResizeObserver = class {
@@ -119,6 +121,35 @@ it("keeps account tokens when replacement is typed then cleared", async () => {
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][0].token_profiles[0].token).toBeUndefined();
 });
+
+it("dismisses Settings save errors without discarding edits and restores page focus", async () => {
+  const save = vi.fn().mockRejectedValue(new Error("fixture save denied"));
+  render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not save settings.");
+  expect(alert.textContent).toContain("fixture save denied");
+  screen.getByRole("button", { name: "Dismiss notice" }).focus();
+  await userEvent.setup().keyboard("{Enter}");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect((screen.getByLabelText("Concurrent tasks") as HTMLInputElement).value).toBe("5");
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Settings" }));
+  expect(save).toHaveBeenCalledTimes(1);
+});
+
+it("keeps newer Settings edits when an earlier save finishes", async () => {
+  let resolve!: (value: Settings) => void;
+  const save = vi.fn(() => new Promise<Settings>((done) => { resolve = done; }));
+  render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "6" } });
+  await act(async () => resolve({ ...settings(), max_concurrent: 5 }));
+  expect((screen.getByLabelText("Concurrent tasks") as HTMLInputElement).value).toBe("6");
+  expect(screen.queryByText("Settings saved.")).toBeNull();
+  expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled).toBe(false);
+});
 it("allows comma separated owners while typing", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(
@@ -202,6 +233,30 @@ it("retains activation draft after save failure and allows correction and retry"
   fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
   expect(save.mock.calls[1][0].flows[0]).toMatchObject({ enabled: false, profile_activation: { work: false } });
+});
+
+it("keeps workflow save errors across step selection and preserves the draft", async () => {
+  const value = settings();
+  value.flows[0].nodes.push({
+    ...value.flows[0].nodes[0],
+    id: "build",
+    name: "Build",
+    position: { x: 280, y: 0 },
+  });
+  const save = vi.fn().mockRejectedValue(new Error("fixture workflow denied"));
+  render(<FlowsPage settings={value} onSave={save} />);
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Plan draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not save workflow.");
+  expect(alert.textContent).toContain("fixture workflow denied");
+  fireEvent.click(screen.getByText("Build", { exact: true }));
+  expect(screen.getByRole("alert").textContent).toContain("Could not save workflow.");
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+  expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByText("Plan draft", { exact: true }));
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Plan draft");
 });
 
 it("locks all native editor controls and draft mutations while save is pending", async () => {
@@ -514,10 +569,31 @@ it("reloads all per-account scope inputs after legacy import", async () => {
   render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
   fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
   fireEvent.click(screen.getByRole("button", { name: "Import data" }));
-  await screen.findByText(/Settings imported/);
+  const importSuccess = await screen.findByRole("status");
+  expect(importSuccess.textContent).toContain("0 runs imported. Settings imported.");
   githubAccounts();
+  expect(screen.queryByRole("status")).toBeNull();
   await waitFor(() => expect((accountFields("Work (@worker)").getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("imported-org"));
   expect((accountFields("Personal (@alice)").getByLabelText("Allowed authors") as HTMLInputElement).value).toBe("alice");
+  fireEvent.click(screen.getByRole("tab", { name: "General" }));
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.getByText("/archive")).toBeTruthy();
+  expect(screen.getByText("0 runs imported. Settings imported.")).toBeTruthy();
+});
+
+it("does not let an import refresh overwrite a newer settings draft", async () => {
+  const refresh = deferred<Settings>();
+  vi.mocked(factoryApi.settings).mockReturnValueOnce(refresh.promise);
+  vi.mocked(factoryApi.importLegacy).mockResolvedValue({ runs_imported: 1, settings_imported: true, archive_path: "/archive", warnings: [] });
+  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
+  fireEvent.click(screen.getByRole("button", { name: "Import data" }));
+  await waitFor(() => expect(factoryApi.settings).toHaveBeenCalled());
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "9" } });
+  await act(async () => refresh.resolve({ ...settings(), max_concurrent: 22 }));
+  expect((screen.getByLabelText("Concurrent tasks") as HTMLInputElement).value).toBe("9");
+  expect(screen.queryByText("Settings saved.")).toBeNull();
+  expect(screen.getByText("/archive")).toBeTruthy();
 });
 
 it.each(["GitHub owners", "Allowed authors", "Allowed reviewers"])("rejects malformed logins in per-account %s", async (label) => {
@@ -557,4 +633,19 @@ it("reloads base and profile model catalogs when the bound Codex account changes
   view.rerender(<FlowsPage settings={{ ...value, codex_bindings: { work: "account-b" } }} onSave={vi.fn()} />);
   await waitFor(() => expect(factoryApi.agentModels).toHaveBeenCalledTimes(4));
   expect(factoryApi.agentModels).toHaveBeenCalledWith("codex", "work");
+});
+
+it("does not carry a model catalog error from one selected workflow step to another", async () => {
+  vi.mocked(factoryApi.agentModels).mockReset()
+    .mockRejectedValueOnce(new Error("first step catalog denied"))
+    .mockResolvedValueOnce([]);
+  const value = settings();
+  value.flows[0].nodes.push({ ...value.flows[0].nodes[0], id: "build", name: "Build", position: { x: 280, y: 0 } });
+  render(<FlowsPage settings={value} onSave={vi.fn()} />);
+  fireEvent.click(screen.getByText("Plan", { exact: true }));
+  expect((await screen.findByRole("alert")).textContent).toContain("first step catalog denied");
+  fireEvent.click(screen.getByText("Build", { exact: true }));
+  await screen.findByText(/No models available\. Check Codex provider configuration\./);
+  expect(screen.queryByText(/first step catalog denied/)).toBeNull();
+  expect(screen.queryByText(/Could not load Codex models\./)).toBeNull();
 });
