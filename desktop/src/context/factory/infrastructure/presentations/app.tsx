@@ -20,6 +20,7 @@ import { RunsPage, RunDetailPage } from "./runs";
 import { FlowsPage } from "./flows";
 import { SettingsPage } from "./settings";
 import { Notice } from "./ui";
+import { AgentUsageDialog } from "./agent-usage-dialog";
 import { noticeDetail, noticeText } from "./notice-content";
 type RunSelection = { id: string; revision: number };
 type RunFeedback = {
@@ -33,6 +34,7 @@ const nav = [
   { id: "settings", label: "Settings", icon: Gear },
 ];
 export function App() {
+  const [usageOpen, setUsageOpen] = useState(false);
   const [page, setPage] = useState("overview");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -165,7 +167,7 @@ export function App() {
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
-      <aside className="sidebar">
+      <aside className="sidebar" inert={usageOpen}>
         <div className="brand">
           <img src={logo} alt="" />
           <div>
@@ -216,13 +218,18 @@ export function App() {
               </small>
             </div>
           </div>
+          <button type="button" className="nav-item usage-trigger"
+            aria-label="View Usage" title="View Usage" aria-haspopup="dialog"
+            disabled={pendingPage !== null} onClick={() => setUsageOpen(true)}>
+            <ChartBar size={20} aria-hidden="true" /><span>View Usage</span>
+          </button>
           <div className="sidebar-footer">
             <span>LOCAL FIRST</span>
             <span>v0.2.0</span>
           </div>
         </div>
       </aside>
-      <div className="workspace">
+      <div className="workspace" inert={usageOpen}>
         <header className="topbar">
           <div className="breadcrumb">
             <Factory size={16} />
@@ -369,6 +376,7 @@ export function App() {
           )}
         </main>
       </div>
+      {usageOpen && <AgentUsageDialog onClose={() => setUsageOpen(false)} />}
       {pendingPage && (
         <div
           className="dialog-backdrop"

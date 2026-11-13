@@ -186,3 +186,39 @@ export interface ImportReport {
   archive_path: string;
   warnings: string[];
 }
+
+export type UsageStatus = "available" | "no_accounts" | "pending" | "failed" | "unauthenticated" | "unavailable" | "error" | "preview";
+export type UsageMetricKind = "remaining" | "used" | "reported" | "limit";
+export type UsageMetricDerivation = "codex_used_percent_complement";
+export type UsageCode = "not_connected" | "sign_in_pending" | "sign_in_failed" | "unsupported" | "no_quota_data" | "cli_missing" | "timed_out" | "protocol" | "query_failed" | "home_unavailable" | "stopping" | "desktop_required";
+export interface UsageMetric {
+  id: string;
+  label: string;
+  kind: UsageMetricKind;
+  derivation: UsageMetricDerivation | null;
+  value: number;
+  unit: string;
+  period: string | null;
+  resets_at: string | null;
+  limit_reached: boolean | null;
+}
+export interface UsageObservation {
+  status: UsageStatus;
+  metrics: UsageMetric[];
+  code: UsageCode | null;
+}
+export interface UsageEntry {
+  id: string;
+  label: string;
+  email: string | null;
+  account_status: string | null;
+  observation: UsageObservation;
+  checked_at: string;
+}
+export interface AgentUsage {
+  agent: Agent;
+  status: UsageStatus;
+  entries: UsageEntry[];
+  checked_at: string;
+  code: UsageCode | null;
+}

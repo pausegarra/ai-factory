@@ -47,3 +47,9 @@ it("uses account IDs for managed OAuth commands and scopes model catalogs by Git
   await factoryApi.agentModels("codex", "work");
   expect(invoke).toHaveBeenCalledWith("get_agent_models", { agent: "codex", tokenProfileId: "work" });
 });
+it("passes one agent to usage IPC without changing the remaining contract", async () => {
+  const result = { agent: "codex", status: "available", entries: [], checked_at: "2026-11-13T00:00:00Z", code: null };
+  vi.mocked(invoke).mockResolvedValueOnce(result);
+  expect(await factoryApi.agentUsage("codex")).toEqual(result);
+  expect(invoke).toHaveBeenCalledWith("get_agent_usage", { agent: "codex" });
+});

@@ -1,0 +1,350 @@
+{
+  "cases": [
+    {
+      "name": "used-27",
+      "remaining": 73,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": {
+              "usedPercent": 27,
+              "windowDurationMins": 300
+            },
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "available",
+              "code": null,
+              "metrics": [
+                {
+                  "id": "codex:primary",
+                  "label": "Primary window",
+                  "kind": "remaining",
+                  "derivation": "codex_used_percent_complement",
+                  "value": 73,
+                  "unit": "percent",
+                  "period": "300 minutes",
+                  "resets_at": null,
+                  "limit_reached": null
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "used-0",
+      "remaining": 100,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": {
+              "usedPercent": 0,
+              "windowDurationMins": 300
+            },
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "available",
+              "code": null,
+              "metrics": [
+                {
+                  "id": "codex:primary",
+                  "label": "Primary window",
+                  "kind": "remaining",
+                  "derivation": "codex_used_percent_complement",
+                  "value": 100,
+                  "unit": "percent",
+                  "period": "300 minutes",
+                  "resets_at": null,
+                  "limit_reached": null
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "used-100",
+      "remaining": 0,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": {
+              "usedPercent": 100,
+              "windowDurationMins": 300
+            },
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "available",
+              "code": null,
+              "metrics": [
+                {
+                  "id": "codex:primary",
+                  "label": "Primary window",
+                  "kind": "remaining",
+                  "derivation": "codex_used_percent_complement",
+                  "value": 0,
+                  "unit": "percent",
+                  "period": "300 minutes",
+                  "resets_at": null,
+                  "limit_reached": null
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "no-window",
+      "remaining": null,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": null,
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "unavailable",
+              "code": "no_quota_data",
+              "metrics": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-used",
+      "remaining": null,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": {
+              "windowDurationMins": 300
+            },
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "error",
+              "code": "protocol",
+              "metrics": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "null-used",
+      "remaining": null,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": {
+              "usedPercent": null,
+              "windowDurationMins": 300
+            },
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "error",
+              "code": "protocol",
+              "metrics": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid-used",
+      "remaining": null,
+      "rpc_response": {
+        "id": 2,
+        "result": {
+          "rateLimits": {
+            "primary": {
+              "usedPercent": 101,
+              "windowDurationMins": 300
+            },
+            "secondary": null
+          }
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "error",
+              "code": "protocol",
+              "metrics": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "rpc-error",
+      "remaining": null,
+      "rpc_response": {
+        "id": 2,
+        "error": {
+          "code": -32000,
+          "message": "fixture-secret"
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "error",
+              "code": "query_failed",
+              "metrics": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsupported",
+      "remaining": null,
+      "rpc_response": {
+        "id": 2,
+        "error": {
+          "code": -32601,
+          "message": "fixture-secret"
+        }
+      },
+      "wire": {
+        "agent": "codex",
+        "status": "available",
+        "checked_at": "2026-11-13T00:00:00Z",
+        "code": null,
+        "entries": [
+          {
+            "id": "9ab14479-4d99-41c7-b347-e5b3acffb316",
+            "label": "Fixture Codex",
+            "email": "fixture@example.test",
+            "account_status": "ready",
+            "checked_at": "2026-11-13T00:00:00Z",
+            "observation": {
+              "status": "unavailable",
+              "code": "unsupported",
+              "metrics": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

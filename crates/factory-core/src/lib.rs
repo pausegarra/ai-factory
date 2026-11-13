@@ -6,6 +6,7 @@ pub mod context {
             }
             pub mod entities {
                 pub(crate) mod agent_account;
+                pub mod agent_usage;
                 pub mod models;
                 pub mod run_deletion;
                 pub(crate) mod run_transition;
@@ -16,18 +17,21 @@ pub mod context {
                 pub mod delete_run;
             }
             pub mod interfaces {
+                pub mod agent_usage_source;
                 pub mod run_cleanup;
                 pub mod run_notification_sink;
             }
             pub mod dto {
                 pub mod agent_account;
                 pub mod agent_model;
+                pub mod agent_usage;
                 pub mod installed_skill;
                 pub(crate) mod pr_workspace;
                 pub mod run_notification;
             }
             pub mod services {
                 pub(crate) mod agent_accounts;
+                pub(crate) mod agent_usage;
                 pub mod factory;
                 pub(crate) mod reviews;
                 pub(crate) mod run_notifications;
@@ -59,6 +63,7 @@ pub mod context {
             pub mod processes {
                 pub mod agent_models;
                 pub(crate) mod agent_skills;
+                pub mod agent_usage;
                 pub mod agents;
                 pub(crate) mod codex_login;
                 pub(crate) mod pr_workspace;
@@ -81,3 +86,5 @@ pub use context::factory::application::dto::run_notification::RunNotification;
 pub use context::factory::application::interfaces::run_notification_sink::{
     NoopRunNotificationSink, RunNotificationSink,
 };
+
+pub use context::factory::application::dto::agent_usage::*;

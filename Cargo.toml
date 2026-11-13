@@ -7,3 +7,8 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# macOS must load proc-macro dylibs during compilation; stripping them can
+# corrupt their LINKEDIT metadata. Keep stripping enabled for runtime artifacts.
+[profile.release.build-override]
+strip = false

@@ -50,6 +50,7 @@ impl QueuedWorkerScan {
 }
 
 pub struct Factory {
+    pub(crate) usage: super::agent_usage::UsageManager,
     pub(crate) accounts: super::agent_accounts::AccountManager,
     _process_lock: std::fs::File,
     pub(crate) root: PathBuf,
@@ -134,6 +135,9 @@ impl Factory {
         Ok(Arc::new(Self {
             _process_lock: process_lock,
             accounts: super::agent_accounts::AccountManager::default(),
+            usage: super::agent_usage::UsageManager::new(Arc::new(
+                crate::context::factory::infrastructure::processes::agent_usage::CliUsageSource,
+            )),
             root,
             github_base: base.into(),
             store,
@@ -619,6 +623,7 @@ impl Factory {
                 worker.cancel.cancel();
             }
         }
+        self.usage.shutdown().await;
         self.accounts.shutdown().await;
         for _ in 0..100 {
             if self.active.lock().unwrap().is_empty() {

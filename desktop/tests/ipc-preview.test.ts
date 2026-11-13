@@ -14,3 +14,13 @@ it("provides empty managed accounts in preview and requires desktop OAuth", asyn
   await expect(factoryApi.removeAgentAccount("account-1")).rejects.toThrow(/desktop/);
   expect(invoke).not.toHaveBeenCalled();
 });
+it("reports usage as desktop-only without invoking or inspecting local accounts", async () => {
+  for (const agent of ["codex", "opencode"] as const) {
+    const result = await factoryApi.agentUsage(agent);
+    expect(result.agent).toBe(agent);
+    expect(result.status).toBe("preview");
+    expect(result.code).toBe("desktop_required");
+    expect(result.entries).toEqual([]);
+  }
+  expect(invoke).not.toHaveBeenCalled();
+});
