@@ -647,3 +647,215 @@ async fn global_capacity_one_still_serializes_other_triggers_with_approval() {
     factory.shutdown().await;
     server.abort();
 }
+
+#[tokio::test]
+async fn notification_runtime_success_keeps_start_and_result_without_ui() {
+    let (dir, factory, sha, server) = fixture().await;
+    install_outcome_agent(dir.path());
+    let sink = Arc::new(common::notifications::RecordingNotifications::default());
+    factory.set_run_notification_sink(sink.clone());
+    let id = factory
+        .enqueue(runtime_event("new_issue", 11, &sha))
+        .unwrap()
+        .unwrap();
+    assert!(sink.drain().is_empty());
+    factory.start();
+    started(dir.path(), &id).await;
+    let first = sink.drain();
+    std::fs::write(run_memory(dir.path(), &id).join("release"), "").unwrap();
+    status(&factory, &id, "succeeded").await;
+    factory.shutdown().await;
+    server.abort();
+    let _ = server.await;
+    let result = sink.drain();
+    let persisted = factory.run_detail(&id).unwrap().run;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].run_id, id);
+    assert_eq!(first[0].status, "running");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].run_id, id);
+    assert_eq!(result[0].status, "succeeded");
+    assert_eq!(result[0].attempt, persisted.attempt);
+    assert_eq!(result[0].body, "acme/repo #11 · [AI] Runtime test");
+    assert!(persisted.workspace.is_none());
+    assert!(persisted.error.is_none());
+}
+
+#[tokio::test]
+async fn notification_runtime_fast_completion_preserves_both() {
+    let (dir, factory, sha, server) = fixture().await;
+    std::fs::write(dir.path().join("agent"), "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"finished\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"\n").unwrap();
+    let sink = Arc::new(common::notifications::RecordingNotifications::default());
+    factory.set_run_notification_sink(sink.clone());
+    let id = factory
+        .enqueue(runtime_event("new_issue", 11, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    status(&factory, &id, "succeeded").await;
+    factory.shutdown().await;
+    server.abort();
+    let _ = server.await;
+    let messages = sink.drain();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| (m.run_id.as_str(), m.status.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(id.as_str(), "running"), (id.as_str(), "succeeded")]
+    );
+    for m in messages {
+        assert_eq!(m.body, "acme/repo #11 · [AI] Runtime test");
+        assert_eq!(m.attempt, 1);
+    }
+    assert!(factory.run_detail(&id).unwrap().run.workspace.is_none());
+}
+
+#[tokio::test]
+async fn notification_runtime_failed_and_blocked() {
+    for state in ["failed", "blocked"] {
+        let (dir, factory, sha, server) = fixture().await;
+        install_outcome_agent(dir.path());
+        let sink = Arc::new(common::notifications::RecordingNotifications::default());
+        factory.set_run_notification_sink(sink.clone());
+        let id = factory
+            .enqueue(runtime_event("new_issue", 11, &sha))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        started(dir.path(), &id).await;
+        std::fs::write(
+            run_memory(dir.path(), &id).join("outcome"),
+            json!({"status":state,"summary":"fixture outcome","artifacts":[],"data":{}})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(run_memory(dir.path(), &id).join("release"), "").unwrap();
+        status(&factory, &id, state).await;
+        factory.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        let messages = sink.drain();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| (m.run_id.as_str(), m.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(id.as_str(), "running"), (id.as_str(), state)]
+        );
+        assert_eq!(messages[1].body, "acme/repo #11 · [AI] Runtime test");
+        let detail = factory.run_detail(&id).unwrap();
+        assert!(detail.run.workspace.is_none());
+        assert_eq!(detail.nodes[0].status, state);
+    }
+}
+
+#[tokio::test]
+async fn notification_runtime_preparation_failure_has_start_and_failure() {
+    let (dir, factory, sha, server) = fixture().await;
+    let mut settings = factory.settings().unwrap();
+    settings.commands.git = dir.path().join("missing-git").to_string_lossy().into();
+    factory.save_settings(settings).unwrap();
+    let sink = Arc::new(common::notifications::RecordingNotifications::default());
+    factory.set_run_notification_sink(sink.clone());
+    let id = factory
+        .enqueue(runtime_event("new_issue", 11, &sha))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    status(&factory, &id, "failed").await;
+    factory.shutdown().await;
+    server.abort();
+    let _ = server.await;
+    let messages = sink.drain();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].status, "running");
+    assert_eq!(messages[1].status, "failed");
+    assert_eq!(messages[0].run_id, id);
+    assert_eq!(messages[1].run_id, id);
+    assert!(factory.run_detail(&id).unwrap().run.workspace.is_none());
+}
+
+#[tokio::test]
+async fn notification_runtime_queued_cancellation_has_no_start() {
+    let (_dir, factory, sha, server) = fixture().await;
+    let sink = Arc::new(common::notifications::RecordingNotifications::default());
+    factory.set_run_notification_sink(sink.clone());
+    let id = factory
+        .enqueue(runtime_event("new_issue", 11, &sha))
+        .unwrap()
+        .unwrap();
+    factory.cancel(&id).unwrap();
+    factory.start();
+    factory.shutdown().await;
+    server.abort();
+    let _ = server.await;
+    assert!(sink.drain().is_empty());
+    let detail = factory.run_detail(&id).unwrap();
+    assert_eq!(detail.run.status, "cancelled");
+    assert!(detail.run.started_at.is_none());
+    assert!(detail.run.workspace.is_none());
+}
+
+#[tokio::test]
+async fn notification_runtime_active_cancel_and_shutdown_have_no_result() {
+    for cancel in [true, false] {
+        let (dir, factory, sha, server) = fixture().await;
+        install_outcome_agent(dir.path());
+        let sink = Arc::new(common::notifications::RecordingNotifications::default());
+        factory.set_run_notification_sink(sink.clone());
+        let id = factory
+            .enqueue(runtime_event("new_issue", 11, &sha))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        started(dir.path(), &id).await;
+        if cancel {
+            factory.cancel(&id).unwrap();
+        }
+        factory.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        let messages = sink.drain();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].status, "running");
+        assert_eq!(messages[0].run_id, id);
+        let run = factory.run_detail(&id).unwrap().run;
+        assert_eq!(run.status, if cancel { "cancelled" } else { "interrupted" });
+        assert!(run.workspace.is_none());
+    }
+}
+
+struct ClosedNotificationQueue(tokio::sync::mpsc::UnboundedSender<RunNotification>);
+impl RunNotificationSink for ClosedNotificationQueue {
+    fn enqueue(&self, message: RunNotification) {
+        let _ = self.0.send(message);
+    }
+}
+#[tokio::test]
+async fn notification_runtime_no_sink_or_closed_receiver_does_not_change_execution() {
+    for closed in [false, true] {
+        let (dir, factory, sha, server) = fixture().await;
+        install_outcome_agent(dir.path());
+        if closed {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            drop(rx);
+            factory.set_run_notification_sink(Arc::new(ClosedNotificationQueue(tx)));
+        }
+        let id = factory
+            .enqueue(runtime_event("new_issue", 11, &sha))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        started(dir.path(), &id).await;
+        std::fs::write(run_memory(dir.path(), &id).join("release"), "").unwrap();
+        status(&factory, &id, "succeeded").await;
+        factory.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        let run = factory.run_detail(&id).unwrap().run;
+        assert_eq!(run.status, "succeeded");
+        assert!(run.error.is_none());
+        assert!(run.workspace.is_none());
+    }
+}

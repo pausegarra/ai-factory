@@ -262,7 +262,7 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
     if cancel.is_cancelled() {
         return Ok(());
     }
-    if !factory.store.claim_queued(id)? {
+    if !factory.claim_run_for_execution(id)? {
         return Ok(());
     }
     let workspace = workspaces::path(&factory.root, id)?;

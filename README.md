@@ -93,6 +93,15 @@ Disabled discovery skips the corresponding credential lookup and GitHub queries.
 
 Closing the window leaves Factory in the system tray. Choose **Quit AI Factory** from the tray to stop the engine and child processes. Startup at login uses each OS's native startup mechanism and opens in the background.
 
+AI Factory sends system notifications when a run starts and when it succeeds,
+fails or is blocked. Queued runs and individual steps do not produce notifications;
+cancelled and interrupted runs do not produce result notifications.
+Notifications work while the window is visible or hidden. Your operating system
+controls permission and presentation; denied or unavailable notifications do not
+affect runs or cleanup. Error details in notifications use brief safe summaries.
+Full run details remain available in Runs. Browser preview does not send native
+notifications.
+
 ## Agent results and GitHub actions
 
 By default, Codex uses `codex exec --json`, access-specific sandboxing and an output schema. OpenCode uses `opencode run --format json`, model/variant and per-node tool permissions. The prompt includes event context, workspace, project memory and dependency results. Each node execution invokes its agent once. There is no automatic response-repair or format-retry call. Codex receives its native `--output-schema`; OpenCode receives the final-response contract in both the task prompt and its configured agent system prompt. OpenCode's `--format json` controls CLI events and does not provide schema-constrained model output. Before returning, agents must check their complete JSON envelope against the supplied schema. Invalid first responses fail the node and skip its dependents; Factory retains `<node>.invalid-response.txt` and `<node>.validation-error.txt` in session history. Manual run retries and reviewer-requested content corrections retain their existing behavior.

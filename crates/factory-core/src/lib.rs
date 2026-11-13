@@ -8,6 +8,7 @@ pub mod context {
                 pub(crate) mod agent_account;
                 pub mod models;
                 pub mod run_deletion;
+                pub(crate) mod run_transition;
             }
         }
         pub mod application {
@@ -16,17 +17,20 @@ pub mod context {
             }
             pub mod interfaces {
                 pub mod run_cleanup;
+                pub mod run_notification_sink;
             }
             pub mod dto {
                 pub mod agent_account;
                 pub mod agent_model;
                 pub mod installed_skill;
                 pub(crate) mod pr_workspace;
+                pub mod run_notification;
             }
             pub mod services {
                 pub(crate) mod agent_accounts;
                 pub mod factory;
                 pub(crate) mod reviews;
+                pub(crate) mod run_notifications;
             }
         }
         pub mod infrastructure {
@@ -72,3 +76,8 @@ pub use context::factory::domain::repositories::credentials::Credentials;
 pub type Result<T> = anyhow::Result<T>;
 
 pub use context::factory::application::dto::agent_account::{AgentAccount, CodexLogin};
+
+pub use context::factory::application::dto::run_notification::RunNotification;
+pub use context::factory::application::interfaces::run_notification_sink::{
+    NoopRunNotificationSink, RunNotificationSink,
+};
