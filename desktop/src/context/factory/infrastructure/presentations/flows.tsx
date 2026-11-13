@@ -477,6 +477,15 @@ export function FlowsPage({
           </button>
         ))}
       </div>
+      {trigger === "pr_approved" && (
+        <aside className="notice notice-info" aria-label="Approval and release">
+          <div className="notice-content flex flex-col gap-2">
+            <p><strong><code>APPROVED</code> review or <code>OK</code> comment:</strong> approves the current PR version and merges its branch only.</p>
+            <p><strong><code>release</code> comment:</strong> also approves the PR, merges its branch, then bumps the version, pushes a tag and publishes a GitHub release.</p>
+            <p>Comments must come from the authorized PR author.</p>
+          </div>
+        </aside>
+      )}
       <WorkflowActivationFields flow={flow} profiles={settings.token_profiles} onChange={update} />
       <section className={`panel flow-workspace ${node ? "inspecting" : ""}`}>
         <div className="flow-toolbar">
