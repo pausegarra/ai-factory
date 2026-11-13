@@ -9,6 +9,8 @@ mod settings_input;
 #[serde(from = "settings_input::SettingsInput")]
 pub struct Settings {
     pub token_profiles: Vec<TokenProfile>,
+    #[serde(default)]
+    pub codex_bindings: BTreeMap<String, String>,
     pub projects: Vec<Project>,
     pub commands: Commands,
     pub poll_interval_seconds: u64,
@@ -118,6 +120,9 @@ pub struct FlowNode {
     pub model: String,
     #[serde(default)]
     pub effort: String,
+    /// Frozen managed account for this execution, resolved from the GitHub profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub token_overrides: BTreeMap<String, AgentConfig>,
     // None preserves native discovery; Some lists the only skills enabled for this node.
@@ -163,6 +168,7 @@ impl Default for Settings {
                     effort: String::new(),
                     token_overrides: BTreeMap::new(),
                     skills: None,
+                    codex_account_id: None,
                     access: access.into(),
                     prompt: prompt.into(),
                     result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}})}else{empty_schema()},
@@ -175,13 +181,29 @@ impl Default for Settings {
                 .collect(),
         }
         };
-        Self{token_profiles:vec![],projects:vec![],commands:Commands{codex:"codex".into(),opencode:"opencode".into(),git:"git".into()},poll_interval_seconds:15,max_concurrent:4,start_at_login:false,flows:vec![
+        Self{token_profiles:vec![],codex_bindings:BTreeMap::new(),projects:vec![],commands:Commands{codex:"codex".into(),opencode:"opencode".into(),git:"git".into()},poll_interval_seconds:15,max_concurrent:4,start_at_login:false,flows:vec![
    mk("new_issue","New issue",vec![("spec","Write a specification for the issue.","write",vec![]),("architect","Write an implementation plan from the specification.","write",vec!["spec"]),("plan_review","Review specification and plan. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["architect"]),("builder","Implement the approved plan. Run real verification and record evidence.","write",vec!["plan_review"]),("review_code","Review code and tests. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_tests","Review test coverage and verification evidence. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("review_architecture","Review the implementation against the approved architecture. Return data.approved=true only when approved; status=blocked when changes are required.","read",vec!["builder"]),("publish","Check approvals and commit changes locally. Return data.publish={title,body} to publish a PR through the API; body must include Closes #<issue number>. Do not use gh.","write",vec!["review_code","review_tests","review_architecture"]) ]),
    mk("pr_approved","Approved PR",vec![("publish","Check the approved PR against the authenticated refs/ai-factory/base and refs/ai-factory/head snapshot. If the snapshot says merged=true, return data.merge={method:'squash'} only to retry pending branch cleanup; do not modify files or resolve conflicts. Otherwise, if conflicts exist, merge the checked base into the current working branch, resolve conflicts preserving both changes, run relevant verification, and commit the correction locally. Return data.update_pr={} to update the existing PR branch through Factory and wait for new approval. Never combine update_pr with merge. If there are no conflicts and no local changes, return data.merge={method:'squash'} to merge through the API. Do not use gh or perform remote Git operations.","write",vec![])]),
    mk("pr_review","Review requested",vec![("review","Review PR changes and run relevant tests. Return data.review={event:'APPROVE'|'REQUEST_CHANGES'|'COMMENT',body:'report'} to submit a review through the API. Do not use gh.","read",vec![])]) ]}
     }
 }
 impl Settings {
+    pub fn flow_for_actor(&self, template: &Flow, actor: &str) -> Flow {
+        let mut flow = template.for_actor(actor, &self.token_profiles);
+        let account = self
+            .token_profiles
+            .iter()
+            .find(|profile| profile.account.eq_ignore_ascii_case(actor))
+            .and_then(|profile| self.codex_bindings.get(&profile.id));
+        for node in &mut flow.nodes {
+            node.codex_account_id = if node.agent == "codex" {
+                account.cloned()
+            } else {
+                None
+            };
+        }
+        flow
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=64).contains(&self.max_concurrent),
@@ -211,6 +233,16 @@ impl Settings {
             for value in t.owners.iter().chain(&t.authors).chain(&t.reviewers) {
                 ensure!(valid_login(value), "Invalid GitHub login");
             }
+        }
+        for (profile, account) in &self.codex_bindings {
+            ensure!(
+                ids.contains(profile),
+                "Codex binding refers to an unknown GitHub token profile"
+            );
+            ensure!(
+                uuid::Uuid::parse_str(account).is_ok_and(|id| id.to_string() == *account),
+                "Invalid Codex account ID"
+            );
         }
         ids.clear();
         let mut repositories = HashSet::new();

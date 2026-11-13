@@ -3,23 +3,25 @@ import type { AgentConfig, AgentModel } from "../../domain/types";
 import { factoryApi } from "../ipc/factory-api";
 import { Field } from "./ui";
 
-export function AgentModelFields({ node, command, onChange }: {
+export function AgentModelFields({ node, command, tokenProfileId, boundAccountId, onChange }: {
   node: AgentConfig;
   command: string;
+  tokenProfileId?: string;
+  boundAccountId?: string;
   onChange: (patch: Partial<AgentConfig>) => void;
 }) {
-  const key = `${node.agent}:${command}`;
+  const key = JSON.stringify([node.agent, command, tokenProfileId ?? null, node.agent === "codex" ? boundAccountId ?? null : null]);
   const [revision, setRevision] = useState(0);
   const [catalog, setCatalog] = useState<{ key: string; models: AgentModel[]; loading: boolean; error: string }>({ key: "", models: [], loading: true, error: "" });
   useEffect(() => {
     let active = true;
     setCatalog({ key, models: [], loading: true, error: "" });
-    void factoryApi.agentModels(node.agent).then(
+    void factoryApi.agentModels(node.agent, tokenProfileId).then(
       (models) => { if (active) setCatalog({ key, models, loading: false, error: "" }); },
       (error: unknown) => { if (active) setCatalog({ key, models: [], loading: false, error: String(error) }); },
     );
     return () => { active = false; };
-  }, [key, node.agent, revision]);
+  }, [key, node.agent, tokenProfileId, revision]);
   const loading = catalog.key !== key || catalog.loading;
   const models = catalog.key === key ? catalog.models : [];
   const model = models.find((m) => m.id === node.model);

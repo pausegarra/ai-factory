@@ -35,3 +35,15 @@ it("requests the catalog for the selected agent", async () => {
   await factoryApi.agentModels("codex");
   expect(invoke).toHaveBeenCalledWith("get_agent_models", {agent: "codex"});
 });
+it("uses account IDs for managed OAuth commands and scopes model catalogs by GitHub profile", async () => {
+  await factoryApi.agentAccounts();
+  expect(invoke).toHaveBeenCalledWith("get_agent_accounts", undefined);
+  await factoryApi.startCodexLogin("Work");
+  expect(invoke).toHaveBeenCalledWith("start_codex_login", { label: "Work" });
+  await factoryApi.openCodexLogin("account-1");
+  expect(invoke).toHaveBeenCalledWith("open_codex_login", { accountId: "account-1" });
+  await factoryApi.removeAgentAccount("account-1");
+  expect(invoke).toHaveBeenCalledWith("remove_agent_account", { accountId: "account-1" });
+  await factoryApi.agentModels("codex", "work");
+  expect(invoke).toHaveBeenCalledWith("get_agent_models", { agent: "codex", tokenProfileId: "work" });
+});

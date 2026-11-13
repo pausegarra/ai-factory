@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   FloppyDisk,
   Folder,
@@ -12,8 +12,14 @@ import type { Settings, TokenProfile } from "../../domain/types";
 import { validateFlowActivation, validateSettings } from "../../domain/rules";
 import { factoryApi } from "../ipc/factory-api";
 import { LegacyImport } from "./legacy-import";
+import { AgentsSettings } from "./agent-settings";
 import { Field, Notice, Toggle } from "./ui";
 type ScopeField = "owners" | "authors" | "reviewers";
+const settingsTabs = [
+  { id: "general", label: "General" },
+  { id: "github", label: "GitHub accounts" },
+  { id: "agents", label: "Agents" },
+] as const;
 function scopeLists(settings: Settings): Record<string, Record<ScopeField, string>> {
   return Object.fromEntries(settings.token_profiles.map((profile) => [profile.id, {
     owners: profile.owners.join(", "),
@@ -37,6 +43,9 @@ export function SettingsPage({
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [tab, setTab] = useState<typeof settingsTabs[number]["id"]>("general");
+  const tabsId = useId();
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -55,6 +64,21 @@ export function SettingsPage({
     }));
     setSaved(false);
   }
+  function removeProfile(id: string) {
+    setDraft((value) => ({
+      ...value,
+      token_profiles: value.token_profiles.filter((profile) => profile.id !== id),
+      ...(value.codex_bindings ? { codex_bindings: Object.fromEntries(Object.entries(value.codex_bindings).filter(([profileId]) => profileId !== id)) } : {}),
+    }));
+    setSaved(false);
+  }
+  function removeAccountBindings(accountId: string) {
+    setDraft((value) => ({
+      ...value,
+      ...(value.codex_bindings ? { codex_bindings: Object.fromEntries(Object.entries(value.codex_bindings).filter(([, id]) => id !== accountId)) } : {}),
+    }));
+    setSaved(false);
+  }
   function updateScope(profile: TokenProfile, field: ScopeField, value: string) {
     setLists((previous) => ({
       ...previous,
@@ -63,6 +87,7 @@ export function SettingsPage({
     updateProfile(profile.id, { [field]: split(value) });
   }
   async function save() {
+    if (busy || accountBusy) return;
     const token_profiles = draft.token_profiles.map((profile) => ({
       ...profile,
       has_token: settings.token_profiles.some((saved) => saved.id === profile.id && saved.account.toLowerCase() === profile.account.toLowerCase() && saved.has_token),
@@ -132,7 +157,7 @@ export function SettingsPage({
           )}
           <button
             className="button button-primary"
-            disabled={busy || !dirty}
+            disabled={busy || accountBusy || !dirty}
             onClick={() => void save()}
           >
             <FloppyDisk size={17} />
@@ -146,7 +171,51 @@ export function SettingsPage({
           Settings saved.
         </Notice>
       )}
-      <div className="settings-stack">
+      <div className="segmented settings-tabs" role="tablist" aria-label="Settings sections">
+        {settingsTabs.map(({ id, label }, index) => (
+          <button
+            key={id}
+            id={`${tabsId}-${id}`}
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`${tabsId}-${id}-panel`}
+            tabIndex={tab === id ? 0 : -1}
+            className={tab === id ? "selected" : ""}
+            onClick={() => setTab(id)}
+            onKeyDown={(event) => {
+              const next = event.key === "Home" ? settingsTabs[0].id
+                : event.key === "End" ? settingsTabs[settingsTabs.length - 1].id
+                : event.key === "ArrowLeft" ? settingsTabs[(index + settingsTabs.length - 1) % settingsTabs.length].id
+                : event.key === "ArrowRight" ? settingsTabs[(index + 1) % settingsTabs.length].id
+                : undefined;
+              if (next) {
+                event.preventDefault();
+                setTab(next);
+                document.getElementById(`${tabsId}-${next}`)?.focus();
+              }
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div role="tabpanel" id={`${tabsId}-agents-panel`} aria-labelledby={`${tabsId}-agents`} hidden={tab !== "agents"}>
+        {tab === "agents" && <AgentsSettings
+            profiles={draft.token_profiles}
+            bindings={draft.codex_bindings ?? {}}
+            disabled={busy || accountBusy}
+            onBusyChange={setAccountBusy}
+            onBindingChange={(profileId, accountId) => {
+              setDraft((value) => ({ ...value, codex_bindings: Object.fromEntries([
+                ...Object.entries(value.codex_bindings ?? {}).filter(([id]) => id !== profileId),
+                ...(accountId ? [[profileId, accountId]] : []),
+              ]) }));
+              setSaved(false);
+            }}
+            onAccountRemoved={removeAccountBindings}
+          />}
+      </div>
+      <div className="settings-stack" role="tabpanel" id={`${tabsId}-github-panel`} aria-labelledby={`${tabsId}-github`} hidden={tab !== "github"}>
         <section className="panel settings-section">
           <div className="section-intro">
             <div className="section-icon">
@@ -254,13 +323,7 @@ export function SettingsPage({
                   <button
                     className="icon-button danger"
                     aria-label={`Delete profile ${profile.label || i + 1}`}
-                    onClick={() =>
-                      update({
-                        token_profiles: draft.token_profiles.filter(
-                          (t) => t.id !== profile.id,
-                        ),
-                      })
-                    }
+                    onClick={() => removeProfile(profile.id)}
                   >
                     <Trash size={18} />
                   </button>
@@ -312,6 +375,8 @@ export function SettingsPage({
             Tokens stay hidden after saving. Multiple accounts are supported.
           </div>
         </section>
+      </div>
+      <div className="settings-stack" role="tabpanel" id={`${tabsId}-general-panel`} aria-labelledby={`${tabsId}-general`} hidden={tab !== "general"}>
         <section className="panel settings-section">
           <div className="section-intro">
             <div className="section-icon">
@@ -342,8 +407,8 @@ export function SettingsPage({
             <div>
               <h2>Agents and tools</h2>
               <p>
-                Install and authenticate your CLIs, then enter their command or
-                absolute path.
+                Enter each installed CLI command or absolute path. Manage Codex
+                accounts in Agents; OpenCode uses its default CLI account.
               </p>
             </div>
           </div>

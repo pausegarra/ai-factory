@@ -252,6 +252,7 @@ it("roundtrips workflow activation through Settings saves without changing other
   });
   await screen.findByText("Workflow saved. New tasks will use this version.");
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
   fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "owner" } });
   // The notice can render before onDirtyChange's effect updates App. Flush the
   // async save and its effect cascade before issuing the next navigation event.
@@ -335,15 +336,18 @@ it("rehydrates saved account scopes from canonical backend settings without leav
   render(<App />);
   await screen.findByRole("heading", { name: "Factory overview." });
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
   fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "Work-Org, work-org" } });
   fireEvent.change(screen.getByLabelText("Allowed authors"), { target: { value: "ALICE, alice" } });
   fireEvent.change(screen.getByLabelText("Allowed reviewers"), { target: { value: "ALICE, alice" } });
   fireEvent.change(screen.getByLabelText("Replace token"), { target: { value: "replacement-fixture" } });
+  fireEvent.click(screen.getByRole("tab", { name: "General" }));
   fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value: "30" } });
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   });
   await screen.findByText("Settings saved.");
+  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
   expect((screen.getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org");
   expect((screen.getByLabelText("Allowed authors") as HTMLInputElement).value).toBe("alice");
   expect((screen.getByLabelText("Allowed reviewers") as HTMLInputElement).value).toBe("alice");

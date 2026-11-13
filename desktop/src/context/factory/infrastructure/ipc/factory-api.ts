@@ -10,6 +10,8 @@ import type {
   ImportReport,
   Agent,
   AgentModel,
+  AgentAccount,
+  CodexLogin,
   InstalledSkill,
 } from "../../domain/types";
 export const native = isTauri();
@@ -54,7 +56,11 @@ function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(name, args);
 }
 export const factoryApi = {
-  agentModels: (agent: Agent) => command<AgentModel[]>("get_agent_models", { agent }),
+  agentAccounts: () => native ? command<AgentAccount[]>("get_agent_accounts") : Promise.resolve([]),
+  startCodexLogin: (label: string) => command<CodexLogin>("start_codex_login", { label }),
+  openCodexLogin: (accountId: string) => command<void>("open_codex_login", { accountId }),
+  removeAgentAccount: (accountId: string) => command<void>("remove_agent_account", { accountId }),
+  agentModels: (agent: Agent, tokenProfileId?: string) => command<AgentModel[]>("get_agent_models", { agent, ...(tokenProfileId === undefined ? {} : { tokenProfileId }) }),
   installedSkills: () =>
     native
       ? invoke<InstalledSkill[]>("get_installed_skills")

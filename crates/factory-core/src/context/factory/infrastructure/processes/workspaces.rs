@@ -2,7 +2,8 @@ use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
 use crate::CleanupTarget;
 use crate::{context::factory::infrastructure::repositories::store::Store, Result};
 use anyhow::{ensure, Context};
-use std::io::Write;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,8 +11,9 @@ pub(crate) fn archive_artifact(
     memory: &Path,
     node: &str,
     name: &std::ffi::OsStr,
-    bytes: &[u8],
-) -> Result<PathBuf> {
+    source: &mut impl Read,
+    expected_hash: &str,
+) -> Result<(PathBuf, String)> {
     ensure!(crate::safe_id(node), "Invalid artifact node ID");
     ensure!(
         memory.canonicalize()? == memory,
@@ -42,9 +44,33 @@ pub(crate) fn archive_artifact(
         .write(true)
         .create_new(true)
         .open(&target)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(target)
+    let copied = (|| -> Result<String> {
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            file.write_all(&buffer[..count])?;
+        }
+        let hash = format!("{:x}", hash.finalize());
+        ensure!(
+            expected_hash.is_empty() || expected_hash == hash,
+            "Artifact hash mismatch"
+        );
+        file.sync_all()?;
+        Ok(hash)
+    })();
+    match copied {
+        Ok(hash) => Ok((target, hash)),
+        Err(error) => {
+            drop(file);
+            std::fs::remove_file(&target).context("Cannot remove invalid artifact copy")?;
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn path(root: &Path, run: &str) -> Result<PathBuf> {

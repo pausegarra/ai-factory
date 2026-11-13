@@ -1,4 +1,7 @@
+mod output;
 mod results;
+
+use output::{extract_result, spawn_output};
 
 use super::agent_skills::SkillPolicy;
 use super::workspaces;
@@ -9,16 +12,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    io::Write,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    process::Command,
-    task::JoinSet,
-};
+use tokio::{io::AsyncWriteExt, process::Command, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn event_branch(event: &TriggerEvent) -> String {
@@ -86,6 +84,13 @@ pub(super) fn clean_env(command: &mut Command) {
         }
     }
     command.env("GIT_TERMINAL_PROMPT", "0");
+}
+
+pub(crate) fn configure_codex_home(command: &mut Command, home: &Path) {
+    command.env("CODEX_HOME", home);
+    for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"] {
+        command.env_remove(key);
+    }
 }
 pub async fn git_output(
     factory: &Factory,
@@ -496,12 +501,30 @@ async fn execute_node(
 ) -> Result<Value> {
     let (workspace, memory) = paths;
     ensure!(!cancel.is_cancelled(), "Run cancelled before agent launch");
+    let codex_home = if node.agent == "codex" {
+        let Some(account) = node.codex_account_id.as_deref() else {
+            return Ok(
+                json!({"status":"blocked","summary":"No Codex account assigned to this GitHub token profile. Assign an account in Settings → Agents, then retry the run.","artifacts":[],"data":{}}),
+            );
+        };
+        match factory.codex_home(account) {
+            Ok(home) => Some(home),
+            Err(_) => {
+                return Ok(
+                    json!({"status":"blocked","summary":"Assigned Codex account is unavailable. Sign in and assign a ready account in Settings → Agents, then retry the run.","artifacts":[],"data":{}}),
+                )
+            }
+        }
+    } else {
+        None
+    };
     let settings = factory.store.public_settings()?;
     let skill_policy = SkillPolicy::prepare(
         &node.agent,
         &settings.commands.codex,
         node.skills.as_deref(),
         workspace,
+        codex_home.as_deref(),
         &cancel,
     )
     .await?;
@@ -528,7 +551,7 @@ async fn execute_node(
     } else {
         prompt
     };
-    let mut prompt = {
+    let prompt = {
         let _gate = factory.lifecycle_gate.lock().unwrap();
         let previous = factory.store.previous_successful(&event.repository, run)?;
         let mut prior = serde_json::to_string_pretty(&previous)?;
@@ -554,324 +577,249 @@ async fn execute_node(
     };
     let validator = jsonschema::validator_for(&schema)
         .map_err(|error| anyhow::anyhow!("Invalid node result schema: {error}"))?;
-    let mut attempt = 0;
-    let mut previous_error = None;
-    let mut original_response = String::new();
-    let mut repair_guard = results::RepairGuard::new(None);
-    let mut value = loop {
-        ensure!(!cancel.is_cancelled(), "Run cancelled before agent launch");
-        // A correction must produce a new envelope; never consume the last round's output.
-        match std::fs::remove_file(&result_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    ensure!(!cancel.is_cancelled(), "Run cancelled before agent launch");
+    // A review correction must not consume a result from an earlier round.
+    match std::fs::remove_file(&result_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let command = if node.agent == "codex" {
+        &settings.commands.codex
+    } else {
+        &settings.commands.opencode
+    };
+    let mut cmd = Command::new(resolve_command(command));
+    // OpenCode resolves its session directory from PWD before checking process.cwd().
+    cmd.current_dir(workspace)
+        .env("PWD", workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    clean_env(&mut cmd);
+    if let Some(home) = &codex_home {
+        configure_codex_home(&mut cmd, home);
+    }
+    let identity = factory
+        .store
+        .observation(&format!("identity:{run}"))?
+        .context("Verified GitHub actor identity is missing")?;
+    let login = identity["login"]
+        .as_str()
+        .context("Verified GitHub login missing")?;
+    ensure!(
+        login.eq_ignore_ascii_case(&event.actor),
+        "Actor identity changed before agent launch"
+    );
+    let email = if let Some(id) = identity["id"].as_u64() {
+        format!("{id}+{login}@users.noreply.github.com")
+    } else {
+        format!("{login}@users.noreply.github.com")
+    };
+    cmd.env("GIT_AUTHOR_NAME", login)
+        .env("GIT_AUTHOR_EMAIL", &email)
+        .env("GIT_COMMITTER_NAME", login)
+        .env("GIT_COMMITTER_EMAIL", &email)
+        .env("GIT_CONFIG_COUNT", "4")
+        .env("GIT_CONFIG_KEY_0", "user.name")
+        .env("GIT_CONFIG_VALUE_0", login)
+        .env("GIT_CONFIG_KEY_1", "user.email")
+        .env("GIT_CONFIG_VALUE_1", &email)
+        .env("GIT_CONFIG_KEY_2", "user.useConfigOnly")
+        .env("GIT_CONFIG_VALUE_2", "true")
+        .env("GIT_CONFIG_KEY_3", "credential.helper")
+        .env("GIT_CONFIG_VALUE_3", "");
+    cmd.env("AI_FACTORY_RESULT_PATH", &result_path)
+        .env("AI_FACTORY_MEMORY_DIR", memory)
+        .env("AI_FACTORY_RUN_ID", run)
+        .env("AI_FACTORY_NODE_ID", &node.id);
+    if let Some(snapshot) = &pr_snapshot {
+        for (env, field) in [
+            ("AI_FACTORY_PR_BASE_SHA", "base_sha"),
+            ("AI_FACTORY_PR_HEAD_SHA", "head_sha"),
+            ("AI_FACTORY_PR_BASE_REF", "base_ref"),
+            ("AI_FACTORY_PR_HEAD_REF", "head_ref"),
+        ] {
+            cmd.env(
+                env,
+                snapshot[field]
+                    .as_str()
+                    .context("Invalid PR workspace snapshot")?,
+            );
         }
-        let command = if node.agent == "codex" {
-            &settings.commands.codex
-        } else {
-            &settings.commands.opencode
-        };
-        let mut cmd = Command::new(resolve_command(command));
-        // OpenCode resolves its session directory from PWD before checking process.cwd().
-        cmd.current_dir(workspace)
-            .env("PWD", workspace)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        clean_env(&mut cmd);
-        let identity = factory
-            .store
-            .observation(&format!("identity:{run}"))?
-            .context("Verified GitHub actor identity is missing")?;
-        let login = identity["login"]
-            .as_str()
-            .context("Verified GitHub login missing")?;
-        ensure!(
-            login.eq_ignore_ascii_case(&event.actor),
-            "Actor identity changed before agent launch"
-        );
-        let email = if let Some(id) = identity["id"].as_u64() {
-            format!("{id}+{login}@users.noreply.github.com")
-        } else {
-            format!("{login}@users.noreply.github.com")
-        };
-        cmd.env("GIT_AUTHOR_NAME", login)
-            .env("GIT_AUTHOR_EMAIL", &email)
-            .env("GIT_COMMITTER_NAME", login)
-            .env("GIT_COMMITTER_EMAIL", &email)
-            .env("GIT_CONFIG_COUNT", "4")
-            .env("GIT_CONFIG_KEY_0", "user.name")
-            .env("GIT_CONFIG_VALUE_0", login)
-            .env("GIT_CONFIG_KEY_1", "user.email")
-            .env("GIT_CONFIG_VALUE_1", &email)
-            .env("GIT_CONFIG_KEY_2", "user.useConfigOnly")
-            .env("GIT_CONFIG_VALUE_2", "true")
-            .env("GIT_CONFIG_KEY_3", "credential.helper")
-            .env("GIT_CONFIG_VALUE_3", "");
-        cmd.env("AI_FACTORY_RESULT_PATH", &result_path)
-            .env("AI_FACTORY_MEMORY_DIR", memory)
-            .env("AI_FACTORY_RUN_ID", run)
-            .env("AI_FACTORY_NODE_ID", &node.id);
-        if let Some(snapshot) = &pr_snapshot {
-            for (env, field) in [
-                ("AI_FACTORY_PR_BASE_SHA", "base_sha"),
-                ("AI_FACTORY_PR_HEAD_SHA", "head_sha"),
-                ("AI_FACTORY_PR_BASE_REF", "base_ref"),
-                ("AI_FACTORY_PR_HEAD_REF", "head_ref"),
-            ] {
-                cmd.env(
-                    env,
-                    snapshot[field]
-                        .as_str()
-                        .context("Invalid PR workspace snapshot")?,
-                );
-            }
-        }
-        if node.agent == "codex" {
-            cmd.args([
-                "exec",
-                "--json",
-                "--config",
-                "approval_policy=\"never\"",
-                "--sandbox",
-                if node.access == "read" || attempt > 0 {
-                    "read-only"
-                } else {
-                    "workspace-write"
-                },
-                "--output-schema",
-            ])
-            .arg(&schema_path)
-            .arg("--output-last-message")
-            .arg(&result_path)
-            .arg("--cd")
-            .arg(workspace)
-            .arg("--ephemeral");
-            if !node.model.is_empty() {
-                cmd.arg("--model").arg(&node.model);
-            }
-            if !node.effort.is_empty() {
-                cmd.arg("--config").arg(format!(
-                    "model_reasoning_effort={}",
-                    serde_json::to_string(&node.effort)?
-                ));
-            }
-            if node.access == "write" && attempt == 0 {
-                cmd.arg("--add-dir").arg(memory);
-            }
-            skill_policy.configure_codex(&mut cmd)?;
-            cmd.arg("-");
-        } else {
-            cmd.args([
-                "run",
-                "--format",
-                "json",
-                "--standalone",
-                "--auto",
-                "--agent",
-                "ai-factory",
-            ]);
-            if !node.model.is_empty() {
-                let model = if node.effort.is_empty() {
-                    node.model.clone()
-                } else {
-                    format!("{}#{}", node.model, node.effort)
-                };
-                cmd.arg("--model").arg(model);
-            }
-            let permissions = if attempt > 0 {
-                json!({"*":"deny","question":"deny","external_directory":"deny"})
-            } else if node.access == "read" {
-                json!({"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","webfetch":"allow","websearch":"allow","external_directory":"deny"})
+    }
+    if node.agent == "codex" {
+        cmd.args([
+            "exec",
+            "--json",
+            "--config",
+            "approval_policy=\"never\"",
+            "--config",
+            "cli_auth_credentials_store=\"file\"",
+            "--sandbox",
+            if node.access == "read" {
+                "read-only"
             } else {
-                json!({"*":"allow","question":"deny","external_directory":"deny"})
+                "workspace-write"
+            },
+            "--output-schema",
+        ])
+        .arg(&schema_path)
+        .arg("--output-last-message")
+        .arg(&result_path)
+        .arg("--cd")
+        .arg(workspace)
+        .arg("--ephemeral");
+        if !node.model.is_empty() {
+            cmd.arg("--model").arg(&node.model);
+        }
+        if !node.effort.is_empty() {
+            cmd.arg("--config").arg(format!(
+                "model_reasoning_effort={}",
+                serde_json::to_string(&node.effort)?
+            ));
+        }
+        if node.access == "write" {
+            cmd.arg("--add-dir").arg(memory);
+        }
+        skill_policy.configure_codex(&mut cmd)?;
+        cmd.arg("-");
+    } else {
+        cmd.args([
+            "run",
+            "--format",
+            "json",
+            "--standalone",
+            "--auto",
+            "--agent",
+            "ai-factory",
+        ]);
+        if !node.model.is_empty() {
+            let model = if node.effort.is_empty() {
+                node.model.clone()
+            } else {
+                format!("{}#{}", node.model, node.effort)
             };
-            let mut permissions = permissions;
-            permissions["question"] = json!("deny");
-            if attempt == 0 {
-                let mut external = serde_json::Map::new();
-                external.insert("*".into(), json!("deny"));
-                external.insert(format!("{}/**", memory.display()), json!("allow"));
-                permissions["external_directory"] = Value::Object(external);
-            }
-            skill_policy.configure_opencode(&mut permissions, attempt == 0);
-            cmd.env("OPENCODE_CONFIG_CONTENT",json!({"permission":permissions,"agent":{"ai-factory":{"mode":"primary","permission":permissions}}}).to_string());
+            cmd.arg("--model").arg(model);
         }
-        #[cfg(unix)]
-        cmd.process_group(0);
-        #[cfg(windows)]
-        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
-        let mut child = cmd.spawn().with_context(|| {
-            format!(
-                "Cannot start {} CLI; configure installed executable path",
-                node.agent
-            )
-        })?;
-        let mut process_tree = ProcessTree::attach(&mut child)?;
-        let mut state = factory
-            .store
-            .detail(run)?
-            .nodes
-            .into_iter()
-            .find(|n| n.id == node.id)
-            .unwrap();
-        state.status = "running".into();
-        state.started_at.get_or_insert_with(now);
-        factory.store.save_node(run, &state)?;
-        let mut r = factory.store.detail(run)?.run;
-        r.current_step = Some(node.id.clone());
-        factory.store.save_run(&r)?;
-        factory.emit("node_changed", Some(run), Some(&node.id));
-        let mut stdin = child.stdin.take().unwrap();
-        let input_prompt = prompt.clone();
-        let input = tokio::spawn(async move {
-            stdin.write_all(input_prompt.as_bytes()).await?;
-            stdin.shutdown().await
-        });
-        let log_path = session.join(format!("{}.log", node.id));
-        let log = Arc::new(std::sync::Mutex::new(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)?,
-        ));
-        let out = spawn_output(
-            factory,
-            run,
-            &node.id,
-            child.stdout.take().unwrap(),
-            log.clone(),
-            true,
-        );
-        let err = spawn_output(
-            factory,
-            run,
-            &node.id,
-            child.stderr.take().unwrap(),
-            log.clone(),
-            false,
-        );
-        let status = tokio::select! {
-            r = child.wait() => r.context("CLI wait failed"),
-            _ = cancel.cancelled() => {
-                process_tree.terminate();
-                let _ = child.kill().await;
-                Err(anyhow::anyhow!("Run cancelled"))
-            }
-        };
-        // A CLI may exit while descendants still own its pipes. End the entire
-        // session before draining output, including on normal leader exit.
-        process_tree.terminate();
-        let _ = input.await;
-        let output = out.await.context("CLI output reader failed")??;
-        let _ = err.await;
-        let status = status?;
-        if !status.success() {
-            if let Some(previous_error) = &previous_error {
-                bail!("Response repair process exited with {status}; previous invalid result: {previous_error}");
-            }
-            bail!("Agent exited with {status}");
-        }
-        let raw = if result_path.exists() {
-            Some(std::fs::read_to_string(&result_path)?)
+        let permissions = if node.access == "read" {
+            json!({"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","webfetch":"allow","websearch":"allow","external_directory":"deny"})
         } else {
-            extract_result(&output)
+            json!({"*":"allow","question":"deny","external_directory":"deny"})
         };
-        let parsed = raw
-            .as_deref()
-            .context("Agent produced no valid structured final result")
-            .and_then(|text| {
-                serde_json::from_str::<Value>(text).context("Invalid node result JSON")
-            });
-        if attempt == 0 {
-            repair_guard = results::RepairGuard::new(parsed.as_ref().ok());
-            original_response = factory.redact(
+        let mut permissions = permissions;
+        permissions["question"] = json!("deny");
+        let mut external = serde_json::Map::new();
+        external.insert("*".into(), json!("deny"));
+        external.insert(format!("{}/**", memory.display()), json!("allow"));
+        permissions["external_directory"] = Value::Object(external);
+        skill_policy.configure_opencode(&mut permissions);
+        let system = format!("You execute one assigned AI Factory workflow node. Complete the assigned role with the permitted tools. This contract governs final response formatting; write Markdown deliverables to files and declare their artifacts instead of returning prose.\n\n{}\n\n{contract}", include_str!("agent-instructions.md"));
+        cmd.env("OPENCODE_CONFIG_CONTENT",json!({"permission":permissions,"agent":{"ai-factory":{"mode":"primary","permission":permissions,"prompt":system}}}).to_string());
+    }
+    #[cfg(unix)]
+    cmd.process_group(0);
+    #[cfg(windows)]
+    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "Cannot start {} CLI; configure installed executable path",
+            node.agent
+        )
+    })?;
+    let mut process_tree = ProcessTree::attach(&mut child)?;
+    let mut state = factory
+        .store
+        .detail(run)?
+        .nodes
+        .into_iter()
+        .find(|n| n.id == node.id)
+        .unwrap();
+    state.status = "running".into();
+    state.started_at.get_or_insert_with(now);
+    factory.store.save_node(run, &state)?;
+    let mut r = factory.store.detail(run)?.run;
+    r.current_step = Some(node.id.clone());
+    factory.store.save_run(&r)?;
+    factory.emit("node_changed", Some(run), Some(&node.id));
+    let mut stdin = child.stdin.take().unwrap();
+    let input_prompt = prompt.clone();
+    let input = tokio::spawn(async move {
+        stdin.write_all(input_prompt.as_bytes()).await?;
+        stdin.shutdown().await
+    });
+    let log_path = session.join(format!("{}.log", node.id));
+    let log = Arc::new(std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?,
+    ));
+    let out = spawn_output(
+        factory,
+        run,
+        &node.id,
+        child.stdout.take().unwrap(),
+        log.clone(),
+        true,
+    );
+    let err = spawn_output(
+        factory,
+        run,
+        &node.id,
+        child.stderr.take().unwrap(),
+        log.clone(),
+        false,
+    );
+    let status = tokio::select! {
+        r = child.wait() => r.context("CLI wait failed"),
+        _ = cancel.cancelled() => {
+            process_tree.terminate();
+            let _ = child.kill().await;
+            Err(anyhow::anyhow!("Run cancelled"))
+        }
+    };
+    // A CLI may exit while descendants still own its pipes. End the entire
+    // session before draining output, including on normal leader exit.
+    process_tree.terminate();
+    let _ = input.await;
+    let output = out.await.context("CLI output reader failed")??;
+    let _ = err.await;
+    let status = status?;
+    if !status.success() {
+        bail!("Agent exited with {status}");
+    }
+    let raw = if result_path.exists() {
+        Some(std::fs::read_to_string(&result_path)?)
+    } else {
+        extract_result(&output)
+    };
+    let validated = raw
+        .as_deref()
+        .context("Agent produced no valid structured final result")
+        .and_then(|text| serde_json::from_str::<Value>(text).context("Invalid node result JSON"))
+        .and_then(|value| results::validate(value, node.agent == "codex", &validator));
+    let mut value = match validated {
+        Ok(value) => value,
+        Err(error) => {
+            let error = factory.redact(&format!("{error:#}"));
+            let rejected = factory.redact(
                 raw.as_deref()
                     .unwrap_or("(No final response was produced.)"),
             );
-        }
-        let validated = parsed
-            .and_then(|value| results::validate(value, node.agent == "codex", &validator))
-            .and_then(|value| {
-                if attempt > 0 {
-                    repair_guard.validate(&value)?;
-                }
-                Ok(value)
-            });
-        match validated {
-            Ok(value) => break value,
-            Err(error) => {
-                let error = factory.redact(&format!("{error:#}"));
-                let previous = factory.redact(
-                    raw.as_deref()
-                        .unwrap_or("(No final response was produced.)"),
-                );
-                std::fs::write(
-                    session.join(format!("{}.attempt-{}.response.txt", node.id, attempt + 1)),
-                    &previous,
-                )?;
-                ensure!(
-                    attempt < results::MAX_REPAIRS,
-                    "Invalid node result after {} attempts: {error}",
-                    attempt + 1
-                );
-                attempt += 1;
-                let message = format!(
-                    "Invalid node result; repair {attempt}/{}: {error}\n",
-                    results::MAX_REPAIRS
-                );
-                log.lock().unwrap().write_all(message.as_bytes())?;
-                factory.emit("log", Some(run), Some(&node.id));
-                prompt = results::repair_prompt(
-                    &contract,
-                    &original_response,
-                    &previous,
-                    &error,
-                    attempt,
-                );
-                previous_error = Some(error);
-                std::fs::write(
-                    session.join(format!("{}.repair-{attempt}.prompt.txt", node.id)),
-                    &prompt,
-                )?;
-            }
+            std::fs::write(
+                session.join(format!("{}.invalid-response.txt", node.id)),
+                rejected,
+            )?;
+            std::fs::write(
+                session.join(format!("{}.validation-error.txt", node.id)),
+                &error,
+            )?;
+            bail!("Invalid first node response; automatic retries are disabled: {error}");
         }
     };
-    for artifact in value["artifacts"].as_array_mut().unwrap() {
-        let raw = artifact["path"].as_str().context("Artifact path missing")?;
-        let path = if Path::new(raw).is_absolute() {
-            PathBuf::from(raw)
-        } else {
-            workspace.join(raw)
-        };
-        let resolved = path.canonicalize().context("Artifact does not exist")?;
-        ensure!(
-            resolved.starts_with(workspace) || resolved.starts_with(memory),
-            "Artifact escaped authorized workspace/memory"
-        );
-        let mut check = path.as_path();
-        while let Some(parent) = check.parent() {
-            ensure!(
-                !std::fs::symlink_metadata(check)?.file_type().is_symlink(),
-                "Artifact symlink forbidden"
-            );
-            if check == workspace || check == memory {
-                break;
-            }
-            check = parent;
-        }
-        let bytes = std::fs::read(&resolved)?;
-        let hash = format!("{:x}", Sha256::digest(&bytes));
-        ensure!(artifact["sha256"] == hash, "Artifact hash mismatch");
-        let archived = workspaces::archive_artifact(
-            memory,
-            &node.id,
-            resolved.file_name().context("Artifact file name missing")?,
-            &bytes,
-        )?;
-        artifact["path"] = json!(archived);
-    }
+    results::archive_artifacts(&mut value, workspace, memory, &node.id)?;
     // Keep evidence reachable even if a later API action fails or the app exits.
     let mut partial = value.clone();
     partial["status"] = json!("failed");
@@ -1035,89 +983,26 @@ unsafe fn resume_suspended_process(pid: u32) -> Result<()> {
     bail!("Suspended CLI thread not found")
 }
 
-fn spawn_output<R: AsyncRead + Unpin + Send + 'static>(
-    factory: &Arc<Factory>,
-    run: &str,
-    node: &str,
-    mut reader: R,
-    log: Arc<std::sync::Mutex<std::fs::File>>,
-    capture: bool,
-) -> tokio::task::JoinHandle<Result<String>> {
-    let f = factory.clone();
-    let run = run.to_string();
-    let node = node.to_string();
-    tokio::spawn(async move {
-        let mut all = String::new();
-        let mut pending = Vec::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            pending.extend_from_slice(&buf[..n]);
-            while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
-                let line: Vec<_> = pending.drain(..=pos).collect();
-                let text = f.redact(&String::from_utf8_lossy(&line));
-                log.lock().unwrap().write_all(text.as_bytes())?;
-                if capture {
-                    ensure!(
-                        all.len() + text.len() < 64 * 1024 * 1024,
-                        "CLI output exceeds 64 MiB"
-                    );
-                    all.push_str(&text);
-                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                        if let Some(session) =
-                            v["thread_id"].as_str().or_else(|| v["sessionID"].as_str())
-                        {
-                            if let Ok(d) = f.store.detail(&run) {
-                                if let Some(mut state) = d.nodes.into_iter().find(|n| n.id == node)
-                                {
-                                    state.session_id = Some(session.into());
-                                    let _ = f.store.save_node(&run, &state);
-                                }
-                            }
-                        }
-                    }
-                }
-                f.emit("log", Some(&run), Some(&node));
-            }
-            ensure!(
-                pending.len() < 4 * 1024 * 1024,
-                "CLI emitted oversized line"
-            );
-        }
-        if !pending.is_empty() {
-            let text = f.redact(&String::from_utf8_lossy(&pending));
-            log.lock().unwrap().write_all(text.as_bytes())?;
-            if capture {
-                all.push_str(&text)
-            }
-            f.emit("log", Some(&run), Some(&node));
-        }
-        Ok(all)
-    })
-}
-fn extract_result(output: &str) -> Option<String> {
-    for line in output.lines().rev() {
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            if v.get("status").is_some() || v.get("artifacts").is_some() {
-                return Some(line.to_owned());
-            }
-            if let Some(text) = v["part"]["text"]
-                .as_str()
-                .or_else(|| v["item"]["text"].as_str())
-            {
-                return Some(text.to_owned());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(all(test, unix))]
 mod process_tests {
     use super::*;
+
+    #[test]
+    fn managed_codex_home_removes_ambient_auth_overrides() {
+        let mut command = Command::new("codex");
+        for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"] {
+            command.env(key, "unrelated-account");
+        }
+        configure_codex_home(&mut command, Path::new("/managed/account"));
+        let variables: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+        assert_eq!(
+            variables[std::ffi::OsStr::new("CODEX_HOME")],
+            Some(std::ffi::OsStr::new("/managed/account"))
+        );
+        for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"] {
+            assert_eq!(variables[std::ffi::OsStr::new(key)], None);
+        }
+    }
 
     #[tokio::test]
     async fn terminated_guard_cannot_signal_recycled_process_group() {

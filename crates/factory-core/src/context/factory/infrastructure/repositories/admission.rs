@@ -17,7 +17,7 @@ impl Store {
             if flow.activation_for(reviewer, &settings.token_profiles) != ActivationState::Enabled {
                 return Ok(Vec::new());
             }
-            let flow = flow.for_actor(reviewer, &settings.token_profiles);
+            let flow = settings.flow_for_actor(flow, reviewer);
             let key = format!("review:{owner}:{reviewer}");
             let raw: Option<String> = tx.query_row("SELECT json FROM observations WHERE key=?1", [&key], |r| r.get(0)).optional()?;
             let mut previous: serde_json::Value = raw.map(|raw| serde_json::from_str(&raw)).transpose()?.unwrap_or(json!({}));
@@ -75,7 +75,7 @@ impl Store {
             {
                 return Ok(None);
             }
-            let flow = flow.for_actor(&event.actor, &settings.token_profiles);
+            let flow = settings.flow_for_actor(flow, &event.actor);
             Self::insert_in_tx(tx, event, &flow, 1, true, None)
         })
     }
@@ -101,7 +101,7 @@ impl Store {
             {
                 return Ok(None);
             }
-            let flow = flow.for_actor(&event.actor, &settings.token_profiles);
+            let flow = settings.flow_for_actor(flow, &event.actor);
             Self::insert_in_tx(tx, event, &flow, 1, true, Some((comments, approved)))
         })
     }
@@ -137,7 +137,7 @@ impl Store {
                 .attempt
                 .checked_add(1)
                 .context("Run attempt limit reached")?;
-            let flow = flow.for_actor(&event.actor, &settings.token_profiles);
+            let flow = settings.flow_for_actor(flow, &event.actor);
             Self::insert_in_tx(tx, &event, &flow, attempt, false, None)?
                 .context("Retry was not inserted")
         })

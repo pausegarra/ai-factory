@@ -104,6 +104,9 @@ export function FlowsPage({
   const latestFlow = useRef(flow);
   latestFlow.current = flow;
   const node = flow.nodes.find((n) => n.id === selected);
+  const defaultCodexAccountId = settings.token_profiles
+    .map((profile) => settings.codex_bindings && Object.hasOwn(settings.codex_bindings, profile.id) ? settings.codex_bindings[profile.id] : undefined)
+    .find(Boolean);
   const skillDialogNode = flow.nodes.find((n) => n.id === skillDialogNodeId);
   const dirty = draft != null;
   useEffect(() => {
@@ -484,8 +487,8 @@ export function FlowsPage({
                     <option value="opencode">OpenCode</option>
                   </select>
                 </Field>
-                <AgentModelFields node={node} command={settings.commands[node.agent]} onChange={updateNode} />
-                <TokenAgentFields node={node} profiles={settings.token_profiles} commands={settings.commands} onChange={updateNode} />
+                <AgentModelFields node={node} command={settings.commands[node.agent]} boundAccountId={defaultCodexAccountId} onChange={updateNode} />
+                <TokenAgentFields node={node} profiles={settings.token_profiles} commands={settings.commands} bindings={settings.codex_bindings} onChange={updateNode} />
                 <Field label="Workspace access">
                   <select
                     value={node.access}

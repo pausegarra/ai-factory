@@ -237,7 +237,7 @@ async fn unavailable_selection_fails_before_agent_execution() {
 }
 
 #[tokio::test]
-async fn skill_filters_are_reapplied_to_response_repairs_without_rediscovery() {
+async fn invalid_output_does_not_restart_agent_or_repeat_skill_discovery() {
     let success = r#"printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#;
     let repair = r#"
 attempt=$(wc -l < "$(dirname "$0")/skill-execution.calls" | tr -d ' ')
@@ -257,12 +257,8 @@ fi
         settings.flows[0].nodes[0].skills = Some(vec![]);
         factory.save_settings(settings).unwrap();
         let detail = run(&factory, 215).await;
-        assert_eq!(
-            detail.run.status, "succeeded",
-            "{agent}: {:?}",
-            detail.nodes
-        );
-        for attempt in [1, 2] {
+        assert_eq!(detail.run.status, "failed", "{agent}: {:?}", detail.nodes);
+        for attempt in [1] {
             if agent == "codex" {
                 let args = capture(
                     root.path(),
@@ -281,6 +277,13 @@ fi
                 assert_eq!(config["permission"]["skill"], json!({"*":"deny"}));
             }
         }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("skill-execution.calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
         if agent == "codex" {
             assert_eq!(
                 std::fs::read_to_string(root.path().join("skill-discovery.calls"))
