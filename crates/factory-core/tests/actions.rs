@@ -484,6 +484,19 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
         .unwrap();
     assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert_compact_receipts(&f, 9);
+    assert!(reviews
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|value| !value["body"].as_str().unwrap().contains("node-result:v1:")));
+    let root = f.snapshot().unwrap().service.app_data_dir;
+    let db = rusqlite::Connection::open(Path::new(&root).join("factory.sqlite3")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issue_node_comments", [], |row| row
+            .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
 }
 
 fn assert_compact_receipts(f: &Factory, remote_id: u64) {

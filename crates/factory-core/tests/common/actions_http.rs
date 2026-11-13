@@ -8,10 +8,12 @@ use tokio::{
     net::TcpListener,
 };
 
+#[allow(dead_code)]
 pub enum Reply {
     Json(u16, Value),
     Raw(u16, Vec<u8>),
     Disconnect,
+    Wait(Arc<tokio::sync::Notify>, Value),
 }
 pub struct Step {
     method: String,
@@ -19,6 +21,7 @@ pub struct Step {
     body: Option<Value>,
     reply: Reply,
     hook: Option<Box<dyn FnOnce() + Send>>,
+    header: Option<(String, String)>,
 }
 impl Step {
     pub fn new(method: &str, path: &str, reply: Reply) -> Self {
@@ -28,7 +31,13 @@ impl Step {
             body: None,
             reply,
             hook: None,
+            header: None,
         }
+    }
+    #[allow(dead_code)]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.header = Some((name.into(), value.into()));
+        self
     }
     pub fn body(mut self, body: Value) -> Self {
         self.body = Some(body);
@@ -42,12 +51,14 @@ impl Step {
 struct State {
     steps: VecDeque<Step>,
     calls: Vec<(String, String)>,
+    requests: Vec<(String, String, Value)>,
     errors: Vec<String>,
 }
 pub struct Script {
     pub base: String,
     state: Arc<Mutex<State>>,
     task: tokio::task::JoinHandle<()>,
+    stop: tokio_util::sync::CancellationToken,
 }
 impl Script {
     pub async fn start(steps: Vec<Step>) -> Self {
@@ -56,13 +67,22 @@ impl Script {
         let state = Arc::new(Mutex::new(State {
             steps: steps.into(),
             calls: vec![],
+            requests: vec![],
             errors: vec![],
         }));
         let shared = state.clone();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task_stop = stop.clone();
         let task = tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                let (mut socket, _) = tokio::select! {
+                    _ = task_stop.cancelled() => break,
+                    result=listener.accept()=>match result {Ok(socket)=>socket,Err(_)=>break},
+                    result=handlers.join_next(), if !handlers.is_empty()=>{if result.is_some_and(|r|r.is_err()){shared.lock().unwrap().errors.push("HTTP handler panicked".into());} continue;}
+                };
                 let shared = shared.clone();
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     let mut bytes = Vec::new();
                     let (start, length) = loop {
                         let mut buffer = [0; 4096];
@@ -104,11 +124,13 @@ impl Script {
                     let step = {
                         let mut state = shared.lock().unwrap();
                         state.calls.push((method.clone(), path.clone()));
+                        state.requests.push((method.clone(),path.clone(),body.clone()));
                         match state.steps.pop_front() {
                             Some(step)
                                 if step.method == method
                                     && step.path == path
-                                    && step.body.as_ref().is_none_or(|v| v == &body) =>
+                                    && step.body.as_ref().is_none_or(|v| v == &body)
+                                    && step.header.as_ref().is_none_or(|(name,value)| headers.lines().filter_map(|line|line.split_once(':')).any(|(n,v)|n.eq_ignore_ascii_case(name)&&v.trim()==value)) =>
                             {
                                 Some(step)
                             }
@@ -136,6 +158,7 @@ impl Script {
                                 }
                                 Reply::Raw(status, data) => (status, data),
                                 Reply::Disconnect => return,
+                                Reply::Wait(gate,value) => {gate.notified().await;(201,value.to_string().into_bytes())},
                             }
                         }
                         None => (500, b"{}".to_vec()),
@@ -145,8 +168,32 @@ impl Script {
                     let _ = socket.write_all(&data).await;
                 });
             }
+            handlers.abort_all();
+            while let Some(result) = handlers.join_next().await {
+                if result.is_err_and(|error| !error.is_cancelled()) {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .errors
+                        .push("HTTP handler panicked".into());
+                }
+            }
         });
-        Self { base, state, task }
+        Self {
+            base,
+            state,
+            task,
+            stop,
+        }
+    }
+    #[allow(dead_code)]
+    pub async fn shutdown(&mut self) {
+        self.stop.cancel();
+        let _ = (&mut self.task).await;
+    }
+    #[allow(dead_code)]
+    pub fn requests(&self) -> Vec<(String, String, Value)> {
+        self.state.lock().unwrap().requests.clone()
     }
     pub fn assert_done(&self) {
         let state = self.state.lock().unwrap();

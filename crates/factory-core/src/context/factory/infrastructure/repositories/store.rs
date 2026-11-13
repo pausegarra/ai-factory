@@ -32,6 +32,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS credential_gc (reference TEXT PRIMARY KEY);")?;
         super::run_deletions::migrate(&mut db)?;
         super::agent_accounts::migrate(&db)?;
+        super::issue_node_comments::migrate(&db)?;
         let s = Self {
             db: Mutex::new(db),
             credentials,
@@ -431,15 +432,15 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(raw) = raw {
-            let previous: NodeRun = serde_json::from_str(&raw)?;
+        let previous: NodeRun = serde_json::from_str(raw.as_deref().context("Node not found")?)?;
+        {
             if !["pending", "running"].contains(&previous.status.as_str())
                 && n.status != previous.status
             {
                 return Ok(());
             }
             if n.result.is_none() {
-                n.result = previous.result;
+                n.result = previous.result.clone();
             }
         }
         ensure!(
@@ -449,6 +450,7 @@ impl Store {
             )? == 1,
             "Node not found"
         );
+        super::issue_node_comments::capture(&db, self, run, &previous, &n)?;
         db.commit()?;
         Ok(())
     }

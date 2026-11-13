@@ -67,6 +67,8 @@ pub struct Factory {
     pub(crate) deletion_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     pub(crate) cleanup: Arc<dyn RunCleanup>,
     connector_dispatcher: Mutex<Option<super::connector_notifications::ConnectorDispatcher>>,
+    issue_node_comment_dispatcher:
+        Mutex<Option<super::issue_node_comments::IssueNodeCommentDispatcher>>,
     notification_transport: Arc<dyn NotificationTransport>,
     run_notification_sink: Mutex<Arc<dyn RunNotificationSink>>,
 }
@@ -162,6 +164,7 @@ impl Factory {
             deletion_locks: Mutex::new(HashMap::new()),
             cleanup,
             connector_dispatcher: Mutex::new(None),
+            issue_node_comment_dispatcher: Mutex::new(None),
             notification_transport: transport,
             run_notification_sink: Mutex::new(Arc::new(NoopRunNotificationSink)),
         }))
@@ -171,6 +174,16 @@ impl Factory {
         if self.stop.is_cancelled() {
             return;
         }
+        let mut issue_dispatcher = self.issue_node_comment_dispatcher.lock().unwrap();
+        if issue_dispatcher.is_none() {
+            *issue_dispatcher = Some(
+                super::issue_node_comments::IssueNodeCommentDispatcher::start(
+                    Arc::downgrade(self),
+                    self.stop.child_token(),
+                ),
+            );
+        }
+        drop(issue_dispatcher);
         let mut dispatcher = self.connector_dispatcher.lock().unwrap();
         if dispatcher.is_none() {
             *dispatcher = Some(super::connector_notifications::ConnectorDispatcher::start(
@@ -670,6 +683,10 @@ impl Factory {
         }
         let dispatcher = self.connector_dispatcher.lock().unwrap().take();
         if let Some(dispatcher) = dispatcher {
+            dispatcher.shutdown().await;
+        }
+        let issue_dispatcher = self.issue_node_comment_dispatcher.lock().unwrap().take();
+        if let Some(dispatcher) = issue_dispatcher {
             dispatcher.shutdown().await;
         }
         self.accounts.shutdown().await;

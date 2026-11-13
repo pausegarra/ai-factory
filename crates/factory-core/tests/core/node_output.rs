@@ -3,7 +3,7 @@ use super::*;
 fn output_fixture(
     agent: &str,
     responses: &[serde_json::Value],
-) -> (tempfile::TempDir, std::sync::Arc<Factory>) {
+) -> (super::FixtureDir, std::sync::Arc<Factory>) {
     let (dir, factory) = fixture("exit 1", 4);
     let script = r#"#!/usr/bin/env python3
 import hashlib, json, os, pathlib, sys, time

@@ -558,3 +558,95 @@ data='{}'"#);
     );
     assert!(!memory.join("finish.count").exists());
 }
+
+#[tokio::test]
+async fn issue_node_comments_review_rework_preserves_identical_summaries_until_delivery() {
+    let script = r#"cat >/dev/null
+node="$AI_FACTORY_NODE_ID"
+file="$AI_FACTORY_MEMORY_DIR/$node.count"
+count=0
+[ ! -f "$file" ] || count=$(cat "$file")
+count=$((count + 1))
+printf '%s' "$count" > "$file"
+data='{}'
+status=succeeded
+if [ "$node" = review_b ]; then
+ data='{"approved":true}'
+ if [ "$count" = 1 ]; then status=blocked; data='{"approved":false}'; fi
+fi
+printf '{"status":"%s","summary":"Same summary","artifacts":[],"data":%s}' "$status" "$data" > "$AI_FACTORY_RESULT_PATH"
+"#;
+    let (dir, f) = fixture(script, 4);
+    configure(&f, "codex", 1, &["review_b"]);
+    dir.comment_status
+        .store(503, std::sync::atomic::Ordering::SeqCst);
+    let id = enqueue(&f);
+    f.start();
+    let detail = terminal(&f, &id).await;
+    assert_eq!(detail.run.status, "succeeded", "{:?}", detail.nodes);
+    let db = rusqlite::Connection::open(dir.path().join("data/factory.sqlite3")).unwrap();
+    for node in ["builder", "review_b"] {
+        let mut q=db.prepare("SELECT revision,snapshot FROM issue_node_comments WHERE run_id=?1 AND node_id=?2 ORDER BY revision").unwrap();
+        let rows = q
+            .query_map(rusqlite::params![id, node], |r| {
+                Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 1);
+        assert_eq!(rows[1].0, 2);
+        for (_, raw) in &rows {
+            let s: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(s["summary"], "Same summary");
+        }
+        if node == "review_b" {
+            let s: serde_json::Value = serde_json::from_str(&rows[0].1).unwrap();
+            assert_eq!(s["status"], "blocked");
+        }
+    }
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+            [],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0
+    );
+    dir.comment_status
+        .store(200, std::sync::atomic::Ordering::SeqCst);
+    db.execute(
+        "UPDATE issue_node_comments SET next_at='2000-01-01T00:00:00Z'",
+        [],
+    )
+    .unwrap();
+    super::issue_node_comments::delivered(&dir, 6).await;
+    let next = f.retry(&id).unwrap();
+    assert_ne!(next, id);
+    let d = terminal(&f, &next).await;
+    assert_eq!(d.run.attempt, 2);
+    super::issue_node_comments::delivered(&dir, 12).await;
+    f.shutdown().await;
+    let posts = dir.requests.lock().unwrap();
+    let markers = posts
+        .iter()
+        .filter(|(m, _, b)| {
+            m == "POST"
+                && b["body"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("node-result:v1:"))
+        })
+        .map(|(_, _, b)| {
+            b["body"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(markers.len(), 12);
+}
