@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 mod merge_cleanup;
 mod pr_updates;
+mod releases;
 
 pub struct Github {
     client: Client,
@@ -218,13 +219,105 @@ impl Github {
             for origin in factory.store.tracked_prs()? {
                 let repo = origin.repository.clone();
                 let n = origin.number;
-                let result=async {
-   if !factory.workflow_enabled_for("pr_approved", &origin.actor)? { return Ok(()); }let profile=s.profile_for(&origin.actor).context("Tracked source no longer authorized")?;ensure!(profile.allows_actor("pr_approved")&&profile.allows_owner(repo.split('/').next().unwrap()),"Tracked source no longer authorized");let api=factory.github(&factory.store.token_for(&origin.actor).await?)?;api.verify_actor(&origin.actor).await?;let pr=api.pr(&repo,n).await?;ensure!(pr["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)),"Tracked PR author mismatch");if pr["state"]!="open" {return Ok(())}let sha=pr["head"]["sha"].as_str().context("PR head missing")?;
-   let reviews=api.pages(&format!("/repos/{repo}/pulls/{n}/reviews")).await;let comments=api.pages(&format!("/repos/{repo}/issues/{n}/comments")).await;
-   let approved=reviews.as_ref().is_ok_and(|rows|rows.iter().any(|r|r["state"]=="APPROVED"&&r["commit_id"].as_str().is_some_and(|c|c.eq_ignore_ascii_case(sha))));
-   let fresh_comments:Vec<_>=comments.as_ref().map(|rows|rows.iter().filter(|c|c["body"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("ok")&&c["user"]["login"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&origin.actor)&&pr["user"]["login"].as_str().is_some_and(|p|p.eq_ignore_ascii_case(a)))).filter_map(|c|c["id"].as_u64()).filter(|id|factory.store.observation(&format!("approval-comment:{repo}#{n}:{id}")).ok().flatten().is_none()).collect()).unwrap_or_default();
-   if approved||!fresh_comments.is_empty(){let source=json!({"event_id":origin.event_id,"trigger_id":"new_issue","repository":origin.issue_repository,"number":origin.issue_number,"actor":origin.actor,"url":format!("https://github.com/{}/issues/{}",origin.issue_repository,origin.issue_number)});let e=pr_event("pr_approved",format!("approval:{repo}#{n}@{sha}"),&repo,n,&origin.actor,&pr,json!({"pull_request":pr,"source_issue":source}))?;factory.enqueue_approval(e,&fresh_comments,approved)?;}
-   if reviews.is_err()&&comments.is_err(){bail!("Both approval endpoints failed")};Ok::<(),anyhow::Error>(())}.await;
+                let result = async {
+                    if !factory.workflow_enabled_for("pr_approved", &origin.actor)? {
+                        return Ok(());
+                    }
+                    let profile = s
+                        .profile_for(&origin.actor)
+                        .context("Tracked source no longer authorized")?;
+                    ensure!(
+                        profile.allows_actor("pr_approved")
+                            && profile.allows_owner(repo.split('/').next().unwrap()),
+                        "Tracked source no longer authorized"
+                    );
+                    let api = factory.github(&factory.store.token_for(&origin.actor).await?)?;
+                    api.verify_actor(&origin.actor).await?;
+                    let pr = api.pr(&repo, n).await?;
+                    ensure!(
+                        pr["user"]["login"]
+                            .as_str()
+                            .is_some_and(|actor| actor.eq_ignore_ascii_case(&origin.actor)),
+                        "Tracked PR author mismatch"
+                    );
+                    if pr["state"] != "open" && pr["merged"] != true {
+                        return Ok(());
+                    }
+                    let sha = pr["head"]["sha"].as_str().context("PR head missing")?;
+                    let reviews = api.pages(&format!("/repos/{repo}/pulls/{n}/reviews")).await;
+                    let comments = api.pages(&format!("/repos/{repo}/issues/{n}/comments")).await;
+                    let approved = pr["state"] == "open"
+                        && reviews.as_ref().is_ok_and(|rows| {
+                            rows.iter().any(|review| {
+                                review["state"] == "APPROVED"
+                                    && review["commit_id"]
+                                        .as_str()
+                                        .is_some_and(|commit| commit.eq_ignore_ascii_case(sha))
+                            })
+                        });
+                    let mut fresh_comments = Vec::new();
+                    let mut signal = None;
+                    if let Ok(rows) = &comments {
+                        for comment in rows {
+                            if !comment["user"]["login"]
+                                .as_str()
+                                .is_some_and(|actor| actor.eq_ignore_ascii_case(&origin.actor))
+                            {
+                                continue;
+                            }
+                            let body = comment["body"].as_str().unwrap_or("").trim();
+                            let command = if body.eq_ignore_ascii_case("release") {
+                                "release"
+                            } else if body.eq_ignore_ascii_case("ok") && pr["state"] == "open" {
+                                "ok"
+                            } else {
+                                continue;
+                            };
+                            let Some(id) = comment["id"].as_u64() else {
+                                continue;
+                            };
+                            if factory
+                                .store
+                                .observation(&format!("approval-comment:{repo}#{n}:{id}"))?
+                                .is_some()
+                            {
+                                continue;
+                            }
+                            fresh_comments.push(id);
+                            if signal.is_none() || command == "release" {
+                                signal = Some((command, id));
+                            }
+                        }
+                    }
+                    if approved || signal.is_some() {
+                        let command = signal.map_or("review", |(command, _)| command);
+                        let source = json!({"event_id":origin.event_id,"trigger_id":"new_issue","repository":origin.issue_repository,"number":origin.issue_number,"actor":origin.actor,"url":format!("https://github.com/{}/issues/{}",origin.issue_repository,origin.issue_number)});
+                        let mut approval = json!({"command":command,"actor":origin.actor,"head_sha":sha});
+                        if let Some((_, id)) = signal {
+                            approval["comment_id"] = json!(id);
+                        }
+                        let prefix = if command == "release" {
+                            "approval-release"
+                        } else {
+                            "approval"
+                        };
+                        let event = pr_event(
+                            "pr_approved",
+                            format!("{prefix}:{repo}#{n}@{sha}"),
+                            &repo,
+                            n,
+                            &origin.actor,
+                            &pr,
+                            json!({"pull_request":pr,"source_issue":source,"approval":approval}),
+                        )?;
+                        factory.enqueue_approval(event, &fresh_comments, approved)?;
+                    }
+                    if reviews.is_err() && comments.is_err() {
+                        bail!("Both approval endpoints failed");
+                    }
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
                 if let Err(e) = result {
                     failures.push(format!("Approval {repo}#{n}: {e}"));
                 }
@@ -326,6 +419,26 @@ impl Github {
     ) -> Result<()> {
         let data = &result["data"];
         let action = |name| data.get(name).filter(|v| !v.is_null());
+        if action("release").is_some() {
+            ensure!(
+                event.release_requested(),
+                "Release requires an authorized release comment"
+            );
+            ensure!(
+                node_id == RELEASE_NODE_ID,
+                "Only the assigned release node can publish a release"
+            );
+            ensure!(
+                ["publish", "update_pr", "merge", "review", "comment"]
+                    .iter()
+                    .all(|key| action(key).is_none()),
+                "release cannot be combined with other actions"
+            );
+            ensure!(
+                result["status"] == "succeeded",
+                "Only succeeded results can publish a release"
+            );
+        }
         // Validate the entire request before any externally visible mutation.
         if let Some(update) = action("update_pr") {
             ensure!(
@@ -341,7 +454,7 @@ impl Github {
                 "update_pr must be an empty object; Factory selects the PR branch"
             );
             ensure!(
-                ["publish", "merge", "review", "comment"]
+                ["publish", "merge", "review", "comment", "release"]
                     .iter()
                     .all(|k| action(k).is_none()),
                 "update_pr cannot be combined with other actions"
@@ -500,6 +613,14 @@ impl Github {
                 "PR updated during this run; new approval required before merge"
             );
             self.merge_and_cleanup(event, &check_active).await?;
+            factory.store.observe(
+                &format!("pr-merge:{run}"),
+                &json!({"repository":event.repository,"number":event.number,"head_sha":event.head_sha}),
+            )?;
+        }
+        if let Some(release) = action("release") {
+            self.publish_release(factory, event, run, workspace, release, &check_active)
+                .await?;
         }
         for kind in ["review", "comment"] {
             let Some(value) = action(kind) else { continue };

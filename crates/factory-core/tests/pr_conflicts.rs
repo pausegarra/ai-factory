@@ -426,6 +426,95 @@ git commit -m 'fix: resolve PR conflicts'
 "#;
 
 #[tokio::test]
+async fn release_authorization_does_not_survive_a_published_conflict_correction() {
+    let mut f = Fixture::new().await;
+    f.event.payload["approval"] = json!({"command":"release","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    f.agent(REPAIR, json!({"update_pr":{}}));
+    let d = f.run().await;
+    assert_eq!(d.run.status, "blocked", "{d:?}");
+    assert_eq!(
+        d.nodes
+            .iter()
+            .find(|node| node.id == "factory_release")
+            .unwrap()
+            .status,
+        "skipped"
+    );
+    assert!(f.writes.lock().unwrap().is_empty());
+    assert_ne!(git(&f.remote, &["rev-parse", "feature"]), f.event.head_sha);
+}
+
+#[tokio::test]
+async fn release_step_never_starts_after_failed_merge() {
+    let mut f = Fixture::new().await;
+    f.event.payload["approval"] = json!({"command":"release","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    one_node_approval_flow(&f);
+    // Fixture denies merge; release preparation must never reach GitHub.
+    f.agent("", json!({"merge":{"method":"squash"}}));
+    let d = f.run().await;
+    assert_eq!(d.run.status, "failed", "{d:?}");
+    assert_eq!(
+        d.nodes
+            .iter()
+            .find(|node| node.id == "factory_release")
+            .unwrap()
+            .status,
+        "skipped"
+    );
+    assert_eq!(
+        *f.writes.lock().unwrap(),
+        vec!["PUT /repos/acme/repo/pulls/5/merge"]
+    );
+}
+
+#[tokio::test]
+async fn approved_trigger_cannot_succeed_without_a_factory_merge_receipt() {
+    for data in [
+        json!({"verification":{"approval_current":false,"merge_requested":false}}),
+        json!({"pr_merge":{"merged":true,"cleanup_completed":true}}),
+    ] {
+        let f = Fixture::new().await;
+        one_node_approval_flow(&f);
+        f.agent("", data);
+        let d = f.run().await;
+        assert_eq!(d.run.status, "blocked", "{d:?}");
+        assert!(d
+            .run
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("merge and source branch cleanup were not confirmed"));
+        assert!(f.writes.lock().unwrap().is_empty());
+        assert_eq!(git(&f.remote, &["rev-parse", "feature"]), f.event.head_sha);
+    }
+}
+
+#[tokio::test]
+async fn approved_trigger_merges_without_querying_github_reviews() {
+    let f = Fixture::new().await;
+    one_node_approval_flow(&f);
+    // This saved custom prompt reproduces the misleading instruction from the run.
+    let mut settings = f.factory.settings().unwrap();
+    settings.flows[1].nodes[0].prompt = "Check current GitHub reviews before merging".into();
+    f.factory.save_settings(settings).unwrap();
+    std::fs::write(f.dir.path().join("allow-merge"), "").unwrap();
+    std::fs::write(f.dir.path().join("allow-delete"), "").unwrap();
+    f.agent("", json!({"merge":{"method":"squash"}}));
+    let d = f.run().await;
+    assert_eq!(d.run.status, "succeeded", "{d:?}");
+    assert_eq!(
+        *f.writes.lock().unwrap(),
+        vec![
+            "PUT /repos/acme/repo/pulls/5/merge",
+            "DELETE /repos/acme/repo/git/refs/heads/feature"
+        ]
+    );
+    let prompt = std::fs::read_to_string(run_memory(&f, &d.run.id).join("repair.prompt")).unwrap();
+    assert!(prompt.contains("The pr_approved trigger is the approval authority for event.head_sha"));
+    assert!(prompt.contains("Do not query GitHub reviews or comments to reconfirm approval"));
+}
+
+#[tokio::test]
 async fn resolves_against_live_base_publishes_original_branch_and_requires_new_approval() {
     let f = Fixture::new().await;
     f.agent(REPAIR, json!({"update_pr":{}}));
@@ -844,7 +933,7 @@ async fn queued_approval_prepares_live_base_only_after_previous_merge_and_cleanu
     f.factory.shutdown().await;
 
     assert_eq!(first_result.run.status, "succeeded", "{first_result:?}");
-    assert_eq!(second_result.run.status, "succeeded", "{second_result:?}");
+    assert_eq!(second_result.run.status, "blocked", "{second_result:?}");
     assert_eq!(
         std::fs::read_to_string(run_memory(&f, &first).join("base"))
             .unwrap()
@@ -917,7 +1006,7 @@ async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
 
     let first_result = f.wait(&first).await;
     let stale_result = f.wait(&stale).await;
-    assert_eq!(first_result.run.status, "succeeded", "{first_result:?}");
+    assert_eq!(first_result.run.status, "blocked", "{first_result:?}");
     assert_eq!(stale_result.run.status, "failed", "{stale_result:?}");
     assert_eq!(stale_result.event.head_sha, stale_head);
     assert!(!run_memory(&f, &stale).join("started").exists());
@@ -929,7 +1018,7 @@ async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
     let new_attempt = f.factory.enqueue(new_event).unwrap().unwrap();
     let new_result = f.wait(&new_attempt).await;
     f.factory.shutdown().await;
-    assert_eq!(new_result.run.status, "succeeded", "{new_result:?}");
+    assert_eq!(new_result.run.status, "blocked", "{new_result:?}");
     assert_eq!(
         std::fs::read_to_string(run_memory(&f, &new_attempt).join("head"))
             .unwrap()
@@ -961,7 +1050,7 @@ async fn failed_merge_action_releases_next_queued_approval_without_advancing_bas
     let second_result = f.wait(&second).await;
     f.factory.shutdown().await;
     assert_eq!(first_result.run.status, "failed", "{first_result:?}");
-    assert_eq!(second_result.run.status, "succeeded", "{second_result:?}");
+    assert_eq!(second_result.run.status, "blocked", "{second_result:?}");
     assert_eq!(
         std::fs::read_to_string(run_memory(&f, &second).join("base"))
             .unwrap()

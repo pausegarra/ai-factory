@@ -52,6 +52,215 @@ fn setup(root: std::path::PathBuf, base: &str) -> Arc<Factory> {
 fn pr() -> Value {
     json!({"number":5,"title":"PR title","body":"Closes #1","state":"open","html_url":"https://github.com/acme/repo/pull/5","base":{"repo":{"full_name":"acme/repo"}},"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"feature"},"user":{"login":"alice"},"requested_reviewers":[{"login":"alice"}]})
 }
+
+type ApprovalState = Arc<Mutex<(Value, Vec<Value>, Vec<Value>)>>;
+
+async fn approval_fixture(state: ApprovalState) -> (tempfile::TempDir, Arc<Factory>) {
+    let base = server(move |path, _| {
+        if path == "/user" {
+            return (200, json!({"login":"alice"}));
+        }
+        if path.starts_with("/search/") {
+            return (
+                200,
+                json!({"incomplete_results":false,"total_count":0,"items":[]}),
+            );
+        }
+        let state = state.lock().unwrap();
+        if path == "/repos/acme/repo/pulls/5" {
+            return (200, state.0.clone());
+        }
+        if path.contains("/comments?") {
+            return (200, json!(state.1));
+        }
+        if path.contains("/reviews?") {
+            return (200, json!(state.2));
+        }
+        panic!("unexpected {path}");
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let factory = setup(dir.path().into(), &base);
+    let source = factory
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            1,
+            "[AI] source",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    let store = factory_core::context::factory::infrastructure::repositories::store::Store::open(
+        dir.path(),
+    )
+    .unwrap();
+    store.track_pr("acme/repo", 5, &source).unwrap();
+    (dir, factory)
+}
+
+fn approval_events(factory: &Factory) -> Vec<TriggerEvent> {
+    factory
+        .snapshot()
+        .unwrap()
+        .runs
+        .into_iter()
+        .filter(|run| run.trigger_id == "pr_approved")
+        .map(|run| factory.run_detail(&run.id).unwrap().event)
+        .collect()
+}
+
+#[tokio::test]
+async fn approval_commands_require_exact_authorized_comments_and_capture_intent() {
+    for (body, author, state, merged, reviewed, expected) in [
+        (" release ", "ALICE", "open", false, false, "release"),
+        (" ReLeAsE ", "alice", "closed", true, false, "release"),
+        ("OK", "alice", "open", false, false, "ok"),
+        ("OK, publish", "alice", "open", false, false, ""),
+        ("release please", "alice", "open", false, false, ""),
+        ("release", "mallory", "open", false, false, ""),
+        ("release", "alice", "closed", false, false, ""),
+        ("OK", "alice", "closed", true, false, ""),
+        ("release", "mallory", "closed", true, true, ""),
+        ("unrelated", "alice", "open", false, true, "review"),
+        ("release", "mallory", "open", false, true, "review"),
+        ("release", "alice", "open", false, true, "release"),
+    ] {
+        let mut pull = pr();
+        pull["state"] = json!(state);
+        pull["merged"] = json!(merged);
+        pull["body"] = json!("release\nOK, publish");
+        let comments = vec![json!({"id":7,"body":body,"user":{"login":author}})];
+        let reviews = if reviewed {
+            vec![json!({"state":"APPROVED","commit_id":"a".repeat(40),"body":"release"})]
+        } else {
+            vec![]
+        };
+        let fixture = Arc::new(Mutex::new((pull, comments, reviews)));
+        let (_dir, factory) = approval_fixture(fixture).await;
+        factory.poll_now().await.unwrap();
+        let events = approval_events(&factory);
+        assert_eq!(
+            events.len(),
+            usize::from(!expected.is_empty()),
+            "{body}/{author}/{state}/{merged}/{reviewed}"
+        );
+        if let Some(event) = events.first() {
+            let mut approval =
+                json!({"command":expected,"actor":"alice","head_sha":"a".repeat(40)});
+            if expected != "review" {
+                approval["comment_id"] = json!(7);
+            }
+            assert_eq!(event.payload["approval"], approval);
+            let prefix = if expected == "release" {
+                "approval-release"
+            } else {
+                "approval"
+            };
+            assert_eq!(
+                event.event_id,
+                format!("{prefix}:acme/repo#5@{}", "a".repeat(40))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn release_comments_upgrade_ok_once_and_cannot_approve_another_head() {
+    let state = Arc::new(Mutex::new((
+        pr(),
+        vec![json!({"id":7,"body":"OK","user":{"login":"alice"}})],
+        vec![],
+    )));
+    let (_dir, factory) = approval_fixture(state.clone()).await;
+    factory.poll_now().await.unwrap();
+    assert_eq!(approval_events(&factory).len(), 1);
+    {
+        let mut state = state.lock().unwrap();
+        state.0["state"] = json!("closed");
+        state.0["merged"] = json!(true);
+        state
+            .1
+            .push(json!({"id":8,"body":"release","user":{"login":"alice"}}));
+    }
+    factory.poll_now().await.unwrap();
+    let events = approval_events(&factory);
+    assert_eq!(
+        events.len(),
+        2,
+        "fresh release upgrades prior OK on merged PR"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.payload["approval"]["command"] == "release")
+            .count(),
+        1
+    );
+    factory.poll_now().await.unwrap();
+    assert_eq!(approval_events(&factory).len(), 2, "release deduplicated");
+    {
+        let mut state = state.lock().unwrap();
+        state.0["state"] = json!("open");
+        state.0["merged"] = json!(false);
+        state.0["head"]["sha"] = json!("b".repeat(40));
+    }
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        approval_events(&factory).len(),
+        2,
+        "consumed release cannot authorize another head"
+    );
+    state
+        .lock()
+        .unwrap()
+        .1
+        .push(json!({"id":9,"body":"release","user":{"login":"alice"}}));
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        approval_events(&factory).len(),
+        3,
+        "new release binds new head"
+    );
+}
+
+#[tokio::test]
+async fn release_dominates_simultaneous_ok_and_review_regardless_of_comment_order() {
+    for release_first in [true, false] {
+        let mut comments = vec![
+            json!({"id":7,"body":"release","user":{"login":"alice"}}),
+            json!({"id":8,"body":"OK","user":{"login":"alice"}}),
+        ];
+        if !release_first {
+            comments.reverse();
+        }
+        let reviews = vec![json!({"state":"APPROVED","commit_id":"a".repeat(40)})];
+        let state = Arc::new(Mutex::new((pr(), comments, reviews)));
+        let (dir, factory) = approval_fixture(state).await;
+        factory.poll_now().await.unwrap();
+        let events = approval_events(&factory);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["approval"]["command"], "release");
+        assert_eq!(events[0].payload["approval"]["comment_id"], 7);
+        let store =
+            factory_core::context::factory::infrastructure::repositories::store::Store::open(
+                dir.path(),
+            )
+            .unwrap();
+        for id in [7, 8] {
+            assert!(store
+                .observation(&format!("approval-comment:acme/repo#5:{id}"))
+                .unwrap()
+                .is_some());
+        }
+        factory.poll_now().await.unwrap();
+        assert_eq!(
+            approval_events(&factory).len(),
+            1,
+            "review cannot enqueue another merge after release approval"
+        );
+    }
+}
 #[tokio::test]
 async fn issue_prefix_and_refresh_checked_locally_with_actor_token() {
     let refreshed = Arc::new(Mutex::new(false));
