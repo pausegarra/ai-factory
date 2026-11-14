@@ -419,8 +419,13 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
                         .is_some_and(|b| b.contains("<!-- ai-factory:node-result:v1:"))
                     {
                         let db = rusqlite::Connection::open(root.join("factory.sqlite3")).unwrap();
-                        let count:u32=db.query_row("SELECT count(*) FROM issue_node_comments c JOIN nodes n ON n.run_id=c.run_id AND n.node_id=c.node_id WHERE json_extract(n.json,'$.status') IN ('succeeded','blocked','failed','skipped')",[],|r|r.get(0)).unwrap();
-                        assert!(count > 0, "POST before terminal commit");
+                        assert!(
+                            issue_node_comments::committed_comment_snapshot(
+                                &db,
+                                input["body"].as_str().unwrap(),
+                            ),
+                            "POST without matching committed terminal snapshot"
+                        );
                     }
                     let row = json!({"id":9001+comments.len(),"body":input["body"],"user":{"login":"alice"}});
                     comments.push(row.clone());
