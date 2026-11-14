@@ -21,6 +21,7 @@ const previewSettings: Settings = {
   token_profiles: [],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
+  issue_node_comments_enabled: true,
   codex_yolo: false,
   poll_interval_seconds: 15,
   max_concurrent: 4,

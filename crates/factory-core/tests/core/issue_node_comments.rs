@@ -191,3 +191,31 @@ printf '%s' 'invalid' > "$AI_FACTORY_RESULT_PATH""#,
         }
     }
 }
+
+#[tokio::test]
+async fn issue_node_comments_disabled_preserves_explicit_action() {
+    let script = r#"cat >/dev/null
+printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{"comment":"Comentario explícito"}}' > "$AI_FACTORY_RESULT_PATH""#;
+    let (dir, f) = fixture(script, 4);
+    let mut s = f.settings().unwrap();
+    s.issue_node_comments_enabled = false;
+    s.flows[0].nodes[0].result_schema = json!({"type":"object"});
+    s.flows[0].nodes[0].access = "write".into();
+    f.save_settings(s).unwrap();
+    let id = enqueue(&f);
+    f.start();
+    let detail = terminal(&f, &id).await;
+    f.shutdown().await;
+    assert_eq!(detail.nodes[0].status, "succeeded");
+    let messages = bodies(&dir);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("Comentario explícito"));
+    assert!(!messages[0].contains("node-result:v1:"));
+    assert_eq!(
+        connection(&dir)
+            .query_row("SELECT count(*) FROM issue_node_comments", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+}

@@ -42,6 +42,9 @@ async fn connector_transition_filters_and_preserves_native_sink() {
             connector("b", "b", false, json!(["run_started", "run_failed"]))
         ]),
     );
+    let mut settings = f.settings().unwrap();
+    settings.issue_node_comments_enabled = false;
+    f.save_settings(settings).unwrap();
     let native = Arc::new(common::notifications::RecordingNotifications::default());
     f.set_run_notification_sink(native.clone());
     f.start_notification_delivery();
@@ -68,6 +71,13 @@ async fn connector_transition_filters_and_preserves_native_sink() {
         vec!["running", "failed"]
     );
     assert_eq!(f.run_detail(&id).unwrap().run.status, "failed");
+    let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issue_node_comments", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
 }
 #[tokio::test]
 async fn connector_all_events_are_filtered_and_non_events_are_silent() {

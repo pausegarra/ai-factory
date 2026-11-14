@@ -1,3 +1,4 @@
+import { noticeSettings } from "./fixtures/notices";
 import { it, expect, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -78,4 +79,16 @@ it("transports independent ceilings and reserved capacity through existing IPC",
   vi.mocked(invoke).mockResolvedValueOnce(snapshot);
   expect((await factoryApi.snapshot()).capacity).toEqual(snapshot.capacity);
   expect(invoke).toHaveBeenLastCalledWith("get_snapshot");
+});
+
+it("preserves both automatic issue comment values through settings IPC", async () => {
+  for (const enabled of [false, true]) {
+    const settings = { ...noticeSettings(), issue_node_comments_enabled: enabled };
+    vi.mocked(invoke).mockResolvedValueOnce(settings);
+    expect(await factoryApi.saveSettings(settings)).toEqual(settings);
+    expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
+    vi.mocked(invoke).mockResolvedValueOnce(settings);
+    expect((await factoryApi.settings()).issue_node_comments_enabled).toBe(enabled);
+    expect(invoke).toHaveBeenLastCalledWith("get_settings");
+  }
 });
