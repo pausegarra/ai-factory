@@ -220,3 +220,11 @@ docker run --rm --init --platform linux/amd64 \
 ```
 
 The opt-in flag lets the verifier normalize three ELF padding bytes in the downloaded AppImage build helper if Rosetta rejects its AppImage marker. It retries packaging only after a confirmed linuxdeploy failure. Application code and generated installers are not patched by this workaround. Native x64 Linux hosts do not need the flag.
+
+### Agent usage
+
+Choose **View Usage** at the bottom of the sidebar to query every configured Codex account (including accounts without a GitHub profile binding) and the configured OpenCode CLI. **Refresh** requests a new snapshot while the dialog is open. Nothing is polled in the background and no usage history is saved.
+
+Codex remaining percentages are calculated as 100% minus reported usage for each quota window. Absolute token amounts are not inferred. Pending and failed accounts stay visible without invented percentages. Failed refreshes retain previous valid values with their original check time and a stale notice.
+
+OpenCode uses the experimental Console/Go usage API through a temporary private CLI process. Reported percentages keep their original meaning; the dialog explains when a remaining percentage cannot be established. Historical `stats` are never interpreted as remaining quota. Versions without compatible API/standalone support show an explanation. An explicit absent Console session does not imply that credentials for other providers are missing.

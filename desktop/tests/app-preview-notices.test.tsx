@@ -30,3 +30,11 @@ it("keeps preview guidance without deletion feedback or native events", async ()
   expect(invoke).not.toHaveBeenCalled();
   expect(listen).not.toHaveBeenCalled();
 });
+it("opens contextual usage preview without native account calls", async () => {
+  render(<App />);
+  await screen.findByRole("heading", { name: "Factory overview." });
+  fireEvent.click(screen.getByRole("button", { name: "View Usage" }));
+  await screen.findByRole("dialog", { name: "Agent usage" });
+  expect((await screen.findAllByText("Open AI Factory desktop to view agent usage.")).length).toBe(2);
+  expect(invoke).not.toHaveBeenCalled();
+});

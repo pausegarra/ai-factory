@@ -85,6 +85,18 @@ async fn save_settings(
 }
 
 #[tauri::command]
+async fn get_agent_usage(
+    state: State<'_, DesktopState>,
+    agent: String,
+) -> Result<factory_core::AgentUsage, String> {
+    state
+        .factory
+        .agent_usage(&agent)
+        .await
+        .map_err(|_| "Could not query agent usage. Try again.".to_string())
+}
+
+#[tauri::command]
 async fn get_agent_models(
     state: State<'_, DesktopState>,
     agent: String,
@@ -322,6 +334,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_agent_models,
+            get_agent_usage,
             get_agent_accounts,
             start_codex_login,
             remove_agent_account,
