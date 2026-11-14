@@ -18,7 +18,39 @@ fn approval_workflow_shows_merge_then_version_bump_before_any_event() {
 }
 
 #[test]
-fn stored_single_merge_workflow_migrates_preserving_agent_and_activation() {
+fn stored_approval_workflow_is_never_rewritten_on_read() {
+    for version in [None, Some(0), Some(1)] {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("approval_workflow_version");
+        if let Some(version) = version {
+            value["approval_workflow_version"] = json!(version);
+        }
+        value["flows"][1]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let node = &mut value["flows"][1]["nodes"][0];
+        node["name"] = json!("publish");
+        node["agent"] = json!("opencode");
+        node["model"] = json!("custom-model");
+        node["prompt"] = json!("Only perform this configured step.");
+        value["flows"][1]["enabled"] = json!(false);
+        let expected = value["flows"].clone();
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(&settings.flows).unwrap(), expected);
+        let roundtrip: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(&roundtrip.flows).unwrap(), expected);
+    }
+}
+
+#[test]
+fn legacy_graph_matches_editor_on_admission_retry_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let factory = common::open(dir.path().into()).unwrap();
     let mut value = serde_json::to_value(Settings::default()).unwrap();
     value
         .as_object_mut()
@@ -28,19 +60,71 @@ fn stored_single_merge_workflow_migrates_preserving_agent_and_activation() {
         .as_array_mut()
         .unwrap()
         .truncate(1);
-    value["flows"][1]["nodes"][0]["agent"] = json!("opencode");
-    value["flows"][1]["nodes"][0]["model"] = json!("custom-model");
-    value["flows"][1]["enabled"] = json!(false);
-    let settings: Settings = serde_json::from_value(value).unwrap();
-    let flow = &settings.flows[1];
-    assert!(!flow.enabled);
-    assert_eq!(flow.nodes.len(), 2);
-    assert_eq!(flow.nodes[1].agent, "opencode");
-    assert_eq!(flow.nodes[1].model, "custom-model");
-    assert_eq!(flow.nodes[1].depends_on, vec!["publish"]);
-    let roundtrip: Settings =
-        serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
-    assert_eq!(roundtrip.flows[1].nodes.len(), 2);
+    value["flows"][1]["nodes"][0]["name"] = json!("publish");
+    let expected = value["flows"][1].clone();
+    // Seed the legacy boundary directly: saving already-deserialized settings would hide injection.
+    let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO settings VALUES(1,?1)",
+        [value.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK");
+    event.trigger_id = "pr_approved".into();
+    event.head_sha = "a".repeat(40);
+    let editor = factory.settings().unwrap();
+    assert_eq!(serde_json::to_value(&editor.flows[1]).unwrap(), expected);
+    let id = factory.enqueue(event).unwrap().unwrap();
+    let detail = factory.run_detail(&id).unwrap();
+    assert_eq!(serde_json::to_value(&detail.flow).unwrap(), expected);
+    assert_eq!(
+        detail
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["publish"]
+    );
+    factory.cancel(&id).unwrap();
+    let retry = factory.retry(&id).unwrap();
+    assert_eq!(
+        serde_json::to_value(factory.run_detail(&retry).unwrap().flow).unwrap(),
+        expected
+    );
+    factory.cancel(&retry).unwrap();
+    factory.save_settings(editor).unwrap();
+    drop(factory);
+    let reopened = common::open(dir.path().into()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reopened.settings().unwrap().flows[1]).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn deleting_configured_version_node_stays_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let factory = common::open(dir.path().into()).unwrap();
+    let mut settings = factory.settings().unwrap();
+    settings.flows[1]
+        .nodes
+        .retain(|node| node.id != "version_bump");
+    let expected = serde_json::to_value(&settings.flows[1]).unwrap();
+    factory.save_settings(settings).unwrap();
+    drop(factory);
+    let reopened = common::open(dir.path().into()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reopened.settings().unwrap().flows[1]).unwrap(),
+        expected
+    );
+    let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK");
+    event.trigger_id = "pr_approved".into();
+    event.head_sha = "a".repeat(40);
+    let id = reopened.enqueue(event).unwrap().unwrap();
+    let detail = reopened.run_detail(&id).unwrap();
+    assert_eq!(serde_json::to_value(&detail.flow).unwrap(), expected);
+    assert_eq!(detail.nodes.len(), 1);
 }
 
 #[test]

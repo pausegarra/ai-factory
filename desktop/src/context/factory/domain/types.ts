@@ -63,7 +63,6 @@ export interface Project {
   source_path: string;
 }
 export interface Settings {
-  approval_workflow_version?: number;
   notification_connectors?: NotificationConnector[];
   token_profiles: TokenProfile[];
   codex_bindings?: Record<string, string>;
