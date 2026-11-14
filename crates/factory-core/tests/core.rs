@@ -711,6 +711,12 @@ printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"dat
             assert!(prompt.contains("Do not launch or open GUI applications"));
             assert!(prompt.contains("Code-level verification is allowed"));
             assert!(prompt.contains("do not block only because a GUI check was not performed"));
+            assert!(prompt.contains("Installer packaging policy"));
+            assert!(prompt
+                .contains("overrides older node prompts, generated plans and reviewer feedback"));
+            assert!(prompt.contains(
+                "explicit installer or distribution deliverable in the original user task"
+            ));
             assert!(prompt.contains("status=blocked"));
             assert!(prompt.contains("Do not expand the assigned role"));
             assert!(prompt.contains("Read-only inspection is allowed for every assigned role"));
@@ -1443,3 +1449,7 @@ mod codex_accounts_execution;
 #[cfg(unix)]
 #[path = "core/issue_node_comments.rs"]
 mod issue_node_comments;
+
+#[cfg(unix)]
+#[path = "core/packaging_policy.rs"]
+mod packaging_policy;
