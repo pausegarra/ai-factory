@@ -16,6 +16,13 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn event_consumed(&self, event_id: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedup WHERE event_id=?1 UNION ALL SELECT 1 FROM tracked_pr_origins WHERE event_id=?1 AND trusted=1)",
+            [event_id],
+            |row| row.get(0),
+        )?)
+    }
     pub fn open(root: &Path) -> Result<Self> {
         Self::open_with_credentials(root, Arc::new(crate::context::factory::infrastructure::security::native_credentials::NativeCredentials))
     }

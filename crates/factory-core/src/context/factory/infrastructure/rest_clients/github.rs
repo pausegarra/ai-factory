@@ -2,9 +2,12 @@ use crate::*;
 use anyhow::{bail, ensure, Context};
 use reqwest::{Client, Method};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
+pub(crate) mod http;
 mod merge_cleanup;
 mod node_comments;
+mod polling;
 mod pr_updates;
 mod version_bumps;
 
@@ -12,6 +15,8 @@ pub struct Github {
     client: Client,
     base: String,
     token: String,
+    http: Arc<Mutex<http::HttpState>>,
+    polling: bool,
 }
 impl Github {
     pub fn new(token: &str) -> Result<Self> {
@@ -25,43 +30,17 @@ impl Github {
                 .build()?,
             base: base.trim_end_matches('/').into(),
             token: token.into(),
+            http: Arc::new(Mutex::new(http::HttpState::default())),
+            polling: false,
         })
     }
-    async fn send(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-    ) -> Result<reqwest::Response> {
-        ensure!(
-            path.starts_with('/') && !path.starts_with("//"),
-            "Invalid API path"
-        );
-        let mut req = self
-            .client
-            .request(method, format!("{}{path}", self.base))
-            .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(b) = body {
-            req = req.json(b)
-        }
-        Ok(req.send().await?)
+    pub(crate) fn with_http_state(mut self, state: Arc<Mutex<http::HttpState>>) -> Self {
+        self.http = state;
+        self
     }
-    pub async fn request(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
-        let r = self.send(method, path, body).await?;
-        let status = r.status();
-        if !status.is_success() {
-            bail!(
-                "GitHub API {} for {}",
-                status.as_u16(),
-                path.split('?').next().unwrap_or(path)
-            );
-        }
-        if status == reqwest::StatusCode::NO_CONTENT {
-            return Ok(Value::Null);
-        }
-        Ok(r.json().await?)
+    fn for_polling(mut self) -> Self {
+        self.polling = true;
+        self
     }
     pub async fn verify_actor(&self, actor: &str) -> Result<Value> {
         let v = self.request(Method::GET, "/user", None).await?;
@@ -102,13 +81,17 @@ impl Github {
         bail!("GitHub pagination limit reached; incomplete response")
     }
     async fn search(&self, query: &str) -> Result<Vec<Value>> {
-        let mut pending = vec![(0i64, chrono::Utc::now().timestamp())];
+        let mut pending = vec![(0i64, chrono::Utc::now().timestamp(), false)];
         let mut rows = vec![];
         let mut queries = 0;
-        while let Some((lo, hi)) = pending.pop() {
+        while let Some((lo, hi, partitioned)) = pending.pop() {
             queries += 1;
             ensure!(queries <= 128, "GitHub search partition limit reached");
-            let q = format!("{query} created:{lo}..{hi}"); // Search accepts ISO dates, not Unix timestamps.
+            let q = if partitioned {
+                format!("{query} created:{lo}..{hi}")
+            } else {
+                query.to_string()
+            };
             let stamp = |n| {
                 chrono::DateTime::from_timestamp(n, 0)
                     .unwrap()
@@ -123,6 +106,7 @@ impl Github {
                 &format!("{}/search/issues", self.base),
                 &[
                     ("q", q.as_str()),
+                    ("advanced_search", "true"),
                     ("per_page", "100"),
                     ("page", "1"),
                     ("sort", "created"),
@@ -141,8 +125,8 @@ impl Github {
             if count >= 1000 {
                 ensure!(lo < hi, "GitHub search limit reached within one second");
                 let mid = (lo + hi) / 2;
-                pending.push((lo, mid));
-                pending.push((mid + 1, hi));
+                pending.push((lo, mid, true));
+                pending.push((mid + 1, hi, true));
                 continue;
             }
             let items = first["items"]
@@ -163,231 +147,6 @@ impl Github {
             }
         }
         Ok(rows)
-    }
-    pub(crate) async fn poll(factory: &Factory) -> Result<()> {
-        let s = factory.store.public_settings()?;
-        let mut failures = vec![];
-        for profile in &s.token_profiles {
-            if !profile.allows_actor("new_issue") {
-                continue;
-            }
-            let author = &profile.account;
-            for owner in &profile.owners {
-                let result = async {
-                    if !factory.workflow_enabled_for("new_issue", author)? {
-                        return Ok(());
-                    }
-                    let api = factory.github(&factory.store.token_for(author).await?)?;
-                    api.verify_actor(author).await?;
-                    for row in api
-                        .search(&format!("is:issue is:open user:{owner} author:{author}"))
-                        .await?
-                    {
-                        if row.get("pull_request").is_some() {
-                            continue;
-                        }
-                        let repo = repository(&row)?;
-                        if !repo.split('/').next().unwrap().eq_ignore_ascii_case(owner) {
-                            continue;
-                        }
-                        let n = row["number"].as_u64().context("Invalid issue number")?;
-                        let fresh = api
-                            .request(Method::GET, &format!("/repos/{repo}/issues/{n}"), None)
-                            .await?;
-                        if fresh.get("pull_request").is_some()
-                            || fresh["state"] != "open"
-                            || !fresh["title"].as_str().unwrap_or("").starts_with("[AI]")
-                            || !fresh["user"]["login"]
-                                .as_str()
-                                .is_some_and(|x| x.eq_ignore_ascii_case(author))
-                        {
-                            continue;
-                        }
-                        let mut event = TriggerEvent::issue(
-                            &repo,
-                            n,
-                            fresh["title"].as_str().unwrap(),
-                            author,
-                            fresh["body"].as_str().unwrap_or(""),
-                        );
-                        ensure!(
-                            fresh["html_url"] == event.url,
-                            "Issue URL identity mismatch"
-                        );
-                        event.payload = json!({"issue":fresh});
-                        factory.enqueue(event)?;
-                    }
-                    Ok::<(), anyhow::Error>(())
-                }
-                .await;
-                if let Err(e) = result {
-                    failures.push(format!("Issues {owner}/{author}: {e}"));
-                }
-            }
-        }
-        {
-            for origin in factory.store.tracked_prs()? {
-                let repo = origin.repository.clone();
-                let n = origin.number;
-                let result = async {
-                    if !factory.workflow_enabled_for("pr_approved", &origin.actor)? {
-                        return Ok(());
-                    }
-                    let profile = s
-                        .profile_for(&origin.actor)
-                        .context("Tracked source no longer authorized")?;
-                    ensure!(
-                        profile.allows_actor("pr_approved")
-                            && profile.allows_owner(repo.split('/').next().unwrap()),
-                        "Tracked source no longer authorized"
-                    );
-                    let api = factory.github(&factory.store.token_for(&origin.actor).await?)?;
-                    api.verify_actor(&origin.actor).await?;
-                    let pr = api.pr(&repo, n).await?;
-                    ensure!(
-                        pr["user"]["login"]
-                            .as_str()
-                            .is_some_and(|actor| actor.eq_ignore_ascii_case(&origin.actor)),
-                        "Tracked PR author mismatch"
-                    );
-                    if pr["state"] != "open" {
-                        return Ok(());
-                    }
-                    let sha = pr["head"]["sha"].as_str().context("PR head missing")?;
-                    let reviews = api.pages(&format!("/repos/{repo}/pulls/{n}/reviews")).await;
-                    let comments = api.pages(&format!("/repos/{repo}/issues/{n}/comments")).await;
-                    let approved = pr["state"] == "open"
-                        && reviews.as_ref().is_ok_and(|rows| {
-                            rows.iter().any(|review| {
-                                review["state"] == "APPROVED"
-                                    && review["commit_id"]
-                                        .as_str()
-                                        .is_some_and(|commit| commit.eq_ignore_ascii_case(sha))
-                            })
-                        });
-                    let mut fresh_comments = Vec::new();
-                    let mut signal = None;
-                    if let Ok(rows) = &comments {
-                        for comment in rows {
-                            if !comment["user"]["login"]
-                                .as_str()
-                                .is_some_and(|actor| actor.eq_ignore_ascii_case(&origin.actor))
-                            {
-                                continue;
-                            }
-                            let body = comment["body"].as_str().unwrap_or("").trim();
-                            let command = if body.eq_ignore_ascii_case("ok") {
-                                "ok"
-                            } else {
-                                continue;
-                            };
-                            let Some(id) = comment["id"].as_u64() else {
-                                continue;
-                            };
-                            if factory
-                                .store
-                                .observation(&format!("approval-comment:{repo}#{n}:{id}"))?
-                                .is_some()
-                            {
-                                continue;
-                            }
-                            fresh_comments.push(id);
-                            if signal.is_none() {
-                                signal = Some((command, id));
-                            }
-                        }
-                    }
-                    if approved || signal.is_some() {
-                        let command = signal.map_or("review", |(command, _)| command);
-                        let source = json!({"event_id":origin.event_id,"trigger_id":"new_issue","repository":origin.issue_repository,"number":origin.issue_number,"actor":origin.actor,"url":format!("https://github.com/{}/issues/{}",origin.issue_repository,origin.issue_number)});
-                        let mut approval = json!({"command":command,"actor":origin.actor,"head_sha":sha});
-                        if let Some((_, id)) = signal {
-                            approval["comment_id"] = json!(id);
-                        }
-                        let event = pr_event(
-                            "pr_approved",
-                            format!("approval:{repo}#{n}@{sha}"),
-                            &repo,
-                            n,
-                            &origin.actor,
-                            &pr,
-                            json!({"pull_request":pr,"source_issue":source,"approval":approval}),
-                        )?;
-                        factory.enqueue_approval(event, &fresh_comments, approved)?;
-                    }
-                    if reviews.is_err() && comments.is_err() {
-                        bail!("Both approval endpoints failed");
-                    }
-                    Ok::<(), anyhow::Error>(())
-                }
-                .await;
-                if let Err(e) = result {
-                    failures.push(format!("Approval {repo}#{n}: {e}"));
-                }
-            }
-        }
-        {
-            for profile in &s.token_profiles {
-                if !profile.allows_actor("pr_review") {
-                    continue;
-                }
-                let reviewer = &profile.account;
-                for owner in &profile.owners {
-                    let result = async {
-                        if !factory.workflow_enabled_for("pr_review", reviewer)? {
-                            return Ok(());
-                        }
-                        let api = factory.github(&factory.store.token_for(reviewer).await?)?;
-                        api.verify_actor(reviewer).await?;
-                        let rows = api
-                            .search(&format!(
-                                "is:pr is:open user:{owner} review-requested:{reviewer}"
-                            ))
-                            .await?;
-                        let mut candidates = Vec::new();
-                        for row in rows {
-                            let repo = repository(&row)?;
-                            if !repo.split('/').next().unwrap().eq_ignore_ascii_case(owner) {
-                                continue;
-                            }
-                            let n = row["number"].as_u64().context("Invalid PR number")?;
-                            let pr = api.pr(&repo, n).await?;
-                            if pr["state"] != "open"
-                                || !pr["requested_reviewers"].as_array().is_some_and(|rs| {
-                                    rs.iter().any(|r| {
-                                        r["login"]
-                                            .as_str()
-                                            .is_some_and(|v| v.eq_ignore_ascii_case(reviewer))
-                                    })
-                                })
-                            {
-                                continue;
-                            }
-                            candidates.push(pr_event(
-                                "pr_review",
-                                String::new(),
-                                &repo,
-                                n,
-                                reviewer,
-                                &pr,
-                                json!({"pull_request":pr,"reviewer":reviewer}),
-                            )?);
-                        }
-                        factory.enqueue_review_scan(owner, reviewer, &candidates)?;
-                        Ok::<(), anyhow::Error>(())
-                    }
-                    .await;
-                    if let Err(e) = result {
-                        failures.push(format!("Review {owner}/{reviewer}: {e}"));
-                    }
-                }
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            bail!("{}", failures.join("; "))
-        }
     }
     pub async fn pr(&self, repo: &str, n: u64) -> Result<Value> {
         ensure!(valid_repository(repo) && n > 0, "Invalid PR identity");
