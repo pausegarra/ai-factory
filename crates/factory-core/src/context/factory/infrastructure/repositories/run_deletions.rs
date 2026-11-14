@@ -179,6 +179,7 @@ impl Store {
         let event_id: String =
             tx.query_row("SELECT event_id FROM runs WHERE id=?1", [id], |r| r.get(0))?;
         tx.execute("UPDATE dedup SET run_id='consumed' WHERE run_id=?1", [id])?;
+        tx.execute("DELETE FROM issue_node_comments WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6,?9,?10) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:"),format!("version-workspace:{id}"),format!("pr-version:{id}")])?;
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;

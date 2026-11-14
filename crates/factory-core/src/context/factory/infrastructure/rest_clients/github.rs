@@ -4,6 +4,7 @@ use reqwest::{Client, Method};
 use serde_json::{json, Value};
 
 mod merge_cleanup;
+mod node_comments;
 mod pr_updates;
 mod version_bumps;
 
@@ -73,8 +74,16 @@ impl Github {
         Ok(v)
     }
     async fn pages(&self, path: &str) -> Result<Vec<Value>> {
+        self.pages_guarded(path, &|| true).await
+    }
+    async fn pages_guarded(
+        &self,
+        path: &str,
+        can_read: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<Vec<Value>> {
         let mut all = vec![];
         for page in 1..=100 {
+            ensure!(can_read(), "GitHub request no longer allowed");
             let sep = if path.contains('?') { "&" } else { "?" };
             let v = self
                 .request(
@@ -83,6 +92,7 @@ impl Github {
                     None,
                 )
                 .await?;
+            ensure!(can_read(), "GitHub request no longer allowed");
             let rows = v.as_array().context("Malformed GitHub list response")?;
             all.extend(rows.iter().cloned());
             if rows.len() < 100 {

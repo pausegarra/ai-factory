@@ -50,17 +50,28 @@ async fn fixture() -> (
     let server_sha = sha.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
+    let comments = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
     let server = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
         loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                break;
+            let (mut socket, _) = tokio::select! {
+                accepted=listener.accept()=>match accepted {Ok(socket)=>socket,Err(_)=>break},
+                _=handlers.join_next(), if !handlers.is_empty()=>continue,
             };
             let sha = server_sha.clone();
-            tokio::spawn(async move {
-                let mut raw = vec![0; 16384];
-                let count = socket.read(&mut raw).await.unwrap();
-                let request = String::from_utf8_lossy(&raw[..count]);
-                let path = request.split_whitespace().nth(1).unwrap_or("/");
+            let comments = comments.clone();
+            handlers.spawn(async move {
+                let mut raw=Vec::new();
+                let (start,length)=loop {
+                    let mut buffer=[0;4096];let count=socket.read(&mut buffer).await.unwrap();if count==0{return;}raw.extend_from_slice(&buffer[..count]);
+                    if let Some(end)=raw.windows(4).position(|w|w==b"\r\n\r\n") {
+                        let headers=String::from_utf8_lossy(&raw[..end]);let length=headers.lines().filter_map(|s|s.split_once(':')).find(|(name,_)|name.eq_ignore_ascii_case("content-length")).and_then(|(_,n)|n.trim().parse::<usize>().ok()).unwrap_or(0);break(end+4,length);
+                    }
+                };
+                while raw.len()<start+length {let mut buffer=[0;4096];let count=socket.read(&mut buffer).await.unwrap();if count==0{return;}raw.extend_from_slice(&buffer[..count]);}
+                let request=String::from_utf8_lossy(&raw[..start]);
+                let mut first=request.split_whitespace();let method=first.next().unwrap();let path=first.next().unwrap();
+                let input=if length>0{serde_json::from_slice::<serde_json::Value>(&raw[start..start+length]).unwrap()}else{serde_json::Value::Null};
                 let body = if path == "/user" {
                     json!({"login":"alice"})
                 } else if path.starts_with("/search/issues?") {
@@ -70,13 +81,16 @@ async fn fixture() -> (
                 } else if path.starts_with("/repos/acme/repo/pulls/") {
                     let number = path.rsplit('/').next().unwrap().parse::<u64>().unwrap();
                     json!({"number":number,"state":"open","merged":false,"html_url":format!("https://github.com/acme/repo/pull/{number}"),"base":{"ref":"main","repo":{"full_name":"acme/repo"}},"head":{"ref":"feature","sha":sha,"repo":{"full_name":"acme/repo"}}})
+                } else if path.starts_with("/repos/acme/repo/issues/") && path.contains("/comments") {
+                    assert!(request.to_ascii_lowercase().contains("authorization: bearer fixture-token"));
+                    let mut rows=comments.lock().unwrap();
+                    match method {
+                        "GET"=>json!(*rows),
+                        "POST"=>{let row=json!({"id":rows.len()+1,"body":input["body"],"user":{"login":"alice"}});rows.push(row.clone());row},
+                        _=>panic!("unexpected notification method {method}"),
+                    }
                 } else {
-                    let number = path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("1")
-                        .parse::<u64>()
-                        .unwrap_or(1);
+                    let number = path.rsplit('/').next().unwrap_or("1").parse::<u64>().unwrap_or(1);
                     json!({"state":"open","title":"[AI] Runtime test","user":{"login":"alice"},"number":number,"html_url":format!("https://github.com/acme/repo/issues/{number}")})
                 };
                 let body = serde_json::to_vec(&body).unwrap();

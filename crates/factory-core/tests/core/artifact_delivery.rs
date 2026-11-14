@@ -91,7 +91,7 @@ async fn delivery(
     scenario: &str,
     agent: &str,
     consumer: bool,
-) -> (tempfile::TempDir, String, RunDetail) {
+) -> (super::FixtureDir, String, RunDetail) {
     let (dir, factory) = fixture("exit 1", 4);
     std::fs::write(
         dir.path().join("fake-agent"),

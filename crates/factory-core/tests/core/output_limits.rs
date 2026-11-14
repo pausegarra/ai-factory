@@ -1,6 +1,6 @@
 use super::*;
 
-async fn output_fixture(agent: &str, output: &str) -> (tempfile::TempDir, RunDetail) {
+async fn output_fixture(agent: &str, output: &str) -> (super::FixtureDir, RunDetail) {
     let script = format!(
         "cat >/dev/null\nexec python3 - <<'PY'\nimport json, os, pathlib, sys\n{output}\nPY"
     );

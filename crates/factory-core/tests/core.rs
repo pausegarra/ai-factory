@@ -269,7 +269,31 @@ fn restart_interrupts_running_but_retains_history() {
 }
 
 #[cfg(unix)]
-fn fixture(script: &str, limit: usize) -> (tempfile::TempDir, std::sync::Arc<Factory>) {
+struct FixtureDir {
+    dir: tempfile::TempDir,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<()>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
+    comment_status: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+#[cfg(unix)]
+impl std::ops::Deref for FixtureDir {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &Self::Target {
+        &self.dir
+    }
+}
+#[cfg(unix)]
+impl Drop for FixtureDir {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(task) = self.server.take() {
+            task.join().expect("HTTP fixture shutdown");
+        }
+    }
+}
+#[cfg(unix)]
+fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
@@ -299,23 +323,114 @@ fn fixture(script: &str, limit: usize) -> (tempfile::TempDir, std::sync::Arc<Fac
     std::fs::write(&cli, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    std::thread::spawn(move || {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let comment_status = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(200));
+    let (halt, calls, status, root) = (
+        stop.clone(),
+        requests.clone(),
+        comment_status.clone(),
+        dir.path().join("data"),
+    );
+    let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut buf = [0; 8192];
-            let Ok(n) = stream.read(&mut buf) else {
+        let mut comments = Vec::new();
+        while !halt.load(std::sync::atomic::Ordering::SeqCst) {
+            let mut stream = match listener.accept() {
+                Ok((s, _)) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            // macOS accepts inherit the nonblocking listener flag. Read the
+            // complete HTTP request with the bounded blocking timeouts below.
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let mut raw = Vec::new();
+            let parsed = (|| -> Option<(String, String, serde_json::Value)> {
+                let (start, length) = loop {
+                    let mut bytes = [0; 4096];
+                    let n = stream.read(&mut bytes).ok()?;
+                    if n == 0 {
+                        return None;
+                    }
+                    raw.extend_from_slice(&bytes[..n]);
+                    if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&raw[..end]);
+                        let length = headers
+                            .lines()
+                            .filter_map(|s| s.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .and_then(|(_, n)| n.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (end + 4, length);
+                    }
+                };
+                while raw.len() < start + length {
+                    let mut bytes = [0; 4096];
+                    let n = stream.read(&mut bytes).ok()?;
+                    if n == 0 {
+                        return None;
+                    }
+                    raw.extend_from_slice(&bytes[..n]);
+                }
+                let headers = String::from_utf8_lossy(&raw[..start]);
+                let mut first = headers.lines().next()?.split_whitespace();
+                Some((
+                    first.next()?.into(),
+                    first.next()?.into(),
+                    if length > 0 {
+                        serde_json::from_slice(&raw[start..start + length]).ok()?
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ))
+            })();
+            let Some((method, path, input)) = parsed else {
                 continue;
             };
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let body = if request.starts_with("GET /user ") {
-                serde_json::json!({"login":"alice"})
+            calls
+                .lock()
+                .unwrap()
+                .push((method.clone(), path.clone(), input.clone()));
+            let is_comments =
+                path.starts_with("/repos/acme/repo/issues/") && path.contains("/comments");
+            let mut code = 200;
+            let body = if path == "/user" {
+                json!({"login":"alice"})
+            } else if is_comments {
+                code = status.load(std::sync::atomic::Ordering::SeqCst);
+                if code != 200 {
+                    json!({})
+                } else if method == "GET" {
+                    json!(comments)
+                } else {
+                    if input["body"]
+                        .as_str()
+                        .is_some_and(|b| b.contains("<!-- ai-factory:node-result:v1:"))
+                    {
+                        let db = rusqlite::Connection::open(root.join("factory.sqlite3")).unwrap();
+                        let count:u32=db.query_row("SELECT count(*) FROM issue_node_comments c JOIN nodes n ON n.run_id=c.run_id AND n.node_id=c.node_id WHERE json_extract(n.json,'$.status') IN ('succeeded','blocked','failed','skipped')",[],|r|r.get(0)).unwrap();
+                        assert!(count > 0, "POST before terminal commit");
+                    }
+                    let row = json!({"id":9001+comments.len(),"body":input["body"],"user":{"login":"alice"}});
+                    comments.push(row.clone());
+                    row
+                }
             } else {
-                serde_json::json!({"state":"open","title":"[AI] work","user":{"login":"alice"}})
-            }
-            .to_string();
-            let _=write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+                json!({"state":"open","title":"[AI] work","user":{"login":"alice"}})
+            };
+            let body = body.to_string();
+            let _=write!(stream,"HTTP/1.1 {code} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
         }
     });
     let f = common::open_with_api(dir.path().join("data"), &base).unwrap();
@@ -347,13 +462,25 @@ fn fixture(script: &str, limit: usize) -> (tempfile::TempDir, std::sync::Arc<Fac
     s.flows[0].nodes[0].depends_on.clear();
     common::bind_fixture_codex(&f, &mut s);
     f.save_settings(s).unwrap();
-    (dir, f)
+    (
+        FixtureDir {
+            dir,
+            stop,
+            server: Some(server),
+            requests,
+            comment_status,
+        },
+        f,
+    )
 }
 #[cfg(unix)]
 async fn terminal(f: &Factory, id: &str) -> RunDetail {
     for _ in 0..200 {
         let d = f.run_detail(id).unwrap();
         if !["queued", "running"].contains(&d.run.status.as_str()) {
+            if d.run.status == "failed" && d.nodes.iter().all(|n| n.status == "skipped") {
+                eprintln!("Fixture preparation failed: {:?}", d.run.error);
+            }
             return d;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -1312,3 +1439,7 @@ mod skills;
 #[cfg(unix)]
 #[path = "core/codex_accounts_execution.rs"]
 mod codex_accounts_execution;
+
+#[cfg(unix)]
+#[path = "core/issue_node_comments.rs"]
+mod issue_node_comments;
