@@ -324,6 +324,20 @@ impl Settings {
     }
     pub fn validate(&self) -> Result<()> {
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
+        for c in &self.notification_connectors {
+            if let super::notification_connector::ConnectorProvider::GoogleChat(config) =
+                &c.provider
+            {
+                ensure!(
+                    !c.enabled
+                        || config
+                            .token_profile_ids
+                            .iter()
+                            .all(|id| self.token_profiles.iter().any(|p| &p.id == id)),
+                    "Select an available GitHub profile for Google Chat"
+                );
+            }
+        }
         self.validate_concurrency()?;
         ensure!(
             self.poll_interval_seconds > 0,
@@ -395,6 +409,11 @@ impl Settings {
                 &mut c.provider
             {
                 config.bot_token = None;
+            }
+            if let super::notification_connector::ConnectorProvider::GoogleChat(config) =
+                &mut c.provider
+            {
+                config.webhook_url = None;
             }
         }
         for t in &mut s.token_profiles {
@@ -548,6 +567,8 @@ pub struct TriggerEvent {
     pub title: String,
     pub body: String,
     pub actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_token_profile_id: Option<String>,
     pub url: String,
     #[serde(default)]
     pub head_sha: String,
@@ -564,6 +585,7 @@ impl TriggerEvent {
             title: title.into(),
             body: body.into(),
             actor: actor.into(),
+            origin_token_profile_id: None,
             url: format!("https://github.com/{repo}/issues/{number}"),
             head_sha: String::new(),
             payload: json!({}),
@@ -579,6 +601,8 @@ pub struct Run {
     pub number: u64,
     pub title: String,
     pub actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_token_profile_id: Option<String>,
     pub url: String,
     pub status: String,
     pub current_step: Option<String>,

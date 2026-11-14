@@ -174,6 +174,25 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                 poll(&f).await;
                 poll(&f).await;
                 assert_eq!(count(dir.path(), "runs"), baseline + 1);
+                for run in f
+                    .snapshot()
+                    .unwrap()
+                    .runs
+                    .iter()
+                    .filter(|r| r.trigger_id == trigger)
+                {
+                    let detail = f.run_detail(&run.id).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&detail.run).unwrap()["origin_token_profile_id"],
+                        "work",
+                        "{trigger}"
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&detail.event).unwrap()["origin_token_profile_id"],
+                        "work",
+                        "{trigger}"
+                    );
+                }
                 drop(f);
                 let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
                 poll(&f).await;
@@ -471,4 +490,85 @@ async fn active_other_trigger_may_use_same_token() {
         .unwrap()
         .iter()
         .all(|r| r.method == "GET" && r.authorization == "Bearer fixture-a"));
+}
+
+#[tokio::test]
+async fn removed_origin_profile_during_polling_cannot_admit_any_trigger() {
+    for trigger in ["new_issue", "pr_approved", "pr_review"] {
+        let reached = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let blocked = Arc::new(AtomicBool::new(false));
+        let server=Server::start({let reached=reached.clone();let release=release.clone();let blocked=blocked.clone();move |r|{
+            let reached=reached.clone();let release=release.clone();let blocked=blocked.clone();async move {
+                let gate=match trigger {"new_issue"=>r.path=="/repos/acme/repo/issues/1","pr_review"=>r.path=="/repos/acme/repo/pulls/5",_=>r.path.contains("/comments?")};
+                if gate && !blocked.swap(true,Ordering::SeqCst){reached.notify_one();release.notified().await;}
+                if r.method!="GET" {return (500,json!({}));}
+                if r.path=="/user" {return (200,json!({"login":"alice"}));}
+                if r.path.starts_with("/search/") {return (200,search(true,if trigger=="new_issue"{1}else{5}));}
+                if r.path=="/repos/acme/repo/issues/1" {return (200,json!({"state":"open","title":"[AI] fixture","user":{"login":"alice"},"html_url":"https://github.com/acme/repo/issues/1"}));}
+                if r.path=="/repos/acme/repo/pulls/5" {return (200,pr());}
+                if r.path.contains("/reviews?"){return (200,json!([]));}
+                if r.path.contains("/comments?"){return (200,json!([{"id":7,"body":"OK","user":{"login":"alice"}}]));}
+                (500,json!({}))
+            }
+        }}).await;
+        let dir = tempfile::tempdir().unwrap();
+        let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+        let mut s = settings();
+        s.token_profiles.truncate(1);
+        if trigger != "new_issue" {
+            s.token_profiles[0].authors.clear();
+        }
+        if trigger != "pr_review" {
+            s.token_profiles[0].reviewers.clear();
+        }
+        f.save_settings(s).unwrap();
+        if trigger == "pr_approved" {
+            let id = f
+                .enqueue(TriggerEvent::issue(
+                    "acme/repo",
+                    1,
+                    "[AI] source",
+                    "alice",
+                    "",
+                ))
+                .unwrap()
+                .unwrap();
+            Store::open_with_credentials(dir.path(), common::backend(dir.path()))
+                .unwrap()
+                .track_pr("acme/repo", 5, &id)
+                .unwrap();
+            let mut s = f.settings().unwrap();
+            s.token_profiles[0].authors = vec!["alice".into()];
+            s.flows[0].enabled = false;
+            f.save_settings(s).unwrap();
+        }
+        let before = (count(dir.path(), "runs"), count(dir.path(), "dedup"));
+        let task = {
+            let f = f.clone();
+            tokio::spawn(async move { f.poll_now().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), reached.notified())
+            .await
+            .unwrap();
+        let mut s = f.settings().unwrap();
+        s.token_profiles.clear();
+        f.save_settings(s).unwrap();
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (count(dir.path(), "runs"), count(dir.path(), "dedup")),
+            before,
+            "{trigger}"
+        );
+        assert_eq!(
+            count(dir.path(), "observations"),
+            if trigger == "pr_review" { 1 } else { 0 },
+            "{trigger}"
+        );
+    }
 }

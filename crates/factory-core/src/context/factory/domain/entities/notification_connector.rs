@@ -38,9 +38,28 @@ impl std::fmt::Debug for TelegramConnectorConfig {
             .finish_non_exhaustive()
     }
 }
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct GoogleChatConnectorConfig {
+    #[serde(default)]
+    pub has_webhook_url: bool,
+    #[serde(default, skip_serializing)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    #[serde(default)]
+    pub token_profile_ids: Vec<String>,
+}
+impl std::fmt::Debug for GoogleChatConnectorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleChatConnectorConfig")
+            .field("has_webhook_url", &self.has_webhook_url)
+            .finish_non_exhaustive()
+    }
+}
 #[derive(Clone)]
 pub enum ConnectorProvider {
     Telegram(TelegramConnectorConfig),
+    GoogleChat(GoogleChatConnectorConfig),
     Unsupported { kind: String, config: Value },
 }
 impl std::fmt::Debug for ConnectorProvider {
@@ -77,6 +96,11 @@ impl TryFrom<WireConnector> for NotificationConnector {
             ConnectorProvider::Telegram(
                 serde_json::from_value(w.config).map_err(|_| "Invalid Telegram configuration")?,
             )
+        } else if w.kind == "google_chat" {
+            ConnectorProvider::GoogleChat(
+                serde_json::from_value(w.config)
+                    .map_err(|_| "Invalid Google Chat configuration")?,
+            )
         } else {
             ConnectorProvider::Unsupported {
                 kind: w.kind,
@@ -98,6 +122,10 @@ impl From<NotificationConnector> for WireConnector {
             ConnectorProvider::Telegram(config) => (
                 "telegram".into(),
                 serde_json::to_value(config).expect("Telegram config serializes"),
+            ),
+            ConnectorProvider::GoogleChat(config) => (
+                "google_chat".into(),
+                serde_json::to_value(config).expect("Google Chat config serializes"),
             ),
             ConnectorProvider::Unsupported { kind, config } => (kind, config),
         };
@@ -127,6 +155,39 @@ pub fn validate_connectors(connectors: &[NotificationConnector]) -> Result<()> {
             c.events.iter().all(|e| events.insert(e)),
             "Duplicate notification events"
         );
+        if let ConnectorProvider::GoogleChat(config) = &c.provider {
+            let mut triggers = HashSet::new();
+            ensure!(
+                config
+                    .triggers
+                    .iter()
+                    .all(
+                        |t| ["new_issue", "pr_approved", "pr_review"].contains(&t.as_str())
+                            && triggers.insert(t)
+                    ),
+                "Invalid or duplicate Google Chat triggers"
+            );
+            let mut profiles = HashSet::new();
+            ensure!(
+                config
+                    .token_profile_ids
+                    .iter()
+                    .all(|id| safe_id(id) && profiles.insert(id)),
+                "Invalid or duplicate Google Chat profiles"
+            );
+            ensure!(
+                !c.enabled || !c.events.is_empty(),
+                "Enabled Google Chat connector requires a run event"
+            );
+            ensure!(
+                !c.enabled || !config.triggers.is_empty(),
+                "Enabled Google Chat connector requires a trigger"
+            );
+            ensure!(
+                !c.enabled || !config.token_profile_ids.is_empty(),
+                "Enabled Google Chat connector requires a GitHub profile"
+            );
+        }
         if let ConnectorProvider::Telegram(config) = &c.provider {
             ensure!(
                 !c.enabled || !config.chat_id.trim().is_empty(),

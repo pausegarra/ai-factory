@@ -484,6 +484,7 @@ fn pr_event(
     payload: Value,
 ) -> Result<TriggerEvent> {
     Ok(TriggerEvent {
+        origin_token_profile_id: None,
         event_id,
         trigger_id: trigger.into(),
         repository: repo.into(),
