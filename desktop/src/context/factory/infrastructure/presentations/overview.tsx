@@ -184,7 +184,7 @@ export function OverviewPage({
               ? `${Math.max(0, limit - used)} slots available for new tasks.`
               : "All execution slots are available."}
           </p>
-          <dl>
+          <dl className="capacity-by-trigger">
             {([
               ["new_issue", "New issue"],
               ["pr_review", "PR review"],

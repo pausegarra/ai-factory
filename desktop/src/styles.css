@@ -2322,6 +2322,39 @@ select {
 .capacity-agents > span {
   color: #bebebc;
 }
+.capacity-panel .capacity-by-trigger {
+  margin: 0 24px 16px;
+  padding: 0;
+  min-width: 0;
+}
+.capacity-panel .capacity-by-trigger > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: baseline;
+  column-gap: 12px;
+  padding: 8px 0;
+}
+.capacity-panel .capacity-by-trigger > div + div {
+  border-top: 1px solid #313131;
+}
+.capacity-panel .capacity-by-trigger dt {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 20px;
+  color: #929290;
+}
+.capacity-panel .capacity-by-trigger dd {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #ececea;
+  text-align: right;
+  white-space: nowrap;
+}
 .agent-mini.opencode,
 .agent-symbol.opencode {
   background: #272727;
