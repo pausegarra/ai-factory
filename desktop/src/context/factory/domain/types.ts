@@ -241,11 +241,15 @@ export interface NotificationConnector {
   type: string;
   config: Record<string, unknown>;
 }
+export interface GitHubNotificationFilters {
+  triggers: Trigger[];
+  token_profile_ids: string[];
+}
 export type TelegramNotificationConnector = NotificationConnector & {
   type: "telegram";
-  config: { chat_id: string; has_token: boolean; bot_token?: string };
+  config: GitHubNotificationFilters & { chat_id: string; has_token: boolean; bot_token?: string };
 };
 export type GoogleChatNotificationConnector = NotificationConnector & {
   type: "google_chat";
-  config: { has_webhook_url: boolean; webhook_url?: string; triggers: Trigger[]; token_profile_ids: string[] };
+  config: GitHubNotificationFilters & { has_webhook_url: boolean; webhook_url?: string };
 };

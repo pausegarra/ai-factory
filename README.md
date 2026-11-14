@@ -107,35 +107,45 @@ Full run details remain available in Runs. Browser preview does not send native
 notifications.
 
 
-Open **Notifications → Add connector**, then choose **Telegram** or **Google Chat** from the connector dropdown. To configure Telegram destinations, give each
-connector a name, enter its bot token and chat ID, choose **Run started**, **Run
-succeeded**, **Run failed** and/or **Run blocked**, then enable it and **Save
-changes**. New connectors start disabled. Disabled connectors can be saved
-incomplete; disabling preserves their destination, token and event preferences.
-Changes apply only after saving. **Discard changes** restores saved preferences.
+Open **Notifications → Add connector**, then choose **Telegram** or **Google Chat**.
+Both connectors use **Run events**, **GitHub triggers** and **GitHub profiles**.
+Choose Run started, Run succeeded, Run failed and/or Run blocked, the GitHub
+triggers and the detecting GitHub profiles, then enable the connector and **Save
+changes**. New connectors start disabled, with all events and triggers selected
+and no GitHub profiles selected. Select profiles explicitly before enabling.
+Disabled connectors can be saved incomplete. Each connector keeps its own filters;
+changes apply only after saving. **Discard changes** restores saved preferences.
 
-For **Google Chat**, give the connector a name and paste the complete incoming
-webhook URL in **Webhook URL**. The URL already includes the credentials; no
-separate Google token is needed. Select run events, GitHub triggers and GitHub
-profiles, then enable the connector and save. New connectors start disabled.
-Selections within a group are alternatives (OR); the three groups must all match
+Selections within each group are alternatives (OR); all three groups must match
 (AND). For example, Run started + New task + Work sends only starts of issue runs
 detected using the Work profile. The origin is the stable ID of the detecting
-GitHub profile, rather than the content author/reviewer. Historical or manually
-created runs without an origin profile do not send Google Chat notifications.
+GitHub profile, not its actor, author or reviewer. Runs without an origin profile,
+with an unselected origin or with a deleted origin do not send external connector
+notifications. This includes historical or manually created runs without an origin.
+Adding a profile does not select it automatically. Renaming a profile keeps its
+selection; removing a selected profile requires fixing or disabling its connector.
+Unavailable selections remain visible and removable for both providers.
+
+Older Telegram configurations without trigger/profile fields receive the known
+triggers and the profiles stored in the same settings when loaded. The first
+explicit save persists these editable selections; explicit empty lists are never
+filled, and profiles added after that save are not selected. An enabled legacy
+connector without profiles still loads, but must be corrected or disabled to save.
+
+For **Telegram**, enter its own bot token and chat ID. For **Google Chat**, paste
+the complete incoming webhook URL in **Webhook URL**. The URL already includes
+its credentials; no separate Google token is needed. GitHub profile selections
+are filters and never replace either provider's transport credentials.
 
 Webhook URLs are stored in the OS credential store and never returned by Settings.
 Leave the URL blank to keep the configured webhook; paste a new URL to replace it.
-Adding a GitHub profile does not select it automatically. Renaming a profile keeps
-its selection; removing a selected profile requires fixing or disabling its
-connector. Unavailable selections remain visible and removable. Disabled connectors
-can be saved as incomplete drafts. Requests require HTTPS, never follow redirects,
+Google Chat requests require HTTPS, never follow redirects,
 and use bounded timeouts and responses. Delivery is asynchronous and best effort;
 there are no automatic delivery retries or historical replays. Disabling, removing
 or replacing a Google Chat connector cancels pending work; a request already
 accepted by the remote service cannot be recalled.
 
-Multiple Telegram destinations can have independent event selections. Other
+Multiple destinations can have independent event, trigger and profile selections. Other
 connector types can be added in the future; unsupported saved types are preserved
 but never send messages.
 

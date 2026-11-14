@@ -14,8 +14,8 @@ it("validates active requirements, duplicates and identity without echoing secre
   expect(validateNotificationConnectors([a]).join(" ")).toContain("Chat ID");
   a.config.chat_id = "-1001";
   expect(validateNotificationConnectors([a]).join(" ")).toContain("Bot token");
-  a.config.bot_token = "fixture";
-  expect(validateNotificationConnectors([a])).toEqual([]);
+  a.config.bot_token = "fixture"; a.config.token_profile_ids = ["work"];
+  expect(validateNotificationConnectors([a],filterProfiles)).toEqual([]);
   a.events = [];
   expect(validateNotificationConnectors([a]).join(" ")).toContain("event");
   a.enabled = false;
@@ -30,9 +30,9 @@ it("cleans token drafts deeply while preserving unknown provider settings", () =
   expect(clean[1]).toEqual(future);
 });
 it("accepts existing backend identities and textual destinations", () => {
-  const c=newTelegramConnector("team.eu");c.enabled=true;c.config.has_token=true;
+  const c=newTelegramConnector("team.eu");c.enabled=true;c.config.has_token=true;c.config.token_profile_ids=["work"];
   for (const chat of ["-1001234567","@channel_name","textual destination"]) {
-    c.config.chat_id=chat;expect(validateNotificationConnectors([c])).toEqual([]);
+    c.config.chat_id=chat;expect(validateNotificationConnectors([c],filterProfiles)).toEqual([]);
   }
 });
 it("cleans Google Chat URL drafts without mutating the editor", () => {
@@ -70,3 +70,63 @@ it("rejects malformed Google Chat configuration without throwing or reflecting v
     expect(validateNotificationConnectors([{id:"chat",label:"Chat",enabled:false,events:[],type:"google_chat",config}])).toEqual(["Connector 1: Invalid Google Chat configuration."]);
   }
 });
+
+it("gives Telegram the common filters without sharing selections", () => {
+  const a = newTelegramConnector("a"), b = newTelegramConnector("b");
+  expect(a.enabled).toBe(false);
+  expect(a.config.triggers).toEqual(["new_issue", "pr_approved", "pr_review"]);
+  expect(a.config.token_profile_ids).toEqual([]);
+  a.config.triggers.pop(); a.config.token_profile_ids.push("work");
+  expect(b.config.triggers).toEqual(["new_issue", "pr_approved", "pr_review"]);
+  expect(b.config.token_profile_ids).toEqual([]);
+});
+
+import { newGoogleChatConnector } from "../src/context/factory/domain/notification-connectors";
+import type { NotificationConnector } from "../src/context/factory/domain/types";
+const filterProfiles = [{id:"work", label:"Work", account:"alice", has_token:true, owners:[], authors:[], reviewers:[]}];
+for (const create of [newTelegramConnector, newGoogleChatConnector]) {
+  it(`validates common filters for ${create("fixture").type} independently of credentials`, () => {
+    const c = create("fixture");
+    c.enabled = true;
+    c.config = {...c.config, chat_id:"fixture", has_token:true, has_webhook_url:true, token_profile_ids:["work"]};
+    expect(validateNotificationConnectors([c],filterProfiles)).toEqual([]);
+    for (const [field, value, message, structural] of [
+      ["events",[],"Select at least one run event.",false],
+      ["events",["run_started","run_started"],"Invalid run events.",true],
+      ["events",["PRIVATE_SENTINEL"],"Invalid run events.",true],
+      ["triggers",[],"Select at least one GitHub trigger.",false],
+      ["triggers",["new_issue","new_issue"],"Invalid GitHub triggers.",true],
+      ["triggers",["toString"],"Invalid GitHub triggers.",true],
+      ["triggers",["PRIVATE_SENTINEL"],"Invalid GitHub triggers.",true],
+      ["token_profile_ids",[],"Select available GitHub profiles.",false],
+      ["token_profile_ids",["deleted"],"Select available GitHub profiles.",false],
+      ...[["work","work"],["../work"],["."],[".."],["x".repeat(129)]].map(value => ["token_profile_ids",value,"Invalid GitHub profiles.",true] as const),
+    ] as const) {
+      for (const enabled of [true,false]) {
+        const edited: NotificationConnector = structuredClone(c);
+        edited.enabled = enabled;
+        if(field === "events") Object.assign(edited,{events:value});
+        else edited.config[field] = value;
+        const errors = validateNotificationConnectors([edited],filterProfiles);
+        if(enabled || structural) expect(errors.join(" ")).toContain(message);
+        else expect(errors).toEqual([]);
+        expect(errors.join(" ")).not.toContain("PRIVATE_SENTINEL");
+      }
+    }
+    expect(validateNotificationConnectors([c],[{...filterProfiles[0],label:"Renamed"}])).toEqual([]);
+    expect(c.config.token_profile_ids).toEqual(["work"]);
+    const clean = cleanNotificationConnectors([{...c,config:{...c.config, bot_token:"PRIVATE_DRAFT",webhook_url:"PRIVATE_DRAFT"}}]);
+    expect(clean[0].config.triggers).toEqual(["new_issue","pr_approved","pr_review"]);
+    expect(clean[0].config.token_profile_ids).toEqual(["work"]);
+  });
+  it(`rejects malformed filter shapes for ${create("fixture").type} safely`, () => {
+    for(const field of ["triggers","token_profile_ids",create("fixture").type === "telegram" ? "bot_token" : "webhook_url"]) {
+      for(const value of [null,17,{PRIVATE_SENTINEL:1},[17]]) {
+        const c: NotificationConnector = create("fixture"); c.config[field]=value;
+        const errors = validateNotificationConnectors([c]);
+        expect(errors.join(" ")).toContain("configuration");
+        expect(errors.join(" ")).not.toContain("PRIVATE_SENTINEL");
+      }
+    }
+  });
+}

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
+pub(crate) const NOTIFICATION_TRIGGER_IDS: [&str; 3] = ["new_issue", "pr_approved", "pr_review"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationEvent {
@@ -30,6 +32,10 @@ pub struct TelegramConnectorConfig {
     pub has_token: bool,
     #[serde(default, skip_serializing)]
     pub bot_token: Option<String>,
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    #[serde(default)]
+    pub token_profile_ids: Vec<String>,
 }
 impl std::fmt::Debug for TelegramConnectorConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +67,22 @@ pub enum ConnectorProvider {
     Telegram(TelegramConnectorConfig),
     GoogleChat(GoogleChatConnectorConfig),
     Unsupported { kind: String, config: Value },
+}
+impl ConnectorProvider {
+    pub(crate) fn notification_filters(&self) -> Option<(&[String], &[String])> {
+        match self {
+            Self::Telegram(c) => Some((&c.triggers, &c.token_profile_ids)),
+            Self::GoogleChat(c) => Some((&c.triggers, &c.token_profile_ids)),
+            Self::Unsupported { .. } => None,
+        }
+    }
+    pub(crate) fn notification_name(&self) -> &'static str {
+        match self {
+            Self::Telegram(_) => "Telegram",
+            Self::GoogleChat(_) => "Google Chat",
+            Self::Unsupported { .. } => "Unsupported",
+        }
+    }
 }
 impl std::fmt::Debug for ConnectorProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -155,47 +177,39 @@ pub fn validate_connectors(connectors: &[NotificationConnector]) -> Result<()> {
             c.events.iter().all(|e| events.insert(e)),
             "Duplicate notification events"
         );
-        if let ConnectorProvider::GoogleChat(config) = &c.provider {
+        if let Some((trigger_ids, profile_ids)) = c.provider.notification_filters() {
+            let name = c.provider.notification_name();
             let mut triggers = HashSet::new();
             ensure!(
-                config
-                    .triggers
+                trigger_ids
                     .iter()
-                    .all(
-                        |t| ["new_issue", "pr_approved", "pr_review"].contains(&t.as_str())
-                            && triggers.insert(t)
-                    ),
-                "Invalid or duplicate Google Chat triggers"
+                    .all(|t| NOTIFICATION_TRIGGER_IDS.contains(&t.as_str()) && triggers.insert(t)),
+                "Invalid or duplicate {name} triggers"
             );
             let mut profiles = HashSet::new();
             ensure!(
-                config
-                    .token_profile_ids
+                profile_ids
                     .iter()
                     .all(|id| safe_id(id) && profiles.insert(id)),
-                "Invalid or duplicate Google Chat profiles"
+                "Invalid or duplicate {name} profiles"
             );
             ensure!(
                 !c.enabled || !c.events.is_empty(),
-                "Enabled Google Chat connector requires a run event"
+                "Enabled {name} connector requires a run event"
             );
             ensure!(
-                !c.enabled || !config.triggers.is_empty(),
-                "Enabled Google Chat connector requires a trigger"
+                !c.enabled || !trigger_ids.is_empty(),
+                "Enabled {name} connector requires a trigger"
             );
             ensure!(
-                !c.enabled || !config.token_profile_ids.is_empty(),
-                "Enabled Google Chat connector requires a GitHub profile"
+                !c.enabled || !profile_ids.is_empty(),
+                "Enabled {name} connector requires a GitHub profile"
             );
         }
         if let ConnectorProvider::Telegram(config) = &c.provider {
             ensure!(
                 !c.enabled || !config.chat_id.trim().is_empty(),
                 "Enabled Telegram connector requires a Chat ID"
-            );
-            ensure!(
-                !c.enabled || !c.events.is_empty(),
-                "Enabled Telegram connector requires a run event"
             );
         }
     }

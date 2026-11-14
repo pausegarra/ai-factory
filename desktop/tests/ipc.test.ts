@@ -55,14 +55,14 @@ it("passes one agent to usage IPC without changing the remaining contract", asyn
   expect(invoke).toHaveBeenCalledWith("get_agent_usage", { agent: "codex" });
 });
 it("passes notification secrets only in explicit save input through existing IPC", async () => {
-  const input = {notification_connectors:[{id:"team",label:"Team",enabled:true,events:["run_failed"],type:"telegram",config:{chat_id:"-1001",bot_token:"synthetic_fixture_token",has_token:false}}]} as unknown as Settings;
-  const output = {notification_connectors:[{...input.notification_connectors![0],config:{chat_id:"-1001",has_token:true}}]} as unknown as Settings;
+  const input = {notification_connectors:[{id:"team",label:"Team",enabled:true,events:["run_failed"],type:"telegram",config:{chat_id:"-1001",bot_token:"synthetic_fixture_token",has_token:false,triggers:["new_issue"],token_profile_ids:["work"]}}]} as unknown as Settings;
+  const output = {notification_connectors:[{...input.notification_connectors![0],config:{chat_id:"-1001",has_token:true,triggers:["new_issue"],token_profile_ids:["work"]}}]} as unknown as Settings;
   vi.mocked(invoke).mockResolvedValue(output);
   const saved = await factoryApi.saveSettings(input);
   expect(invoke).toHaveBeenCalledWith("save_settings",{settings:input});
   expect(saved.notification_connectors?.[0].config.bot_token).toBeUndefined();
   const loaded = await factoryApi.settings();
-  expect(loaded.notification_connectors?.[0].config).toEqual({chat_id:"-1001",has_token:true});
+  expect(loaded.notification_connectors?.[0].config).toEqual({chat_id:"-1001",has_token:true,triggers:["new_issue"],token_profile_ids:["work"]});
 });
 it("transports independent ceilings and reserved capacity through existing IPC", async () => {
   const { noticeSettings, noticeSnapshot } = await import("./fixtures/notices");

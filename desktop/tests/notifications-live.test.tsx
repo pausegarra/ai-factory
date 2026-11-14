@@ -31,17 +31,26 @@ it("notifications navigation preserves Settings and warns before discarding edit
   await screen.findByRole("heading",{name:"Runs"});expect(factoryApi.saveSettings).not.toHaveBeenCalled();
 });
 it("ignores a live Settings read started before save and accepts a later refresh",async()=>{
+  const profiles=[{id:"work",label:"Work",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}];
+  vi.mocked(factoryApi.settings).mockResolvedValue({...noticeSettings(),token_profiles:profiles,notification_connectors:[newTelegramConnector("a")]});
   render(<App />);await screen.findByRole("heading",{name:/Factory overview/});
   fireEvent.click(screen.getByRole("button",{name:"Notifications"}));
   const stale=deferred<Settings>();vi.mocked(factoryApi.settings).mockReturnValueOnce(stale.promise);
   act(()=>mock.listener?.({kind:"settings_changed",timestamp:"now"}));
   await waitFor(()=>expect(factoryApi.settings).toHaveBeenCalledTimes(2));
   fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Saved label"}});
+  fireEvent.click(screen.getByRole("checkbox",{name:"New task"}));
+  fireEvent.click(screen.getByRole("checkbox",{name:"Work (@alice)"}));
   fireEvent.click(screen.getByRole("button",{name:"Save changes"}));await screen.findByText("Notification settings saved.");
   await act(async()=>{stale.resolve({...noticeSettings(),notification_connectors:[newTelegramConnector("a")]});await stale.promise;});
   expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Saved label");
-  const latest={...noticeSettings(),notification_connectors:[{...newTelegramConnector("a"),label:"Later refresh"}]};
+  expect((screen.getByRole("checkbox",{name:"New task"}) as HTMLInputElement).checked).toBe(false);
+  expect((screen.getByRole("checkbox",{name:"Work (@alice)"}) as HTMLInputElement).checked).toBe(true);
+  expect(vi.mocked(factoryApi.saveSettings).mock.calls[0][0].notification_connectors![0].config).toMatchObject({triggers:["pr_approved","pr_review"],token_profile_ids:["work"]});
+  const latest={...noticeSettings(),token_profiles:profiles,notification_connectors:[{...newTelegramConnector("a"),label:"Later refresh"}]};
   vi.mocked(factoryApi.settings).mockResolvedValue(latest);
   act(()=>mock.listener?.({kind:"settings_changed",timestamp:"later"}));
   await waitFor(()=>expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Later refresh"));
+  expect((screen.getByRole("checkbox",{name:"New task"}) as HTMLInputElement).checked).toBe(true);
+  expect((screen.getByRole("checkbox",{name:"Work (@alice)"}) as HTMLInputElement).checked).toBe(false);
 });

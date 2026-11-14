@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Deserialize)]
 #[serde(default)]
 pub(super) struct SettingsInput {
-    notification_connectors: Vec<crate::NotificationConnector>,
+    notification_connectors: Vec<serde_json::Value>,
     owners: Vec<String>,
     authors: Vec<String>,
     reviewers: Vec<String>,
@@ -70,7 +70,7 @@ impl TryFrom<SettingsInput> for Settings {
     type Error = anyhow::Error;
 
     fn try_from(input: SettingsInput) -> Result<Self, Self::Error> {
-        let token_profiles = input
+        let token_profiles: Vec<TokenProfile> = input
             .token_profiles
             .into_iter()
             .map(|token| {
@@ -89,7 +89,10 @@ impl TryFrom<SettingsInput> for Settings {
             })
             .collect();
         let settings = Self {
-            notification_connectors: input.notification_connectors,
+            notification_connectors: decode_notification_connectors(
+                input.notification_connectors,
+                &token_profiles,
+            )?,
             token_profiles,
             codex_bindings: input.codex_bindings,
             projects: input.projects,
@@ -105,4 +108,41 @@ impl TryFrom<SettingsInput> for Settings {
         settings.validate_concurrency()?;
         Ok(settings)
     }
+}
+
+// Only missing legacy Telegram fields inherit defaults, never explicit empty lists.
+fn decode_notification_connectors(
+    mut connectors: Vec<serde_json::Value>,
+    profiles: &[TokenProfile],
+) -> anyhow::Result<Vec<crate::NotificationConnector>> {
+    use crate::context::factory::domain::entities::notification_connector::NOTIFICATION_TRIGGER_IDS;
+    for connector in &mut connectors {
+        if connector.get("type").and_then(serde_json::Value::as_str) != Some("telegram") {
+            continue;
+        }
+        if let Some(config) = connector
+            .get_mut("config")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if !config.contains_key("triggers") {
+                config.insert(
+                    "triggers".into(),
+                    serde_json::json!(NOTIFICATION_TRIGGER_IDS),
+                );
+            }
+            if !config.contains_key("token_profile_ids") {
+                config.insert(
+                    "token_profile_ids".into(),
+                    serde_json::json!(profiles.iter().map(|p| &p.id).collect::<Vec<_>>()),
+                );
+            }
+        }
+    }
+    connectors
+        .into_iter()
+        .map(|connector| {
+            serde_json::from_value(connector)
+                .map_err(|_| anyhow::anyhow!("Invalid notification connector configuration"))
+        })
+        .collect()
 }
