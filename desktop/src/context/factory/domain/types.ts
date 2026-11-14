@@ -96,7 +96,7 @@ export const TRIGGERS: Record<
     label: "PR approved",
     short: "PR approved",
     description:
-      "Current head approvals or OK comments merge the PR, then bump its version based on the diff. No tags or releases.",
+      "Current head approvals or OK comments merge the PR, then bump its version based on the diff.",
   },
   pr_review: {
     label: "Review requested",
