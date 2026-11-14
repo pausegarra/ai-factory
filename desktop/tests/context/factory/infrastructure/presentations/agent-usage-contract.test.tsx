@@ -19,13 +19,22 @@ it.each(contract.cases)("shows parser-backed remaining contract: $name", async t
   expect(row).not.toBeNull();
   if (testCase.remaining !== null) {
     expect(within(row).getByText(`Remaining: ${testCase.remaining}%`)).toBeTruthy();
-    expect(within(row).getByText("Calculated as 100% minus Codex reported usage.")).toBeTruthy();
-    expect(within(row).getByTitle("Source: Codex usedPercent")).toBeTruthy();
+    const bar = within(row).getByRole("progressbar", {
+      name: "Codex Fixture Codex Primary window remaining",
+    });
+    expect(bar.getAttribute("aria-valuemin")).toBe("0");
+    expect(bar.getAttribute("aria-valuemax")).toBe("100");
+    expect(bar.getAttribute("aria-valuenow")).toBe(String(testCase.remaining));
+    expect((bar.firstElementChild as HTMLElement).style.width).toBe(testCase.remaining + "%");
     expect(within(row).queryByText(/Remaining percentage is not available/)).toBeNull();
   } else {
     expect(within(row).queryByText(/Remaining:|Used:|Reported usage:/)).toBeNull();
-    expect(within(row).queryByText("Calculated as 100% minus Codex reported usage.")).toBeNull();
+    expect(within(row).queryByRole("progressbar")).toBeNull();
   }
+  expect(within(row).queryByText("Calculated as 100% minus Codex reported usage.")).toBeNull();
+  expect(within(row).queryByTitle("Source: Codex usedPercent")).toBeNull();
+  expect(within(row).queryByText(/Last checked|300 minutes|fixture@example.test/)).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("get_agent_usage", { agent: "opencode" });
   expect(within(row).queryByText(/^Used:/)).toBeNull();
   expect(within(row).queryByText(/tokens/i)).toBeNull();
   expect(screen.queryByText(/fixture-secret/)).toBeNull();
