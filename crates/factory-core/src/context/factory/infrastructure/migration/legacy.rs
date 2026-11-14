@@ -456,6 +456,7 @@ fn import_event(task: &Value, workflow: Option<&Value>) -> TriggerEvent {
             )
         });
     TriggerEvent {
+        origin_token_profile_id: None,
         event_id: canonical_event(text(task, "key"), trigger, &repository, number),
         trigger_id: trigger.into(),
         repository,
@@ -765,7 +766,7 @@ fn read_database(
         }
         let state = historical_status(text(task, "status"));
         let interrupted = state == "interrupted";
-        let run=Run{id:id.clone(),event_id:event.event_id.clone(),trigger_id:event.trigger_id.clone(),repository:event.repository.clone(),number:event.number,title:event.title.clone(),actor:event.actor.clone(),url:event.url.clone(),status:state,current_step:related_nodes.iter().find(|n|["running","starting","uncertain"].contains(&text(n,"state"))).map(|n|text(n,"node_id").into()).or_else(||workflow.and_then(|w|optional(w,"phase"))),created_at:optional(task,"detected_at").unwrap_or_else(crate::now),started_at:optional(task,"launched_at"),finished_at:optional(task,"finished_at").or_else(||interrupted.then(crate::now)),error:optional(task,"last_error").or_else(||interrupted.then(||format!("Imported legacy state '{}'; no process was resumed. Retry explicitly after review.",text(task,"status")))),attempt:count(task,"attempts").max(1).min(u32::MAX as u64) as u32,workspace:None};
+        let run=Run{origin_token_profile_id:None,id:id.clone(),event_id:event.event_id.clone(),trigger_id:event.trigger_id.clone(),repository:event.repository.clone(),number:event.number,title:event.title.clone(),actor:event.actor.clone(),url:event.url.clone(),status:state,current_step:related_nodes.iter().find(|n|["running","starting","uncertain"].contains(&text(n,"state"))).map(|n|text(n,"node_id").into()).or_else(||workflow.and_then(|w|optional(w,"phase"))),created_at:optional(task,"detected_at").unwrap_or_else(crate::now),started_at:optional(task,"launched_at"),finished_at:optional(task,"finished_at").or_else(||interrupted.then(crate::now)),error:optional(task,"last_error").or_else(||interrupted.then(||format!("Imported legacy state '{}'; no process was resumed. Retry explicitly after review.",text(task,"status")))),attempt:count(task,"attempts").max(1).min(u32::MAX as u64) as u32,workspace:None};
         let raw = json!({"task":task,"workflow":workflow,"nodes":related_nodes,"sessions":related_sessions,"events":events.iter().filter(|e|text(e,"task_key")==key).collect::<Vec<_>>(),"operations":operations.iter().filter(|o|text(o,"workflow_key")==key).collect::<Vec<_>>(),"artifacts":artifacts.iter().filter(|a|text(a,"workflow_key")==key).collect::<Vec<_>>(),"copied_files":copied,"source_database":path});
         batch.runs.push(LegacyRun {
             detail: RunDetail {

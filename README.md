@@ -107,12 +107,34 @@ Full run details remain available in Runs. Browser preview does not send native
 notifications.
 
 
-Open **Notifications → Add connector** to configure Telegram destinations. Give each
+Open **Notifications → Add connector**, then choose **Telegram** or **Google Chat** from the connector dropdown. To configure Telegram destinations, give each
 connector a name, enter its bot token and chat ID, choose **Run started**, **Run
 succeeded**, **Run failed** and/or **Run blocked**, then enable it and **Save
 changes**. New connectors start disabled. Disabled connectors can be saved
 incomplete; disabling preserves their destination, token and event preferences.
 Changes apply only after saving. **Discard changes** restores saved preferences.
+
+For **Google Chat**, give the connector a name and paste the complete incoming
+webhook URL in **Webhook URL**. The URL already includes the credentials; no
+separate Google token is needed. Select run events, GitHub triggers and GitHub
+profiles, then enable the connector and save. New connectors start disabled.
+Selections within a group are alternatives (OR); the three groups must all match
+(AND). For example, Run started + New task + Work sends only starts of issue runs
+detected using the Work profile. The origin is the stable ID of the detecting
+GitHub profile, rather than the content author/reviewer. Historical or manually
+created runs without an origin profile do not send Google Chat notifications.
+
+Webhook URLs are stored in the OS credential store and never returned by Settings.
+Leave the URL blank to keep the configured webhook; paste a new URL to replace it.
+Adding a GitHub profile does not select it automatically. Renaming a profile keeps
+its selection; removing a selected profile requires fixing or disabling its
+connector. Unavailable selections remain visible and removable. Disabled connectors
+can be saved as incomplete drafts. Requests require HTTPS, never follow redirects,
+and use bounded timeouts and responses. Delivery is asynchronous and best effort;
+there are no automatic delivery retries or historical replays. Disabling, removing
+or replacing a Google Chat connector cancels pending work; a request already
+accepted by the remote service cannot be recalled.
+
 Multiple Telegram destinations can have independent event selections. Other
 connector types can be added in the future; unsupported saved types are preserved
 but never send messages.

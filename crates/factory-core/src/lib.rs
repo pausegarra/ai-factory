@@ -68,6 +68,8 @@ pub mod context {
             }
             pub mod rest_clients {
                 pub mod github;
+                pub mod google_chat;
+                pub mod notifications;
                 pub mod telegram;
             }
             pub mod processes {

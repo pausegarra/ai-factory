@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Bell, Plus } from "@phosphor-icons/react";
+import { Bell } from "@phosphor-icons/react";
 import type { NotificationConnector, Settings } from "../../domain/types";
-import { cleanNotificationConnectors, isTelegramConnector, newTelegramConnector, notificationEvents, validateNotificationConnectors } from "../../domain/notification-connectors";
+import { cleanNotificationConnectors, isTelegramConnector, isGoogleChatConnector, newGoogleChatConnector, newTelegramConnector, notificationEvents, validateNotificationConnectors } from "../../domain/notification-connectors";
 import { Empty, Field, Notice, Toggle } from "./ui";
+import { ConnectorPicker, type ConnectorKind } from "./connector-picker";
+import { GoogleChatConnectorEditor } from "./google-chat-connector";
 
 export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChange }: {
   settings: Settings;
@@ -38,6 +40,11 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
     else {
       // Credential presence is public metadata, independent of the editable draft.
       const refreshTokenHints = (items: NotificationConnector[]) => items.map(c => {
+        if (isGoogleChatConnector(c)) {
+          const persisted = incoming.find(saved => saved.id === c.id && isGoogleChatConnector(saved));
+          const has_webhook_url = !!persisted && isGoogleChatConnector(persisted) && persisted.config.has_webhook_url;
+          return {...c, config: {...c.config, has_webhook_url}};
+        }
         if (!isTelegramConnector(c)) return c;
         const persisted = incoming.find(saved => saved.id === c.id && isTelegramConnector(saved));
         const has_token = !!persisted && isTelegramConnector(persisted) && persisted.config.has_token;
@@ -53,9 +60,11 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
     setDraft(items => items.map(c => c.id === id ? {...c, ...patch} : c));
     setError(""); setSaved(false);
   }
-  function add() {
-    setDraft(items => [...items, newTelegramConnector(crypto.randomUUID())]);
+  function add(kind: ConnectorKind) {
+    const id = crypto.randomUUID();
+    setDraft(items => [...items, kind === "google_chat" ? newGoogleChatConnector(id) : newTelegramConnector(id)]);
     setSaved(false); setError("");
+    queueMicrotask(() => { if (mounted.current) editors.current.get(id)?.focus(); });
   }
   function remove(id: string) {
     const remaining = draft.filter(c => c.id !== id);
@@ -71,6 +80,12 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
   async function save() {
     if (inFlight.current) return;
     const connectors = structuredClone(draft).map(c => {
+      if (isGoogleChatConnector(c)) {
+        const existing = baseline.find(saved => saved.id === c.id && isGoogleChatConnector(saved));
+        c.config.has_webhook_url = !!existing && isGoogleChatConnector(existing) && existing.config.has_webhook_url;
+        const url = c.config.webhook_url?.trim();
+        if (url) c.config.webhook_url = url; else delete c.config.webhook_url;
+      }
       if (isTelegramConnector(c)) {
         const existing = baseline.find(saved => saved.id === c.id && isTelegramConnector(saved));
         c.config.has_token = !!existing && isTelegramConnector(existing) && existing.config.has_token;
@@ -81,7 +96,7 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
       return c;
     });
     setAttempted(true); setSaved(false);
-    const errors = validateNotificationConnectors(connectors);
+    const errors = validateNotificationConnectors(connectors, settings.token_profiles);
     if (errors.length) { setError(errors.join(" ")); return; }
     const ticket = ++serial.current;
     inFlight.current = true; setBusy(true); setError("");
@@ -91,8 +106,8 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
       const result = await onSave(next);
       const stored = result?.notification_connectors ?? connectors.map(c => isTelegramConnector(c)
         ? {...c, config: {...c.config, has_token: c.config.has_token || !!c.config.bot_token}}
-        : c);
-      const clean = cleanNotificationConnectors(stored);
+        : isGoogleChatConnector(c) ? {...c, config: {...c.config, has_webhook_url: c.config.has_webhook_url || !!c.config.webhook_url}} : c);
+      const clean = cleanNotificationConnectors(stored.map(c => isGoogleChatConnector(c) ? {...c, config: {...c.config, has_webhook_url: c.config.has_webhook_url || !!c.config.webhook_url}} : c));
       if (current()) { setDraft(clean); setBaseline(clean); setSaved(true); setAttempted(false); }
     } catch {
       if (current()) setError("Could not save notification settings. Check your configuration and try again.");
@@ -103,7 +118,7 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
   return <section className="notifications-page" aria-labelledby="notifications-title">
     <div className="page-title">
       <div><h1 id="notifications-title">Notifications</h1><p>Choose which run updates each connector sends.</p></div>
-      <button ref={addButton} className="button button-secondary" disabled={busy} onClick={add}><Plus size={16} />Add connector</button>
+      <ConnectorPicker disabled={busy} buttonRef={addButton} onSelect={add} />
     </div>
     <div className="notifications-content">
       {error && <Notice>{error}</Notice>}
@@ -140,7 +155,7 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
                     {attempted && c.enabled && !c.events.length && <p id={`events-error-${c.id}`}>Select at least one run event.</p>}
                   </div>
                 </fieldset>
-              </> : <p>Unsupported connector type: {c.type}</p>}
+              </> : isGoogleChatConnector(c) ? <GoogleChatConnectorEditor connector={c} profiles={settings.token_profiles} busy={busy} attempted={attempted} edit={patch => edit(c.id, patch)} /> : <p>Unsupported connector type: {c.type}</p>}
               <div className="notifications-connector-actions" role="group" aria-label="Connector actions">
                 <button className="button button-secondary" onClick={() => remove(c.id)} aria-label={`Remove connector ${c.label}`}>Remove connector</button>
               </div>

@@ -56,7 +56,9 @@ impl TelegramTransport {
         destination: NotificationDestination,
         notification: RunNotification,
     ) -> DeliveryResult<()> {
-        let NotificationDestination::Telegram { chat_id, bot_token } = destination;
+        let NotificationDestination::Telegram { chat_id, bot_token } = destination else {
+            return Err(DeliveryFailure::Transport);
+        };
         if bot_token.is_empty()
             || !bot_token
                 .bytes()
@@ -133,7 +135,7 @@ fn request_failure(e: reqwest::Error) -> DeliveryFailure {
         DeliveryFailure::Transport
     }
 }
-fn plain(text: &str) -> String {
+pub(super) fn plain(text: &str) -> String {
     text.chars()
         .filter_map(|c| {
             if c.is_whitespace() || matches!(c, '<' | '>' | '&') {
@@ -151,7 +153,7 @@ fn plain(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-fn limited_text(text: &str) -> String {
+pub(super) fn limited_text(text: &str) -> String {
     let mut budget = 4096;
     text.chars()
         .take_while(|c| {

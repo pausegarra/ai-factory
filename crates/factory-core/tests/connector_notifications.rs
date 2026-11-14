@@ -388,7 +388,7 @@ async fn connector_disabled_and_unknown_providers_do_not_read_credentials_or_del
     .unwrap();
     configure(
         &f,
-        json!([connector("a","off",false,json!(["run_started","run_failed"])),{"id":"future","label":"Future","enabled":true,"events":["run_failed"],"type":"future","config":{}}]),
+        json!([{ "id":"gchat", "label":"Draft", "enabled":false, "events":["run_failed"], "type":"google_chat", "config":{} },connector("a","off",false,json!(["run_started","run_failed"])),{"id":"future","label":"Future","enabled":true,"events":["run_failed"],"type":"future","config":{}}]),
     );
     c.gets.lock().unwrap().clear();
     f.start_notification_delivery();
@@ -579,4 +579,204 @@ async fn connector_transition_from_synchronous_thread_uses_started_runtime() {
     t.wait_for_calls(1).await;
     f.shutdown().await;
     assert_eq!(t.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn google_chat_matches_all_filters_and_notifies_each_transition_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = Arc::new(common::notifications::RecordingTransport::default());
+    let f = open(dir.path(), t.clone());
+    let mut s = f.settings().unwrap();
+    s.token_profiles.push(TokenProfile {
+        id: "work".into(),
+        account: "alice".into(),
+        label: "Work".into(),
+        ..Default::default()
+    });
+    s.token_profiles.push(TokenProfile {
+        id: "other".into(),
+        account: "bob".into(),
+        label: "Other".into(),
+        ..Default::default()
+    });
+    s.notification_connectors=serde_json::from_value(json!([
+      {"id":"gchat","label":"Team","enabled":true,"events":["run_started","run_succeeded","run_failed","run_blocked"],"type":"google_chat","config":{"webhook_url":"https://chat.googleapis.com/v1/spaces/fixture/messages?key=PRIVATE_KEY&token=PRIVATE_TOKEN","triggers":["new_issue","pr_review"],"token_profile_ids":["work"]}},
+      connector("tg","telegram",true,json!(["run_started","run_succeeded","run_failed","run_blocked"]))
+    ])).unwrap();
+    f.save_settings(s).unwrap();
+    f.start_notification_delivery();
+    let mut selected = Vec::new();
+    for (n, trigger, origin, terminal) in [
+        (1, "new_issue", Some("work"), "succeeded"),
+        (2, "pr_review", Some("work"), "failed"),
+        (3, "new_issue", Some("work"), "blocked"),
+        (4, "new_issue", Some("other"), "failed"),
+        (5, "pr_approved", Some("work"), "failed"),
+        (6, "new_issue", None, "failed"),
+    ] {
+        let mut e = TriggerEvent::issue("acme/repo", n, "PRIVATE_KEY PRIVATE_TOKEN", "alice", "");
+        e.trigger_id = trigger.into();
+        e.event_id = format!("{trigger}:acme/repo#{n}");
+        e.origin_token_profile_id = origin.map(str::to_owned);
+        let id = f.enqueue(e).unwrap().unwrap();
+        f.set_run_status(&id, "running", None).unwrap();
+        f.set_run_status(&id, "running", None).unwrap();
+        f.set_run_status(&id, terminal, None).unwrap();
+        f.set_run_status(&id, terminal, None).unwrap();
+        if n <= 3 {
+            selected.push(id);
+        }
+    }
+    // Control message on the same Google Chat FIFO proves earlier work drained.
+    let mut e = TriggerEvent::issue("acme/repo", 7, "Control", "alice", "");
+    e.origin_token_profile_id = Some("work".into());
+    let control = f.enqueue(e).unwrap().unwrap();
+    f.set_run_status(&control, "failed", None).unwrap();
+    t.wait_for_calls(20).await;
+    f.shutdown().await;
+    let chats = t.chats();
+    let messages = t.messages();
+    let gc: Vec<_> = messages
+        .iter()
+        .zip(&chats)
+        .filter(|(_, c)| c.as_str() == "google_chat")
+        .map(|(m, _)| m)
+        .collect();
+    assert_eq!(gc.len(), 7);
+    for id in selected {
+        assert_eq!(gc.iter().filter(|m| m.run_id == id).count(), 2);
+    }
+    assert_eq!(gc.last().unwrap().run_id, control);
+    assert!(messages
+        .iter()
+        .all(|m| !m.body.contains("PRIVATE_KEY") && !m.body.contains("PRIVATE_TOKEN")));
+}
+
+#[tokio::test]
+async fn google_chat_revokes_held_http_and_queued_jobs_on_every_lifecycle_change() {
+    for action in ["rotate", "disable", "remove", "shutdown"] {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Arc::new(common::notifications::RecordingTransport::default());
+        *t.hold_chat.lock().unwrap() = Some("google_chat".into());
+        let f = open(dir.path(), t.clone());
+        let mut s = f.settings().unwrap();
+        s.token_profiles.push(TokenProfile {
+            id: "work".into(),
+            account: "alice".into(),
+            label: "Work".into(),
+            ..Default::default()
+        });
+        let connector:NotificationConnector=serde_json::from_value(json!({"id":"chat","label":"Chat","enabled":true,"events":["run_failed"],"type":"google_chat","config":{"webhook_url":"https://fixture.example/old?token=old_fixture","triggers":["new_issue"],"token_profile_ids":["work"]}})).unwrap();
+        s.notification_connectors = vec![connector.clone()];
+        f.save_settings(s).unwrap();
+        f.start_notification_delivery();
+        let emit = |n| {
+            let mut e = TriggerEvent::issue("acme/repo", n, "Fixture", "alice", "");
+            e.origin_token_profile_id = Some("work".into());
+            let id = f.enqueue(e).unwrap().unwrap();
+            f.set_run_status(&id, "failed", None).unwrap();
+            id
+        };
+        let first = emit(1);
+        t.wait_for_calls(1).await;
+        let queued = emit(2);
+        let mut s = f.settings().unwrap();
+        match action {
+            "rotate" => {
+                if let ConnectorProvider::GoogleChat(config) =
+                    &mut s.notification_connectors[0].provider
+                {
+                    config.webhook_url =
+                        Some("https://fixture.example/new?token=new_fixture".into());
+                }
+                f.save_settings(s).unwrap();
+            }
+            "disable" => {
+                s.notification_connectors[0].enabled = false;
+                f.save_settings(s).unwrap();
+            }
+            "remove" => {
+                s.notification_connectors.clear();
+                f.save_settings(s).unwrap();
+            }
+            _ => {
+                f.shutdown().await;
+            }
+        }
+        t.wait_for_cancelled(&first).await;
+        assert!(t.completed().is_empty());
+        assert!(!t.messages().iter().any(|m| m.run_id == queued));
+        if action != "shutdown" {
+            if action == "disable" {
+                let mut s = f.settings().unwrap();
+                s.notification_connectors[0].enabled = true;
+                f.save_settings(s).unwrap();
+            }
+            if action == "remove" {
+                let mut s = f.settings().unwrap();
+                s.notification_connectors.push(connector);
+                f.save_settings(s).unwrap();
+            }
+            *t.hold_chat.lock().unwrap() = None;
+            t.release.add_permits(1);
+            let fresh = emit(3);
+            t.wait_for_completed(&fresh).await;
+            f.shutdown().await;
+            assert_eq!(t.completed(), vec![fresh]);
+            assert_eq!(t.messages().len(), 2);
+        } else {
+            assert_eq!(t.messages().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn google_chat_queue_saturation_is_bounded_and_does_not_change_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = Arc::new(common::notifications::RecordingTransport::default());
+    *t.hold_chat.lock().unwrap() = Some("google_chat".into());
+    let f = open(dir.path(), t.clone());
+    let mut s = f.settings().unwrap();
+    s.token_profiles.push(TokenProfile {
+        id: "work".into(),
+        account: "alice".into(),
+        label: "Work".into(),
+        ..Default::default()
+    });
+    s.notification_connectors=serde_json::from_value(json!([{"id":"chat","label":"Chat","enabled":true,"events":["run_failed"],"type":"google_chat","config":{"webhook_url":"https://fixture.example/messages?token=fixture_queue","triggers":["new_issue"],"token_profile_ids":["work"]}}])).unwrap();
+    f.save_settings(s).unwrap();
+    f.start_notification_delivery();
+    let emit = |n| {
+        let mut e = TriggerEvent::issue("acme/repo", n, "Fixture", "alice", "");
+        e.origin_token_profile_id = Some("work".into());
+        let id = f.enqueue(e).unwrap().unwrap();
+        f.set_run_status(&id, "failed", None).unwrap();
+        id
+    };
+    let first = emit(1);
+    t.wait_for_calls(1).await;
+    let mut accepted_last = String::new();
+    let mut dropped = Vec::new();
+    for n in 2..=70 {
+        let id = emit(n);
+        if n == 65 {
+            accepted_last = id.clone();
+        }
+        if n > 65 {
+            dropped.push(id);
+        }
+    }
+    assert_eq!(t.messages().len(), 1);
+    for id in &dropped {
+        assert_eq!(f.run_detail(id).unwrap().run.status, "failed");
+    }
+    *t.hold_chat.lock().unwrap() = None;
+    t.release.add_permits(1);
+    t.wait_for_completed(&accepted_last).await;
+    f.shutdown().await;
+    assert_eq!(t.messages().len(), 65);
+    assert_eq!(t.completed().len(), 65);
+    assert_eq!(t.messages()[0].run_id, first);
+    assert!(t.messages().iter().all(|m| !dropped.contains(&m.run_id)));
+    assert!(f.snapshot().unwrap().service.last_error.is_none());
 }

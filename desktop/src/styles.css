@@ -3298,3 +3298,15 @@ select {
     align-items: stretch;
   }
 }
+.notifications-page > .page-title > .notifications-picker {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+.notifications-page .notifications-picker select {
+  width: 100%;
+  min-width: 0;
+  background: #272727;
+}

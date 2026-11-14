@@ -127,6 +127,7 @@ impl Store {
             number: event.number,
             title: event.title.clone(),
             actor: event.actor.clone(),
+            origin_token_profile_id: event.origin_token_profile_id.clone(),
             url: event.url.clone(),
             status: "queued".into(),
             current_step: None,
@@ -340,6 +341,7 @@ impl Store {
         // Workspace lifecycle has its own atomic update; stale status snapshots must not restore it.
         let mut r = r.clone();
         r.workspace = previous.workspace;
+        r.origin_token_profile_id = previous.origin_token_profile_id;
         let changed = previous.status != r.status;
         ensure!(
             db.execute(

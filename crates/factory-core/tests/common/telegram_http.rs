@@ -7,6 +7,7 @@ use tokio::{
 #[derive(Clone)]
 pub struct Request {
     pub method: String,
+    pub content_type: String,
     pub path: String,
     pub body: serde_json::Value,
 }
@@ -61,6 +62,14 @@ impl Server {
                     let mut line = headers.lines().next().unwrap().split_whitespace();
                     captured.lock().unwrap().push(Request {
                         method: line.next().unwrap().into(),
+                        content_type: headers
+                            .lines()
+                            .find_map(|l| {
+                                l.split_once(':')
+                                    .filter(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+                                    .map(|(_, value)| value.trim().to_owned())
+                            })
+                            .unwrap_or_default(),
                         path: line.next().unwrap().into(),
                         body: serde_json::from_slice(&bytes[end + 4..end + 4 + len]).unwrap(),
                     });

@@ -5,6 +5,13 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::json;
 use std::collections::HashSet;
 
+fn origin_is_current(settings: &Settings, event: &TriggerEvent) -> bool {
+    event
+        .origin_token_profile_id
+        .as_ref()
+        .is_none_or(|id| safe_id(id) && settings.token_profiles.iter().any(|p| &p.id == id))
+}
+
 impl Store {
     pub(crate) fn admit_review_scan(
         &self,
@@ -25,6 +32,7 @@ impl Store {
             let mut present = HashSet::new();
             let mut created = Vec::new();
             for candidate in candidates {
+                if !origin_is_current(settings, candidate) { continue; }
                 let identity = format!("{}#{}", candidate.repository, candidate.number);
                 if !present.insert(identity.clone()) { continue; }
                 let old = map.get(&identity);
@@ -65,6 +73,9 @@ impl Store {
 
     pub(crate) fn admit_event(&self, event: &TriggerEvent) -> Result<Option<String>> {
         self.with_admission(|tx, settings| {
+            if !origin_is_current(settings, event) {
+                return Ok(None);
+            }
             let flow = settings
                 .flows
                 .iter()
@@ -91,6 +102,9 @@ impl Store {
             "Invalid approval trigger"
         );
         self.with_admission(|tx, settings| {
+            if !origin_is_current(settings, event) {
+                return Ok(None);
+            }
             let flow = settings
                 .flows
                 .iter()

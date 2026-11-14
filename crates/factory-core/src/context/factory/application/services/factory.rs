@@ -99,7 +99,7 @@ impl Factory {
         base: &str,
         credentials: Arc<dyn Credentials>,
     ) -> Result<Arc<Self>> {
-        let transport = crate::context::factory::infrastructure::rest_clients::telegram::TelegramTransport::new()
+        let transport = crate::context::factory::infrastructure::rest_clients::notifications::ConnectorTransports::new()
             .map_err(|_| anyhow::anyhow!("Cannot initialize notification transport"))?;
         Self::open_with_notification_transport(root, base, credentials, Arc::new(transport))
     }
@@ -215,7 +215,7 @@ impl Factory {
         sink.enqueue(notification);
         if let Some(dispatcher) = self.connector_dispatcher.lock().unwrap().as_ref() {
             if let Some(event) = NotificationEvent::from_run_status(&transition.run.status) {
-                match self.store.notification_targets(event) {
+                match self.store.notification_targets(event, &transition.run) {
                     Ok(targets) => {
                         for target in targets {
                             dispatcher.enqueue(ConnectorNotificationJob {
@@ -294,7 +294,8 @@ impl Factory {
         self.validate_codex_bindings(&s)?;
         self.store.save_settings(&s)?;
         if let Some(dispatcher) = self.connector_dispatcher.lock().unwrap().as_ref() {
-            dispatcher.reconcile(&s.notification_connectors);
+            // Fail closed after a committed save if metadata cannot be read.
+            dispatcher.reconcile(&self.store.notification_worker_keys().unwrap_or_default());
         }
         self.emit("settings_changed", None, None);
         self.wake.notify_one();
@@ -769,3 +770,6 @@ impl Factory {
         agents::execute(self, id, cancel).await
     }
 }
+
+#[cfg(test)]
+mod connector_notification_tests;

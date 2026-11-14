@@ -1,5 +1,7 @@
 use super::store::Store;
-use crate::context::factory::application::dto::connector_notification::ConnectorTarget;
+use crate::context::factory::application::dto::connector_notification::{
+    ConnectorTarget, ConnectorTargetConfig, ConnectorWorkerKey,
+};
 use crate::context::factory::application::services::connector_notifications::targets_for_event;
 use crate::*;
 use anyhow::ensure;
@@ -14,6 +16,7 @@ impl Store {
     pub(crate) fn notification_targets(
         &self,
         event: NotificationEvent,
+        run: &Run,
     ) -> Result<Vec<ConnectorTarget>> {
         let db = self.db.lock().unwrap();
         let raw: Option<String> = db
@@ -24,17 +27,53 @@ impl Store {
             .transpose()?
             .unwrap_or_default();
         let references = read_refs(&db)?;
-        Ok(targets_for_event(&settings.notification_connectors, event)
-            .into_iter()
-            .filter_map(|c| {
-                let ConnectorProvider::Telegram(config) = &c.provider else {
-                    return None;
-                };
-                Some(ConnectorTarget {
-                    connector_id: c.id.clone(),
+        Ok(targets_for_event(
+            &settings.notification_connectors,
+            event,
+            run,
+            &settings.token_profiles,
+        )
+        .into_iter()
+        .filter_map(|c| {
+            let config = match &c.provider {
+                ConnectorProvider::Telegram(config) => ConnectorTargetConfig::Telegram {
                     chat_id: config.chat_id.clone(),
-                    credential_ref: references.get(&c.id)?.clone(),
-                })
+                },
+                ConnectorProvider::GoogleChat(_) => ConnectorTargetConfig::GoogleChat,
+                _ => return None,
+            };
+            Some(ConnectorTarget {
+                connector_id: c.id.clone(),
+                credential_ref: references.get(&c.id)?.clone(),
+                config,
+            })
+        })
+        .collect())
+    }
+    pub(crate) fn notification_worker_keys(&self) -> Result<HashMap<String, ConnectorWorkerKey>> {
+        let db = self.db.lock().unwrap();
+        let raw: Option<String> = db
+            .query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0))
+            .optional()?;
+        let settings: Settings = raw
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        let refs = read_refs(&db)?;
+        Ok(settings
+            .notification_connectors
+            .iter()
+            .filter_map(|c| {
+                let key = match &c.provider {
+                    ConnectorProvider::Telegram(_) => ConnectorWorkerKey::Telegram,
+                    ConnectorProvider::GoogleChat(_) if c.enabled => {
+                        ConnectorWorkerKey::GoogleChat {
+                            credential_ref: refs.get(&c.id)?.clone(),
+                        }
+                    }
+                    _ => return None,
+                };
+                Some((c.id.clone(), key))
             })
             .collect())
     }
@@ -46,34 +85,80 @@ impl Store {
         &self,
         settings: &Settings,
     ) -> Result<PreparedNotificationSettings> {
+        use crate::context::factory::infrastructure::rest_clients::google_chat::parse_webhook_url;
+        const URL_ERROR: &str =
+            "Enter a valid HTTPS webhook URL without credentials or a fragment.";
         let old = self.notification_refs()?;
+        let previous = self.raw_settings()?;
         let mut connectors = settings.notification_connectors.clone();
         let mut references = HashMap::new();
         for c in &mut connectors {
-            if let ConnectorProvider::Telegram(config) = &mut c.provider {
-                config.chat_id = config.chat_id.trim().into();
-                let replacement = config
-                    .bot_token
-                    .take()
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty());
-                let reference = match replacement {
-                    Some(token) => Some(self.stage_secret(&token)?),
-                    None => old.get(&c.id).cloned(),
-                };
-                if c.enabled {
-                    let key = reference.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("Enabled Telegram connector requires a Bot token")
-                    })?;
-                    // Verify the actual OS entry, not an input hint or a stale cache entry.
-                    let token = self.credentials.get(key).map_err(|_| anyhow::anyhow!("Cannot read notification credential; unlock the OS credential store and retry"))?
-                        .filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Stored notification credential is missing; replace the Bot token"))?;
-                    self.secret_cache.lock().unwrap().insert(key.clone(), token);
+            let same_provider = previous.notification_connectors.iter().any(|p| {
+                p.id == c.id
+                    && matches!(
+                        (&p.provider, &c.provider),
+                        (
+                            ConnectorProvider::Telegram(_),
+                            ConnectorProvider::Telegram(_)
+                        ) | (
+                            ConnectorProvider::GoogleChat(_),
+                            ConnectorProvider::GoogleChat(_)
+                        )
+                    )
+            });
+            let (replacement, google_chat) = match &mut c.provider {
+                ConnectorProvider::Telegram(config) => {
+                    config.chat_id = config.chat_id.trim().into();
+                    (
+                        config
+                            .bot_token
+                            .take()
+                            .map(|s| s.trim().to_owned())
+                            .filter(|s| !s.is_empty()),
+                        false,
+                    )
                 }
-                config.has_token = reference.is_some();
-                if let Some(reference) = reference {
-                    references.insert(c.id.clone(), reference);
+                ConnectorProvider::GoogleChat(config) => {
+                    let replacement = config.webhook_url.take().filter(|s| !s.trim().is_empty());
+                    if let Some(url) = &replacement {
+                        parse_webhook_url(url).map_err(|_| anyhow::anyhow!(URL_ERROR))?;
+                    }
+                    (replacement.map(|s| s.trim().to_owned()), true)
                 }
+                ConnectorProvider::Unsupported { .. } => continue,
+            };
+            let reference = match replacement {
+                Some(secret) => Some(self.stage_secret(&secret)?),
+                None if same_provider => old.get(&c.id).cloned(),
+                None => None,
+            };
+            if c.enabled {
+                let key = reference.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(if google_chat {
+                        "Enabled Google Chat connector requires a webhook URL"
+                    } else {
+                        "Enabled Telegram connector requires a Bot token"
+                    })
+                })?;
+                let secret=self.credentials.get(key).map_err(|_| anyhow::anyhow!("Cannot read notification credential; unlock the OS credential store and retry"))?
+                    .filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Stored notification credential is missing; replace the credential"))?;
+                if google_chat {
+                    parse_webhook_url(&secret).map_err(|_| anyhow::anyhow!(URL_ERROR))?;
+                }
+                self.secret_cache
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone(), secret);
+            }
+            match &mut c.provider {
+                ConnectorProvider::Telegram(config) => config.has_token = reference.is_some(),
+                ConnectorProvider::GoogleChat(config) => {
+                    config.has_webhook_url = reference.is_some()
+                }
+                _ => {}
+            }
+            if let Some(reference) = reference {
+                references.insert(c.id.clone(), reference);
             }
         }
         Ok(PreparedNotificationSettings {
@@ -122,6 +207,10 @@ pub(super) fn annotate(settings: &mut Settings, refs: &HashMap<String, String>) 
         if let ConnectorProvider::Telegram(config) = &mut c.provider {
             config.bot_token = None;
             config.has_token = refs.contains_key(&c.id);
+        }
+        if let ConnectorProvider::GoogleChat(config) = &mut c.provider {
+            config.webhook_url = None;
+            config.has_webhook_url = refs.contains_key(&c.id);
         }
     }
 }

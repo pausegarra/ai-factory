@@ -11,6 +11,7 @@ it("adds a disabled Telegram connector and discards the token draft", async () =
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
   expect(screen.getByText("No notification connectors")).toBeTruthy();
   await user.click(screen.getByRole("button", {name:"Add connector"}));
+  await user.selectOptions(screen.getByRole("combobox", {name:"Connector to add"}), "telegram");
   expect((screen.getByRole("combobox", {name:"Connector type"}) as HTMLSelectElement).value).toBe("telegram");
   expect((screen.getByRole("checkbox", {name:"Enabled"}) as HTMLInputElement).checked).toBe(false);
   const token = screen.getByLabelText("Bot token"); expect(token.getAttribute("type")).toBe("password");
@@ -22,6 +23,7 @@ it("saves active fields and clears secrets even when the save API returns void",
   const onSave = vi.fn(async (_s: Settings) => {});
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button", {name:"Add connector"}));
+  fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});
   fireEvent.click(screen.getByRole("checkbox", {name:"Enabled"}));
   fireEvent.click(screen.getByRole("button", {name:"Save changes"}));
   expect(screen.getByRole("alert").textContent).toContain("Chat ID");expect(onSave).not.toHaveBeenCalled();
@@ -59,6 +61,7 @@ it("disables controls during save, prevents duplicate requests, and preserves dr
   const pending = deferred<Settings>();const onSave = vi.fn(()=>pending.promise);
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button",{name:"Add connector"}));
+  fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});
   fireEvent.change(screen.getByLabelText("Bot token"),{target:{value:"PRIVATE_DRAFT"}});
   const save=screen.getByRole("button",{name:"Save changes"});fireEvent.click(save);fireEvent.click(save);
   expect(onSave).toHaveBeenCalledTimes(1);expect((screen.getByLabelText("Bot token") as HTMLInputElement).closest("fieldset")?.disabled).toBe(true);
@@ -88,7 +91,8 @@ it("supports keyboard toggles and restores focus after removal", async () => {
 it("ignores late saves after unmount and releases page busy state", async () => {
   const pending=deferred<Settings>();const onDirty=vi.fn();const onBusy=vi.fn();
   const view=render(<NotificationsPage settings={noticeSettings()} onSave={()=>pending.promise} onDirtyChange={onDirty} onBusyChange={onBusy} />);
-  fireEvent.click(screen.getByRole("button",{name:"Add connector"}));fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
+  fireEvent.click(screen.getByRole("button",{name:"Add connector"}));
+  fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
   expect(onBusy).toHaveBeenLastCalledWith(true);view.unmount();
   expect(onBusy).toHaveBeenLastCalledWith(false);expect(onDirty).toHaveBeenLastCalledWith(false);
   const calls=onBusy.mock.calls.length;

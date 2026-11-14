@@ -128,6 +128,7 @@ mod tests {
             previous_status: previous.into(),
             run: crate::Run {
                 id: "run-alpha".into(),
+                origin_token_profile_id: None,
                 event_id: "event".into(),
                 trigger_id: "new_issue".into(),
                 repository: "acme/repo".into(),
