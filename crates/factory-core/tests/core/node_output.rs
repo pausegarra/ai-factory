@@ -196,7 +196,8 @@ async fn first_response_contract_is_injected_into_system_prompt_and_native_schem
         let prompt = std::fs::read_to_string(session.join("spec.stdin-1.txt")).unwrap();
         for instruction in [
             "Single-attempt output contract",
-            "No response repair or automatic retry",
+            "at most two output-only corrections solely for malformed artifact sha256 strings",
+            "No general response repair or automatic task retry",
             "Before ending this execution",
             "Return exactly one JSON object",
         ] {
@@ -224,6 +225,10 @@ async fn first_response_contract_is_injected_into_system_prompt_and_native_schem
             assert!(system.contains("Single-attempt output contract"));
             assert!(system.contains("AI Factory unattended execution contract"));
             assert!(system.contains("Output JSON Schema"));
+            assert!(system.contains("No general response repair or automatic task retry"));
+            assert!(system.contains(
+                "at most two output-only corrections solely for malformed artifact sha256 strings"
+            ));
         }
     }
 }
@@ -280,7 +285,7 @@ async fn neutral_artifact_category_preserves_failure_status_and_physical_file_ch
         let (dir, factory) = output_fixture(
             agent,
             &[
-                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"bad"}],"data":{}}}),
+                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":""}],"data":{}}}),
             ],
         );
         let (id, detail) = run_output_fixture(&factory).await;
@@ -332,7 +337,7 @@ async fn process_failures_artifact_errors_and_valid_blockers_are_not_retried() {
         for (response, expected_status) in [
             (json!({"exit":7}), "failed"),
             (
-                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"bad","kind":"report"}],"data":{}}}),
+                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"","kind":"report"}],"data":{}}}),
                 "failed",
             ),
             (

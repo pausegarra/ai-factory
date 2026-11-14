@@ -45,7 +45,11 @@ if attempt == 1:
         return {'path': str(path.relative_to(base)), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest() if hashed else '', 'kind': 'artifact'}
     artifacts = [ref('builder-report.md'), ref('implementation.patch'),
                  ref('validation', False), ref('SHA256SUMS.txt', False)]
-    if scenario == 'absolute':
+    if scenario == 'uppercase':
+        for artifact in artifacts: artifact['sha256'] = artifact['sha256'].upper()
+    elif scenario == 'empty_hash':
+        for artifact in artifacts: artifact['sha256'] = ''
+    elif scenario == 'absolute':
         for artifact in artifacts:
             artifact['path'] = str(base / artifact['path'])
     elif scenario == 'workspace_prefix_file':
@@ -127,7 +131,14 @@ async fn delivery(
 #[tokio::test]
 async fn memory_artifact_delivery_reaches_downstream_on_first_response() {
     for agent in ["codex", "opencode"] {
-        for scenario in ["memory", "workspace", "absolute", "workspace_prefix_file"] {
+        for scenario in [
+            "memory",
+            "workspace",
+            "absolute",
+            "workspace_prefix_file",
+            "uppercase",
+            "empty_hash",
+        ] {
             let (dir, id, detail) = delivery(scenario, agent, true).await;
             assert_eq!(
                 detail.run.status, "succeeded",

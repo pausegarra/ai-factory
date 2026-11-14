@@ -115,12 +115,17 @@ impl ArtifactRoots {
     }
 }
 
-pub(in super::super) fn archive(
-    value: &mut Value,
+struct PlannedArtifact {
+    file: PathBuf,
+    expected: String,
+    kind: Value,
+}
+
+fn plan(
+    value: &Value,
     workspace: &Path,
     memory: &Path,
-    node: &str,
-) -> Result<()> {
+) -> Result<(ArtifactRoots, Vec<PlannedArtifact>)> {
     let roots = ArtifactRoots {
         workspace: workspace.canonicalize()?,
         memory: memory.canonicalize()?,
@@ -151,14 +156,39 @@ pub(in super::super) fn archive(
             files.push(path);
         }
         for file in files {
-            planned.push((file, expected.to_owned(), artifact["kind"].clone()));
+            planned.push(PlannedArtifact {
+                file,
+                expected: expected.to_owned(),
+                kind: artifact["kind"].clone(),
+            });
         }
     }
+    Ok((roots, planned))
+}
+
+pub(in super::super) fn preflight(value: &Value, workspace: &Path, memory: &Path) -> Result<()> {
+    plan(value, workspace, memory)?;
+    Ok(())
+}
+
+pub(in super::super) fn archive(
+    value: &mut Value,
+    workspace: &Path,
+    memory: &Path,
+    node: &str,
+) -> Result<()> {
+    super::artifact_hashes::ensure_artifact_hash_formats(value)?;
+    let (roots, planned) = plan(value, workspace, memory)?;
     // Resolve the whole manifest before writing into the archive.
     // Otherwise expanding a memory directory can consume its own new copies.
     // File contents are streamed, never retained for the whole directory.
     let mut archived = Vec::new();
-    for (file, expected, kind) in planned {
+    for PlannedArtifact {
+        file,
+        expected,
+        kind,
+    } in planned
+    {
         roots
             .checked(&file)?
             .context("Artifact disappeared before archival")?;
@@ -258,5 +288,37 @@ mod tests {
                 32 * 1024 * 1024
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod hash_format_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn malformed_late_hash_is_reported_before_any_archive_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let memory = temp.path().join("memory");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&memory).unwrap();
+        std::fs::write(workspace.join("first.md"), b"first").unwrap();
+        std::fs::write(workspace.join("issue-65-tests-verification.md"), b"report").unwrap();
+        let memory = memory.canonicalize().unwrap();
+        let mut value = json!({"artifacts":[
+            {"path":"first.md","sha256":format!("{:x}", Sha256::digest(b"first")),"kind":"report"},
+            {"path":"issue-65-tests-verification.md","sha256":"47452e8575b83bef2aa9e37c1a0a90b??","kind":"report"}
+        ]});
+        let error = archive(&mut value, &workspace, &memory, "builder").unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("Invalid artifact sha256 format"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("issue-65-tests-verification.md"));
+        assert!(diagnostic.contains("length="));
+        assert!(diagnostic.contains("non_hex=true"));
+        assert!(!memory.join("artifacts").exists());
     }
 }
