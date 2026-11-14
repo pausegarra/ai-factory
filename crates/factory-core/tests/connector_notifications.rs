@@ -30,6 +30,47 @@ fn open(dir: &std::path::Path, t: Arc<common::notifications::RecordingTransport>
     )
     .unwrap()
 }
+
+async fn drop_factory_after_readers_drain(mut factory: Arc<Factory>) {
+    // Shutdown cancels delivery, but OS reads already on the blocking pool may
+    // retain Factory. Drop its last owner here so factory.lock is released before reopen.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match Arc::try_unwrap(factory) {
+                Ok(factory) => break drop(factory),
+                Err(shared) => factory = shared,
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Factory readers drained before restart");
+}
+
+#[tokio::test]
+async fn connector_restart_waits_for_last_factory_reader_before_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let transport = Arc::new(common::notifications::RecordingTransport::default());
+    let factory = open(dir.path(), transport.clone());
+    let reader = factory.clone();
+    factory.shutdown().await;
+    let mut closing = Box::pin(drop_factory_after_readers_drain(factory));
+    let waits_for_reader = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(closing.as_mut(), cx).is_pending())
+    })
+    .await;
+    drop(reader);
+    if waits_for_reader {
+        closing.await;
+    }
+    assert!(
+        waits_for_reader,
+        "reopening must wait for outstanding Factory readers"
+    );
+    let reopened = open(dir.path(), transport);
+    reopened.shutdown().await;
+}
+
 #[tokio::test]
 async fn connector_transition_filters_and_preserves_native_sink() {
     let dir = tempfile::tempdir().unwrap();
@@ -372,7 +413,7 @@ async fn connector_retry_is_a_new_attempt_and_restart_does_not_replay_history() 
     f.set_run_status(&retry, "failed", None).unwrap();
     t.wait_for_calls(2).await;
     f.shutdown().await;
-    drop(f);
+    drop_factory_after_readers_drain(f).await;
     let f = Factory::open_with_notification_transport(
         dir.path().into(),
         "http://127.0.0.1:9",

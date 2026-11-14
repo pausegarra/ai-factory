@@ -2,6 +2,202 @@ use super::{fixture, terminal, FixtureDir};
 use factory_core::*;
 use serde_json::json;
 use std::time::Duration;
+
+pub(super) fn committed_comment_snapshot(db: &rusqlite::Connection, body: &str) -> bool {
+    let Some(key) = body
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("<!-- ai-factory:"))
+        .and_then(|line| line.strip_suffix(" -->"))
+        .filter(|key| key.starts_with("node-result:v1:"))
+    else {
+        return false;
+    };
+    // Another connection can see this row only after the terminal transition commits.
+    // Reviews may already have requeued the current node by the time its comment arrives.
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_node_comments
+         WHERE key=?1
+         AND json_extract(snapshot,'$.run_id')=run_id
+         AND json_extract(snapshot,'$.node_id')=node_id
+         AND json_extract(snapshot,'$.revision')=revision
+         AND json_extract(snapshot,'$.status') IN ('succeeded','blocked','failed','skipped'))",
+        [key],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn snapshot_fixture() -> (tempfile::TempDir, rusqlite::Connection, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("snapshot.sqlite3")).unwrap();
+    db.execute_batch("CREATE TABLE nodes(run_id TEXT,node_id TEXT,json TEXT);
+        CREATE TABLE issue_node_comments(key TEXT,run_id TEXT,node_id TEXT,revision INTEGER,snapshot TEXT);
+        INSERT INTO nodes VALUES('run','builder','{\"status\":\"pending\"}');
+        INSERT INTO issue_node_comments VALUES('node-result:v1:known','run','builder',1,
+            '{\"run_id\":\"run\",\"node_id\":\"builder\",\"revision\":1,\"status\":\"succeeded\"}');").unwrap();
+    (
+        dir,
+        db,
+        "Result\n\n<!-- ai-factory:node-result:v1:known -->".into(),
+    )
+}
+
+#[test]
+fn committed_comment_snapshot_survives_current_node_requeue() {
+    let (_dir, db, body) = snapshot_fixture();
+    assert!(committed_comment_snapshot(&db, &body));
+}
+
+#[test]
+fn committed_comment_snapshot_requires_matching_marker_and_revision() {
+    let (_dir, db, body) = snapshot_fixture();
+    db.execute("UPDATE nodes SET json='{\"status\":\"succeeded\"}'", [])
+        .unwrap();
+    assert!(!committed_comment_snapshot(
+        &db,
+        &body.replace("known", "unknown")
+    ));
+    assert!(!committed_comment_snapshot(&db, "No marker"));
+    db.execute(
+        "UPDATE issue_node_comments SET snapshot=json_set(snapshot,'$.revision',2)",
+        [],
+    )
+    .unwrap();
+    assert!(!committed_comment_snapshot(&db, &body));
+}
+
+#[test]
+fn committed_comment_snapshot_rejects_nonterminal_or_uncommitted_snapshot() {
+    let (dir, db, body) = snapshot_fixture();
+    db.execute("UPDATE nodes SET json='{\"status\":\"succeeded\"}'", [])
+        .unwrap();
+    db.execute(
+        "UPDATE issue_node_comments SET snapshot=json_set(snapshot,'$.status','running')",
+        [],
+    )
+    .unwrap();
+    assert!(!committed_comment_snapshot(&db, &body));
+    db.execute("DELETE FROM issue_node_comments", []).unwrap();
+    let writer = rusqlite::Connection::open(dir.path().join("snapshot.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN;
+        INSERT INTO issue_node_comments VALUES('node-result:v1:known','run','builder',1,
+            '{\"run_id\":\"run\",\"node_id\":\"builder\",\"revision\":1,\"status\":\"succeeded\"}');").unwrap();
+    assert!(!committed_comment_snapshot(&db, &body));
+    writer.execute_batch("COMMIT").unwrap();
+    assert!(committed_comment_snapshot(&db, &body));
+}
+
+#[tokio::test]
+async fn issue_node_comments_deliver_previous_round_while_correction_is_running() {
+    let script = r#"set -eu
+cat >/dev/null
+memory="$AI_FACTORY_MEMORY_DIR"
+status=succeeded
+data='{}'
+case "$AI_FACTORY_NODE_ID" in
+  builder)
+    if [ -f "$memory/builder-first" ]; then
+      : > "$memory/correction-started"
+      while [ ! -f "$memory/release-correction" ]; do sleep 0.02; done
+    else
+      : > "$memory/builder-first"
+    fi
+    ;;
+  review_tests)
+    data='{"approved":true}'
+    if [ ! -f "$memory/review-first" ]; then
+      : > "$memory/review-first"
+      status=blocked
+      data='{"approved":false}'
+    fi
+    ;;
+esac
+printf '{"status":"%s","summary":"Round complete","artifacts":[],"data":%s}' "$status" "$data" > "$AI_FACTORY_RESULT_PATH"
+"#;
+    let (dir, factory) = fixture(script, 4);
+    let mut settings = factory.settings().unwrap();
+    let template = settings.flows[0].nodes[0].clone();
+    settings.flows[0].nodes = ["builder", "review_tests", "finish"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let mut node = template.clone();
+            node.id = id.into();
+            node.name = id.into();
+            node.depends_on = match index {
+                0 => vec![],
+                1 => vec!["builder".into()],
+                _ => vec!["review_tests".into()],
+            };
+            if id == "review_tests" {
+                node.access = "read".into();
+                node.result_schema = json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}});
+            }
+            node
+        }).collect();
+    factory.save_settings(settings).unwrap();
+    dir.comment_status
+        .store(503, std::sync::atomic::Ordering::SeqCst);
+    let id = enqueue(&factory);
+    let memory = dir.path().join("data/memory/acme/repo/runs").join(&id);
+    factory.start();
+    let delivery = tokio::time::timeout(Duration::from_secs(10), async {
+        while !memory.join("correction-started").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let before = factory.run_detail(&id).unwrap();
+        dir.comment_status
+            .store(200, std::sync::atomic::Ordering::SeqCst);
+        connection(&dir)
+            .execute(
+                "UPDATE issue_node_comments SET next_at='2000-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        loop {
+            let count: u32 = connection(&dir)
+                .query_row(
+                    "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if count == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (before, factory.run_detail(&id).unwrap(), bodies(&dir))
+    })
+    .await;
+    // Release the fake process even if the delivery deadline failed.
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(memory.join("release-correction"), "").unwrap();
+    let final_detail = terminal(&factory, &id).await;
+    factory.shutdown().await;
+    let (before, after, messages) =
+        delivery.expect("previous round comments delivered during correction");
+    for detail in [before, after] {
+        assert!(detail
+            .nodes
+            .iter()
+            .all(|node| matches!(node.status.as_str(), "pending" | "running")));
+        assert_eq!(
+            detail
+                .nodes
+                .iter()
+                .find(|node| node.id == "builder")
+                .unwrap()
+                .status,
+            "running"
+        );
+    }
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|body| body.contains("result 1")));
+    assert_eq!(final_detail.run.status, "succeeded");
+}
+
 fn enqueue(f: &Factory) -> String {
     f.enqueue(TriggerEvent::issue(
         "acme/repo",
