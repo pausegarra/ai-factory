@@ -1,8 +1,8 @@
+mod artifact_repair;
+mod invocation;
 mod output;
 mod repair;
 mod results;
-
-use output::{extract_result, spawn_output};
 
 use super::agent_skills::SkillPolicy;
 use super::workspaces;
@@ -17,7 +17,7 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
-use tokio::{io::AsyncWriteExt, process::Command, task::JoinSet};
+use tokio::{process::Command, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn event_branch(event: &TriggerEvent) -> String {
@@ -805,17 +805,6 @@ async fn execute_node(
         let system = format!("You execute one assigned AI Factory workflow node. Complete the assigned role with the permitted tools. This contract governs final response formatting; write Markdown deliverables to files and declare their artifacts instead of returning prose.\n\n{}\n\n{contract}", include_str!("agent-instructions.md"));
         cmd.env("OPENCODE_CONFIG_CONTENT",json!({"permission":permissions,"agent":{"ai-factory":{"mode":"primary","permission":permissions,"prompt":system}}}).to_string());
     }
-    #[cfg(unix)]
-    cmd.process_group(0);
-    #[cfg(windows)]
-    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "Cannot start {} CLI; configure installed executable path",
-            node.agent
-        )
-    })?;
-    let mut process_tree = ProcessTree::attach(&mut child)?;
     let mut state = factory
         .store
         .detail(run)?
@@ -830,62 +819,20 @@ async fn execute_node(
     r.current_step = Some(node.id.clone());
     factory.store.save_run(&r)?;
     factory.emit("node_changed", Some(run), Some(&node.id));
-    let mut stdin = child.stdin.take().unwrap();
-    let input_prompt = prompt.clone();
-    let input = tokio::spawn(async move {
-        stdin.write_all(input_prompt.as_bytes()).await?;
-        stdin.shutdown().await
-    });
     let log_path = session.join(format!("{}.log", node.id));
-    let log = Arc::new(std::sync::Mutex::new(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?,
-    ));
-    let out = spawn_output(
+    let raw = invocation::run(invocation::Invocation {
         factory,
         run,
-        &node.id,
-        child.stdout.take().unwrap(),
-        log.clone(),
-        true,
-        true,
-    );
-    let err = spawn_output(
-        factory,
-        run,
-        &node.id,
-        child.stderr.take().unwrap(),
-        log.clone(),
-        false,
-        false,
-    );
-    let status = tokio::select! {
-        r = child.wait() => r.context("CLI wait failed"),
-        _ = cancel.cancelled() => {
-            process_tree.terminate();
-            let _ = child.kill().await;
-            Err(anyhow::anyhow!("Run cancelled"))
-        }
-    };
-    // A CLI may exit while descendants still own its pipes. End the entire
-    // session before draining output, including on normal leader exit.
-    process_tree.terminate();
-    let _ = input.await;
-    let output = out.await.context("CLI output reader failed")??;
-    let _ = err.await;
-    let status = status?;
-    if !status.success() {
-        bail!("Agent exited with {status}");
-    }
-    let raw = if result_path.exists() {
-        let raw = std::fs::read_to_string(&result_path)?;
-        std::fs::write(&result_path, factory.redact(&raw))?;
-        Some(raw)
-    } else {
-        extract_result(&output)
-    };
+        node_id: &node.id,
+        agent: &node.agent,
+        track_session: true,
+        command: cmd,
+        prompt: &prompt,
+        result_path: &result_path,
+        log_path: &log_path,
+        cancel: &cancel,
+    })
+    .await?;
     let evidence = memory
         .join("diagnostics")
         .join(&node.id)
@@ -904,7 +851,24 @@ async fn execute_node(
     let recovered =
         repair::recover_response(&repair_context, raw, &transport, &validator, event, &cancel)
             .await?;
-    let mut value = recovered.value;
+    let mut value = artifact_repair::recover(
+        artifact_repair::RecoveryContext {
+            factory,
+            run,
+            node,
+            settings: &settings,
+            workspace,
+            memory,
+            session: &session,
+            codex_home: codex_home.as_deref(),
+            skill_policy: &skill_policy,
+            transport_schema: &transport,
+            validator: &validator,
+            cancel: &cancel,
+        },
+        recovered.value,
+    )
+    .await?;
     if node.id == VERSION_BUMP_NODE_ID
         && value["status"] == "succeeded"
         && value["data"].get("bump_version").is_none_or(Value::is_null)

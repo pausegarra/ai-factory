@@ -57,8 +57,8 @@ pub(crate) fn archive_artifact(
         }
         let hash = format!("{:x}", hash.finalize());
         ensure!(
-            expected_hash.is_empty() || expected_hash == hash,
-            "Artifact hash mismatch"
+            expected_hash.is_empty() || expected_hash.eq_ignore_ascii_case(&hash),
+            "Artifact hash mismatch: expected {expected_hash}; actual {hash}"
         );
         file.sync_all()?;
         Ok(hash)
@@ -125,4 +125,80 @@ pub(crate) fn recover(root: &Path, store: &Store, cleaner: &dyn RunCleanup) -> R
         }
     }
     Ok(errors)
+}
+
+#[cfg(test)]
+mod artifact_hash_tests {
+    use super::*;
+    #[test]
+    fn archive_artifact_verifies_correct_empty_and_mixed_case_hashes() {
+        for content in [b"evidence".as_slice(), b"".as_slice()] {
+            let expected = format!("{:x}", Sha256::digest(content));
+            let mixed: String = expected
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            for declared in ["", expected.as_str(), mixed.as_str()] {
+                let temp = tempfile::tempdir().unwrap();
+                let memory = temp.path().canonicalize().unwrap();
+                let (path, actual) = archive_artifact(
+                    &memory,
+                    "builder",
+                    std::ffi::OsStr::new("report.md"),
+                    &mut std::io::Cursor::new(content),
+                    declared,
+                )
+                .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(std::fs::read(path).unwrap(), content);
+            }
+        }
+    }
+    #[test]
+    fn content_mismatch_removes_invalid_copy_and_reports_both_digests() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = temp.path().canonicalize().unwrap();
+        let error = archive_artifact(
+            &memory,
+            "builder",
+            std::ffi::OsStr::new("report.md"),
+            &mut std::io::Cursor::new(b"evidence"),
+            &"0".repeat(64),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("Artifact hash mismatch"));
+        assert!(message.contains(&format!("expected {}", "0".repeat(64))));
+        assert!(message.contains(&format!("actual {:x}", Sha256::digest(b"evidence"))));
+        assert!(!message.contains("format"));
+        assert_eq!(
+            std::fs::read_dir(memory.join("artifacts/builder"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+    #[test]
+    fn archive_artifact_accepts_uppercase_and_stores_computed_lowercase() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = temp.path().canonicalize().unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"evidence"));
+        let (path, actual) = archive_artifact(
+            &memory,
+            "builder",
+            std::ffi::OsStr::new("report.md"),
+            &mut std::io::Cursor::new(b"evidence"),
+            &expected.to_uppercase(),
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(std::fs::read(path).unwrap(), b"evidence");
+    }
 }

@@ -1169,13 +1169,18 @@ async fn independent_writer_nodes_never_overlap_in_one_workspace() {
 async fn real_cli_artifact_contract_checks_contents_and_authorized_paths() {
     use sha2::{Digest, Sha256};
     let good_hash = format!("{:x}", Sha256::digest(b"evidence"));
+    let wrong_hash = "0".repeat(64);
     for (setup, hash, expected) in [
         (
             "printf evidence > report.txt",
             good_hash.as_str(),
             "succeeded",
         ),
-        ("printf evidence > report.txt", "wrong", "failed"),
+        (
+            "printf evidence > report.txt",
+            wrong_hash.as_str(),
+            "failed",
+        ),
         ("ln -s /etc/hosts report.txt", good_hash.as_str(), "failed"),
     ] {
         let result = serde_json::json!({"status":"succeeded","summary":"done","artifacts":[{"path":"report.txt","sha256":hash,"kind":"report"}],"data":{}});
@@ -1459,6 +1464,9 @@ mod codex_accounts_execution;
 #[path = "core/issue_node_comments.rs"]
 mod issue_node_comments;
 
+#[cfg(unix)]
+#[path = "core/artifact_hash_repair.rs"]
+mod artifact_hash_repair;
 #[cfg(unix)]
 #[path = "core/packaging_policy.rs"]
 mod packaging_policy;

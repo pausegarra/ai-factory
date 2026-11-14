@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn output_fixture(
     agent: &str,
@@ -13,11 +14,13 @@ node = os.environ['AI_FACTORY_NODE_ID']
 count = result.parent / (node + '.test-count')
 attempt = int(count.read_text()) + 1 if count.exists() else 1
 count.write_text(str(attempt))
+prompt = sys.stdin.read()
 mode = os.environ.get('AI_FACTORY_RESPONSE_MODE', 'initial')
+if 'AI Factory artifact hash correction' in prompt:
+    mode = 'repair'
 if mode != 'repair':
     work = result.parent / (node + '.work-count')
     work.write_text(str(int(work.read_text()) + 1 if work.exists() else 1))
-prompt = sys.stdin.read()
 (result.parent / f'{node}.stdin-{attempt}.txt').write_text(prompt)
 (result.parent / f'{node}.launch-{attempt}.json').write_text(json.dumps({
     'args': sys.argv[1:], 'config': os.environ.get('OPENCODE_CONFIG_CONTENT', ''),
@@ -60,6 +63,8 @@ if response.get('artifact'):
             item['kind'] = ''
     if response.get('drop_artifact'):
         value['artifacts'].pop()
+    if response.get('malformed_hash'):
+        value['artifacts'][0]['sha256'] = 'bad??'
     if response.get('change_hash'):
         value['artifacts'][0]['sha256'] = '0' * 64
     if response.get('change_path'):
@@ -209,6 +214,7 @@ async fn first_response_contract_is_injected_into_system_prompt_and_native_schem
         for instruction in [
             "Single-work-execution output contract",
             "output-only corrections",
+            "at most two output-only corrections solely for malformed artifact sha256 strings",
             "Before ending this execution",
             "Return exactly one JSON object",
         ] {
@@ -236,6 +242,10 @@ async fn first_response_contract_is_injected_into_system_prompt_and_native_schem
             assert!(system.contains("Single-work-execution output contract"));
             assert!(system.contains("AI Factory unattended execution contract"));
             assert!(system.contains("Output JSON Schema"));
+            assert!(system.contains("This node has one work execution"));
+            assert!(system.contains(
+                "at most two output-only corrections solely for malformed artifact sha256 strings"
+            ));
         }
     }
 }
@@ -292,7 +302,7 @@ async fn neutral_artifact_category_preserves_failure_status_and_physical_file_ch
         let (dir, factory) = output_fixture(
             agent,
             &[
-                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"bad"}],"data":{}}}),
+                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":""}],"data":{}}}),
             ],
         );
         let (id, detail) = run_output_fixture(&factory).await;
@@ -344,7 +354,7 @@ async fn process_failures_artifact_errors_and_valid_blockers_are_not_retried() {
         for (response, expected_status) in [
             (json!({"exit":7}), "failed"),
             (
-                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"bad","kind":"report"}],"data":{}}}),
+                json!({"value":{"status":"succeeded","summary":"done","artifacts":[{"path":"missing","sha256":"","kind":"report"}],"data":{}}}),
                 "failed",
             ),
             (
@@ -842,6 +852,74 @@ async fn file_result_evidence_is_redacted_after_each_correction() {
                     "{} leaked rejected data",
                     entry.path().display()
                 );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn json_correction_then_hash_correction_preserves_work_and_result() {
+    for agent in ["codex", "opencode"] {
+        for status in ["succeeded", "failed"] {
+            let mut corrected = valid_result();
+            corrected["status"] = json!(status);
+            let (dir, factory) = output_fixture(
+                agent,
+                &[
+                    json!({"value":{"status":"complete","summary":"work complete","artifacts":[],"data":{"branch":"feature"}},"artifact":true,"malformed_hash":true}),
+                    json!({"value":corrected,"artifact":true,"malformed_hash":true}),
+                    json!({"value":corrected,"artifact":true}),
+                ],
+            );
+            let (id, detail) = run_output_fixture(&factory).await;
+            assert_eq!(
+                detail.run.status, status,
+                "{agent}/{status}: {:?}",
+                detail.nodes
+            );
+            assert_eq!(
+                attempts(&dir, &id),
+                3,
+                "{agent}/{status}: {:?}",
+                detail.nodes
+            );
+            let session = dir.path().join("data/sessions").join(&id);
+            assert_eq!(
+                std::fs::read_to_string(session.join("spec.work-count")).unwrap(),
+                "1"
+            );
+            let node = &detail.nodes[0];
+            assert_eq!(node.session_id.as_deref(), Some("work-session"));
+            let result = node.result.as_ref().unwrap();
+            assert_eq!(result["status"], status);
+            if status == "succeeded" {
+                assert_eq!(result["summary"], "work complete");
+            } else {
+                // The runner adds terminal failure context after archiving.
+                assert!(result["summary"]
+                    .as_str()
+                    .unwrap()
+                    .contains("work complete"));
+            }
+            assert_eq!(result["data"], json!({"branch":"feature"}));
+            let artifact = &result["artifacts"][0];
+            assert_eq!(
+                std::fs::read_to_string(artifact["path"].as_str().unwrap()).unwrap(),
+                "original evidence"
+            );
+            assert_eq!(
+                artifact["sha256"],
+                format!("{:x}", Sha256::digest(b"original evidence"))
+            );
+            assert!(std::fs::read_to_string(session.join("spec.stdin-3.txt"))
+                .unwrap()
+                .contains("AI Factory artifact hash correction"));
+            if status == "failed" {
+                assert!(node
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("structured response correction reported failed"));
             }
         }
     }
