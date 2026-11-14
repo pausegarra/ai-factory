@@ -3162,3 +3162,94 @@ select {
 @media (max-width: 960px) {
   .usage-trigger { justify-content: center; }
 }
+
+/* Notifications form layout. */
+.notifications-page {
+  display: grid;
+  gap: 32px;
+  min-width: 0;
+  max-width: 100%;
+}
+.notifications-page > .page-title {
+  margin-bottom: 0;
+  flex-wrap: wrap;
+}
+.notifications-page > .page-title > div {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.notifications-page > .page-title > .button {
+  flex-shrink: 0;
+}
+.notifications-page .notifications-content,
+.notifications-page .notifications-connector-content {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+.notifications-page .notifications-content > .notice {
+  margin-bottom: 0;
+}
+.notifications-page .notifications-connector {
+  margin: 0;
+  min-inline-size: 0;
+  max-width: 100%;
+  overflow: visible;
+}
+.notifications-page .notifications-connector > legend {
+  max-width: 100%;
+  padding-inline: 8px;
+  overflow-wrap: anywhere;
+}
+.notifications-page .notifications-events {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-inline-size: 0;
+}
+.notifications-page .notifications-events > legend {
+  padding: 0;
+  margin-bottom: 12px;
+  max-width: 100%;
+}
+.notifications-page .notifications-event-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.notifications-page .notifications-connector-actions,
+.notifications-page .notifications-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.notifications-page .field small,
+.notifications-page .notifications-connector p {
+  overflow-wrap: anywhere;
+}
+.notifications-page .button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 960px) {
+  .notifications-page > .page-title {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .notifications-page > .page-title > div {
+    flex: initial;
+    width: 100%;
+  }
+  .notifications-page .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .notifications-page .notifications-connector-actions,
+  .notifications-page .notifications-form-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
