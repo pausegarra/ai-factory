@@ -148,6 +148,7 @@ impl Github {
                 "Issue URL identity mismatch"
             );
             event.payload = json!({"issue":fresh});
+            event.origin_token_profile_id = Some(profile.id.clone());
             factory.enqueue(event)?;
         }
         Ok(())
@@ -174,7 +175,7 @@ impl Github {
             let Some(origin) = origins.get(&(repo.clone(), n)) else {
                 continue;
             };
-            let result = self.poll_approval(factory, origin).await;
+            let result = self.poll_approval(factory, origin, profile).await;
             if let Err(error) = result {
                 failures.push(format!("{repo}#{n}: {error}"));
             }
@@ -186,7 +187,12 @@ impl Github {
         }
     }
 
-    async fn poll_approval(&self, factory: &Factory, origin: &TrackedPrOrigin) -> Result<()> {
+    async fn poll_approval(
+        &self,
+        factory: &Factory,
+        origin: &TrackedPrOrigin,
+        profile: &TokenProfile,
+    ) -> Result<()> {
         if !factory.workflow_enabled_for("pr_approved", &origin.actor)? {
             return Ok(());
         }
@@ -249,7 +255,7 @@ impl Github {
             if let Some(id) = fresh_comments.first() {
                 approval["comment_id"] = json!(id);
             }
-            let event = pr_event(
+            let mut event = pr_event(
                 "pr_approved",
                 format!("approval:{repo}#{n}@{sha}"),
                 repo,
@@ -258,6 +264,7 @@ impl Github {
                 &pr,
                 json!({"pull_request":pr,"source_issue":source,"approval":approval}),
             )?;
+            event.origin_token_profile_id = Some(profile.id.clone());
             factory.enqueue_approval(event, &fresh_comments, approved)?;
         }
         if reviews.is_err() && comments.is_err() {
@@ -295,7 +302,7 @@ impl Github {
             {
                 continue;
             }
-            candidates.push(pr_event(
+            let mut event = pr_event(
                 "pr_review",
                 String::new(),
                 &repo,
@@ -303,7 +310,9 @@ impl Github {
                 reviewer,
                 &pr,
                 json!({"pull_request":pr,"reviewer":reviewer}),
-            )?);
+            )?;
+            event.origin_token_profile_id = Some(profile.id.clone());
+            candidates.push(event);
         }
         // Clear withdrawal edges only after the complete grouped scan succeeds.
         // Preserve the existing owner-specific durable observation keys.

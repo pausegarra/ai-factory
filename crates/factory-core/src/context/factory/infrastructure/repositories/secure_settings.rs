@@ -135,6 +135,7 @@ impl Store {
             .lock()
             .unwrap()
             .values()
+            .flat_map(|s| redaction_patterns(s))
             .map(|s| s.len().saturating_sub(1))
             .max()
             .unwrap_or(0)
@@ -143,7 +144,11 @@ impl Store {
     pub fn redact_window(&self, bytes: &[u8], range: std::ops::Range<usize>) -> String {
         let cache = self.secret_cache.lock().unwrap();
         let mut spans = Vec::new();
-        for secret in cache.values().filter(|s| !s.is_empty()) {
+        for secret in cache
+            .values()
+            .flat_map(|s| redaction_patterns(s))
+            .filter(|s| !s.is_empty())
+        {
             for (match_start, window) in bytes.windows(secret.len()).enumerate() {
                 if window == secret.as_bytes() {
                     let start = match_start.max(range.start);
@@ -372,4 +377,29 @@ impl Store {
         self.collect_credentials();
         Ok(())
     }
+}
+
+fn redaction_patterns(secret: &str) -> Vec<String> {
+    let mut patterns = vec![secret.to_owned()];
+    if let Ok(url) = reqwest::Url::parse(secret) {
+        for (raw, (key, value)) in url
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .zip(url.query_pairs())
+        {
+            if matches!(key.as_ref(), "key" | "token") {
+                if !value.is_empty() {
+                    patterns.push(value.into_owned());
+                }
+                if let Some((_, raw_value)) = raw.split_once('=') {
+                    if !raw_value.is_empty() {
+                        patterns.push(raw_value.into());
+                    }
+                }
+            }
+        }
+    }
+    patterns
 }
