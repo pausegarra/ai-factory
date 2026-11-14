@@ -22,12 +22,18 @@ it.each(contract.cases)("shows parser-backed remaining contract: $name", async t
     const bar = within(row).getByRole("progressbar", {
       name: "Codex Fixture Codex Primary window remaining",
     });
+    expect(within(row).getByText("5 hour window")).toBeTruthy();
+    expect(within(row).queryByText(/Resets in|Reset time reached/)).toBeNull();
+    expect(row.querySelector("time")).toBeNull();
+    expect(bar.getAttribute("aria-describedby")).toBeNull();
     expect(bar.getAttribute("aria-valuemin")).toBe("0");
     expect(bar.getAttribute("aria-valuemax")).toBe("100");
     expect(bar.getAttribute("aria-valuenow")).toBe(String(testCase.remaining));
     expect((bar.firstElementChild as HTMLElement).style.width).toBe(testCase.remaining + "%");
     expect(within(row).queryByText(/Remaining percentage is not available/)).toBeNull();
   } else {
+    expect(within(row).queryByText(/Resets in|Reset time reached|^5 hour window$|^Weekly window$/)).toBeNull();
+    expect(row.querySelector("time")).toBeNull();
     expect(within(row).queryByText(/Remaining:|Used:|Reported usage:/)).toBeNull();
     expect(within(row).queryByRole("progressbar")).toBeNull();
   }
