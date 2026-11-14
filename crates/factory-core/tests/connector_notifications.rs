@@ -106,7 +106,7 @@ async fn connector_transition_filters_and_preserves_native_sink() {
     assert_eq!(t.chats(), vec!["a"]);
     assert_eq!(
         t.messages()[0].body,
-        "acme/repo #18 · Safe title · Execution timed out."
+        "Trigger: New task · acme/repo #18 · Safe title · Execution timed out."
     );
     assert_eq!(
         native
@@ -468,9 +468,24 @@ async fn connector_retry_is_a_new_attempt_and_restart_does_not_replay_history() 
             ))
             .collect::<Vec<_>>(),
         vec![
-            (first.as_str(), 1, "failed", "acme/repo #1 · Safe title"),
-            (retry.as_str(), 2, "failed", "acme/repo #1 · Safe title"),
-            (fresh.as_str(), 1, "failed", "acme/repo #2 · Safe title"),
+            (
+                first.as_str(),
+                1,
+                "failed",
+                "Trigger: New task · acme/repo #1 · Safe title"
+            ),
+            (
+                retry.as_str(),
+                2,
+                "failed",
+                "Trigger: New task · acme/repo #1 · Safe title"
+            ),
+            (
+                fresh.as_str(),
+                1,
+                "failed",
+                "Trigger: New task · acme/repo #2 · Safe title"
+            ),
         ]
     );
     f.shutdown().await;
@@ -881,4 +896,90 @@ async fn connectors_reject_deleted_profiles_and_suppress_historical_orphan_origi
             .collect::<Vec<_>>(),
         vec![control.as_str(), control.as_str()]
     );
+}
+
+#[tokio::test]
+async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let transport = Arc::new(common::notifications::RecordingTransport::default());
+    let f = open(dir.path(), transport.clone());
+    let mut settings = f.settings().unwrap();
+    settings.token_profiles.push(TokenProfile {
+        id: "work".into(),
+        account: "alice".into(),
+        label: "Work".into(),
+        ..Default::default()
+    });
+    let mut telegram = connector(
+        "tg",
+        "telegram",
+        true,
+        json!(["run_started", "run_succeeded", "run_failed", "run_blocked"]),
+    );
+    telegram["config"]["triggers"] = json!(["new_issue", "pr_approved", "pr_review"]);
+    settings.notification_connectors = serde_json::from_value(json!([
+        telegram,
+        {"id":"gc","label":"Chat","enabled":true,
+         "events":["run_started","run_succeeded","run_failed","run_blocked"],
+         "type":"google_chat","config":{
+             "webhook_url":"https://fixture.example/messages?token=fixture_only",
+             "triggers":["new_issue","pr_approved","pr_review"],"token_profile_ids":["work"]}}
+    ]))
+    .unwrap();
+    f.save_settings(settings).unwrap();
+    let native = Arc::new(common::notifications::RecordingNotifications::default());
+    f.set_run_notification_sink(native.clone());
+    f.start_notification_delivery();
+    let mut expected = Vec::new();
+    let mut number = 0;
+    for (trigger, label) in [
+        ("new_issue", "New task"),
+        ("pr_approved", "PR approved"),
+        ("pr_review", "Review requested"),
+    ] {
+        for status in ["running", "succeeded", "failed", "blocked"] {
+            number += 1;
+            let mut event = TriggerEvent::issue("acme/repo", number, "Shared title", "alice", "");
+            event.trigger_id = trigger.into();
+            event.event_id = format!("{trigger}:acme/repo#{number}");
+            event.origin_token_profile_id = Some("work".into());
+            let id = f.enqueue(event).unwrap().unwrap();
+            f.set_run_status(&id, status, Some("timeout PRIVATE_ERROR".into()))
+                .unwrap();
+            let suffix = if matches!(status, "failed" | "blocked") {
+                " · Execution timed out."
+            } else {
+                ""
+            };
+            expected.push((
+                id,
+                status,
+                format!("Trigger: {label} · acme/repo #{number} · Shared title{suffix}"),
+            ));
+        }
+    }
+    transport.wait_for_calls(24).await;
+    f.shutdown().await;
+    let native_messages = native.drain();
+    let messages = transport.messages();
+    let chats = transport.chats();
+    assert_eq!(native_messages.len(), 12);
+    assert_eq!(messages.len(), 24);
+    assert_eq!(chats.len(), 24);
+    for (id, status, body) in expected {
+        let native = native_messages.iter().find(|m| m.run_id == id).unwrap();
+        assert_eq!(native.status, status);
+        assert_eq!(native.body, body);
+        assert!(!native.body.contains("PRIVATE_ERROR"));
+        for chat in ["telegram", "google_chat"] {
+            let delivered: Vec<_> = messages
+                .iter()
+                .zip(&chats)
+                .filter(|(m, c)| m.run_id == id && c.as_str() == chat)
+                .map(|(m, _)| m)
+                .collect();
+            assert_eq!(delivered.len(), 1);
+            assert_eq!(delivered[0], native);
+        }
+    }
 }

@@ -705,7 +705,10 @@ async fn notification_runtime_success_keeps_start_and_result_without_ui() {
     assert_eq!(result[0].run_id, id);
     assert_eq!(result[0].status, "succeeded");
     assert_eq!(result[0].attempt, persisted.attempt);
-    assert_eq!(result[0].body, "acme/repo #11 · [AI] Runtime test");
+    assert_eq!(
+        result[0].body,
+        "Trigger: New task · acme/repo #11 · [AI] Runtime test"
+    );
     assert!(persisted.workspace.is_none());
     assert!(persisted.error.is_none());
 }
@@ -734,7 +737,10 @@ async fn notification_runtime_fast_completion_preserves_both() {
         vec![(id.as_str(), "running"), (id.as_str(), "succeeded")]
     );
     for m in messages {
-        assert_eq!(m.body, "acme/repo #11 · [AI] Runtime test");
+        assert_eq!(
+            m.body,
+            "Trigger: New task · acme/repo #11 · [AI] Runtime test"
+        );
         assert_eq!(m.attempt, 1);
     }
     assert!(factory.run_detail(&id).unwrap().run.workspace.is_none());
@@ -772,7 +778,10 @@ async fn notification_runtime_failed_and_blocked() {
                 .collect::<Vec<_>>(),
             vec![(id.as_str(), "running"), (id.as_str(), state)]
         );
-        assert_eq!(messages[1].body, "acme/repo #11 · [AI] Runtime test");
+        assert_eq!(
+            messages[1].body,
+            "Trigger: New task · acme/repo #11 · [AI] Runtime test"
+        );
         let detail = factory.run_detail(&id).unwrap();
         assert!(detail.run.workspace.is_none());
         assert_eq!(detail.nodes[0].status, state);

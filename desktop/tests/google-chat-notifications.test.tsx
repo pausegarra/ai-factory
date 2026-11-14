@@ -14,16 +14,18 @@ it("opens a keyboard accessible provider selector without creating a connector o
   const user=userEvent.setup();const dirty=vi.fn();const onSave=vi.fn();
   render(<NotificationsPage settings={settings()} onSave={onSave} onDirtyChange={dirty}/>);
   const add=screen.getByRole("button",{name:"Add connector"});add.focus();await user.keyboard("{Enter}");
-  const picker=screen.getByRole("combobox",{name:"Connector to add"});expect(document.activeElement).toBe(picker);
-  expect(within(picker).getAllByRole("option").map(o=>(o as HTMLOptionElement).value)).toEqual(["","telegram","google_chat"]);
+  const picker=screen.getByRole("dialog",{name:"Choose a connector"});
+  expect(document.activeElement).toBe(within(picker).getByRole("button",{name:"Close connector selector"}));
+  expect(within(picker).getByRole("button",{name:"Telegram"})).toBeTruthy();
+  expect(within(picker).getByRole("button",{name:"Google Chat"})).toBeTruthy();
   expect(screen.queryByLabelText("Webhook URL")).toBeNull();expect(screen.queryByLabelText("Bot token")).toBeNull();
   expect(dirty).toHaveBeenLastCalledWith(false);
-  await user.keyboard("{Escape}");expect(screen.queryByRole("combobox",{name:"Connector to add"})).toBeNull();expect(document.activeElement).toBe(add);expect(onSave).not.toHaveBeenCalled();
+  await user.keyboard("{Escape}");expect(screen.queryByRole("dialog")).toBeNull();expect(document.activeElement).toBe(add);expect(onSave).not.toHaveBeenCalled();
 });
 it("adds Google Chat disabled with only URL credentials and saves filters while clearing returned secrets",async()=>{
   const user=userEvent.setup();const onSave=vi.fn(async(s:Settings)=>s);
   render(<NotificationsPage settings={settings()} onSave={onSave}/>);
-  await user.click(screen.getByRole("button",{name:"Add connector"}));await user.selectOptions(screen.getByRole("combobox",{name:"Connector to add"}),"google_chat");
+  await user.click(screen.getByRole("button",{name:"Add connector"}));await user.click(within(screen.getByRole("dialog",{name:"Choose a connector"})).getByRole("button",{name:"Google Chat"}));
   const card=screen.getByRole("group",{name:"Google Chat"});expect(document.activeElement).toBe(card);
   const input=screen.getByLabelText("Webhook URL") as HTMLInputElement;expect(input.type).toBe("password");
   expect(screen.queryByLabelText("Bot token")).toBeNull();expect((screen.getByRole("checkbox",{name:"Enabled"}) as HTMLInputElement).checked).toBe(false);
