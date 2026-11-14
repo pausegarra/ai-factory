@@ -673,7 +673,7 @@ fn notification_committed_result_precedes_node_write_failure() {
     assert_eq!(messages[0].status, "failed");
     assert_eq!(
         messages[0].body,
-        "acme/repo #11 · [AI] fixture · Execution timed out."
+        "Trigger: New task · acme/repo #11 · [AI] fixture · Execution timed out."
     );
     drop(messages);
     f.store

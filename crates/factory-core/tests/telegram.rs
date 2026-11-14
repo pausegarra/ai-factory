@@ -9,7 +9,7 @@ fn message() -> RunNotification {
         attempt: 1,
         status: "failed".into(),
         title: "AI Factory — Run failed".into(),
-        body: "acme/repo #18 · Safe title · Execution timed out.".into(),
+        body: "Trigger: New task · acme/repo #18 · Safe title · Execution timed out.".into(),
     }
 }
 fn destination() -> NotificationDestination {
@@ -37,7 +37,7 @@ async fn telegram_posts_safe_plain_text_json() {
     assert!(requests[0].path == "/bot123456:fixture_only/sendMessage");
     assert_eq!(
         requests[0].body,
-        serde_json::json!({"chat_id":"-1001","text":"AI Factory — Run failed\nacme/repo #18 · Safe title · Execution timed out.","link_preview_options":{"is_disabled":true}})
+        serde_json::json!({"chat_id":"-1001","text":"AI Factory — Run failed\nTrigger: New task · acme/repo #18 · Safe title · Execution timed out.","link_preview_options":{"is_disabled":true}})
     );
 }
 #[tokio::test]

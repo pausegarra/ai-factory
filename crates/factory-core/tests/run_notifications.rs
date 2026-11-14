@@ -30,7 +30,7 @@ fn notification_lifecycle_uses_persisted_status_once() -> Result<()> {
             attempt: f.run_detail(&id)?.run.attempt,
             status: "running".into(),
             title: "AI Factory — Run started".into(),
-            body: "acme/repo #11 · [AI] Notify me".into()
+            body: "Trigger: New task · acme/repo #11 · [AI] Notify me".into()
         }
     );
     f.set_run_status(&id, "succeeded", None)?;
@@ -40,7 +40,10 @@ fn notification_lifecycle_uses_persisted_status_once() -> Result<()> {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].status, "succeeded");
     assert_eq!(ended[0].title, "AI Factory — Run succeeded");
-    assert_eq!(ended[0].body, "acme/repo #11 · [AI] Notify me");
+    assert_eq!(
+        ended[0].body,
+        "Trigger: New task · acme/repo #11 · [AI] Notify me"
+    );
     assert_eq!(f.run_detail(&id)?.run.status, "succeeded");
     Ok(())
 }
@@ -105,7 +108,7 @@ fn notification_failed_and_blocked_have_safe_details() -> Result<()> {
         assert_eq!(messages[0].title, format!("AI Factory — Run {state}"));
         assert_eq!(
             messages[0].body,
-            format!("acme/repo #{number} · Outcome{suffix}")
+            format!("Trigger: New task · acme/repo #{number} · Outcome{suffix}")
         );
         f.set_run_status(&id, state, Some("changed error".into()))?;
         assert!(sink.drain().is_empty());
@@ -143,7 +146,10 @@ fn notification_retry_has_independent_identity() -> Result<()> {
             (second.as_str(), "succeeded", 2)
         ]
     );
-    assert_eq!(messages[1].body, "acme/repo #11 · Retry");
+    assert_eq!(
+        messages[1].body,
+        "Trigger: New task · acme/repo #11 · Retry"
+    );
     Ok(())
 }
 #[test]
@@ -208,10 +214,15 @@ fn notification_simultaneous_runs_keep_their_metadata() -> Result<()> {
     let all = sink.drain();
     assert_eq!(all.len(), 4);
     for (id, body, state, suffix) in [
-        (a, "acme/repo #21 · Alpha", "failed", "Execution timed out."),
+        (
+            a,
+            "Trigger: New task · acme/repo #21 · Alpha",
+            "failed",
+            "Execution timed out.",
+        ),
         (
             b,
-            "acme/repo #22 · Beta",
+            "Trigger: New task · acme/repo #22 · Beta",
             "blocked",
             "Execution reported an error. See run details.",
         ),
@@ -273,7 +284,10 @@ fn notification_hides_telegram_shaped_tokens_before_truncation() {
         f.set_run_status(&id, "running", None).unwrap();
         assert_eq!(
             sink.drain()[0].body,
-            format!("acme/repo #{} · [Title hidden]", n + 100)
+            format!(
+                "Trigger: New task · acme/repo #{} · [Title hidden]",
+                n + 100
+            )
         );
     }
 }
@@ -286,5 +300,8 @@ fn notification_hides_credentials_obfuscated_by_directional_marks() {
         "123456:abc\u{200f}def\u{061c}ghijklmnopqrstuvwxyz_0123456789",
     );
     f.set_run_status(&id, "running", None).unwrap();
-    assert_eq!(sink.drain()[0].body, "acme/repo #200 · [Title hidden]");
+    assert_eq!(
+        sink.drain()[0].body,
+        "Trigger: New task · acme/repo #200 · [Title hidden]"
+    );
 }
