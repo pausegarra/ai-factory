@@ -1,3 +1,4 @@
+use crate::context::factory::application::dto::connector_notification::ConnectorNotificationJob;
 use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
 use crate::context::factory::domain::entities::run_transition::RunTransition;
 use crate::context::factory::infrastructure::filesystem::run_cleanup::LocalRunCleanup;
@@ -18,6 +19,7 @@ use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ActiveWorker {
+    event_id: String,
     trigger_id: String,
     cancel: CancellationToken,
 }
@@ -33,13 +35,12 @@ impl QueuedWorkerScan {
         factory: &Factory,
         id: &str,
         trigger_id: &str,
-        capacity: usize,
     ) -> Result<Option<CancellationToken>> {
         if trigger_id == "pr_approved" && self.approval_deferred {
             return Ok(None);
         }
 
-        let reservation = factory.register_queued_worker(id, capacity);
+        let reservation = factory.register_queued_worker(id);
         if trigger_id == "pr_approved" && !matches!(reservation.as_ref(), Ok(Some(_))) {
             // Preserve FIFO among approvals for the rest of this queue snapshot.
             // Other triggers must still be considered for any free global slots.
@@ -66,6 +67,8 @@ pub struct Factory {
     pub(crate) lifecycle_gate: Mutex<()>,
     pub(crate) deletion_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     pub(crate) cleanup: Arc<dyn RunCleanup>,
+    connector_dispatcher: Mutex<Option<super::connector_notifications::ConnectorDispatcher>>,
+    notification_transport: Arc<dyn NotificationTransport>,
     run_notification_sink: Mutex<Arc<dyn RunNotificationSink>>,
 }
 
@@ -74,6 +77,7 @@ mod worker_tests;
 
 impl Drop for Factory {
     fn drop(&mut self) {
+        self.stop.cancel();
         // Explicit unlock also releases descriptors briefly inherited by a fork
         // in another worker before that worker's exec closes them.
         let _ = fs2::FileExt::unlock(&self._process_lock);
@@ -90,6 +94,16 @@ impl Factory {
         root: PathBuf,
         base: &str,
         credentials: Arc<dyn Credentials>,
+    ) -> Result<Arc<Self>> {
+        let transport = crate::context::factory::infrastructure::rest_clients::telegram::TelegramTransport::new()
+            .map_err(|_| anyhow::anyhow!("Cannot initialize notification transport"))?;
+        Self::open_with_notification_transport(root, base, credentials, Arc::new(transport))
+    }
+    pub fn open_with_notification_transport(
+        root: PathBuf,
+        base: &str,
+        credentials: Arc<dyn Credentials>,
+        transport: Arc<dyn NotificationTransport>,
     ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
@@ -151,8 +165,24 @@ impl Factory {
             lifecycle_gate: Mutex::new(()),
             deletion_locks: Mutex::new(HashMap::new()),
             cleanup,
+            connector_dispatcher: Mutex::new(None),
+            notification_transport: transport,
             run_notification_sink: Mutex::new(Arc::new(NoopRunNotificationSink)),
         }))
+    }
+    pub fn start_notification_delivery(self: &Arc<Self>) {
+        let _gate = self.lifecycle_gate.lock().unwrap();
+        if self.stop.is_cancelled() {
+            return;
+        }
+        let mut dispatcher = self.connector_dispatcher.lock().unwrap();
+        if dispatcher.is_none() {
+            *dispatcher = Some(super::connector_notifications::ConnectorDispatcher::start(
+                Arc::downgrade(self),
+                self.notification_transport.clone(),
+                self.stop.child_token(),
+            ));
+        }
     }
     /// Install an output port for future transitions; existing history is never replayed.
     pub fn set_run_notification_sink(&self, sink: Arc<dyn RunNotificationSink>) {
@@ -167,6 +197,21 @@ impl Factory {
         };
         let sink = self.run_notification_sink.lock().unwrap().clone();
         sink.enqueue(notification);
+        if let Some(dispatcher) = self.connector_dispatcher.lock().unwrap().as_ref() {
+            if let Some(event) = NotificationEvent::from_run_status(&transition.run.status) {
+                match self.store.notification_targets(event) {
+                    Ok(targets) => {
+                        for target in targets {
+                            dispatcher.enqueue(ConnectorNotificationJob {
+                                target,
+                                transition: transition.clone(),
+                            });
+                        }
+                    }
+                    Err(_) => eprintln!("notification_delivery_failed connector=unavailable reason=invalid_response"),
+                }
+            }
+        }
     }
     pub(crate) fn claim_run_for_execution(&self, id: &str) -> Result<bool> {
         let _gate = self.lifecycle_gate.lock().unwrap();
@@ -232,6 +277,9 @@ impl Factory {
         s.validate()?;
         self.validate_codex_bindings(&s)?;
         self.store.save_settings(&s)?;
+        if let Some(dispatcher) = self.connector_dispatcher.lock().unwrap().as_ref() {
+            dispatcher.reconcile(&s.notification_connectors);
+        }
         self.emit("settings_changed", None, None);
         self.wake.notify_one();
         self.settings()
@@ -282,7 +330,34 @@ impl Factory {
         });
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
         let (runs, deletions) = self.store.snapshot_history()?;
+        let settings = self.store.public_settings()?;
+        let capacity = {
+            let active = self.active.lock().unwrap();
+            let by_trigger = ["new_issue", "pr_review", "pr_approved"]
+                .into_iter()
+                .map(|id| {
+                    Ok((
+                        id.to_string(),
+                        CapacityUsage {
+                            active: active
+                                .values()
+                                .filter(|worker| worker.trigger_id == id)
+                                .count(),
+                            limit: settings.concurrency_for(id)?,
+                        },
+                    ))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+            ExecutionCapacity {
+                global: CapacityUsage {
+                    active: active.len(),
+                    limit: settings.max_concurrent,
+                },
+                by_trigger,
+            }
+        };
         let mut metrics = Metrics {
             total: runs.len() as u64,
             ..Metrics::default()
@@ -301,6 +376,7 @@ impl Factory {
             runs,
             deletions,
             metrics,
+            capacity,
             service: self.service.lock().unwrap().clone(),
         })
     }
@@ -501,11 +577,7 @@ impl Factory {
             eof: next == total && !["running", "pending"].contains(&n.status.as_str()),
         })
     }
-    pub(crate) fn register_queued_worker(
-        &self,
-        id: &str,
-        capacity: usize,
-    ) -> Result<Option<CancellationToken>> {
+    pub(crate) fn register_queued_worker(&self, id: &str) -> Result<Option<CancellationToken>> {
         let Ok(_gate) = self.lifecycle_gate.try_lock() else {
             return Ok(None);
         };
@@ -518,14 +590,21 @@ impl Factory {
         if detail.run.status != "queued" {
             return Ok(None);
         }
+        let settings = self.store.public_settings()?;
+        let trigger_limit = settings.concurrency_for(&detail.run.trigger_id)?;
         let mut active = self.active.lock().unwrap();
-        if active.len() >= capacity || active.contains_key(id) {
-            return Ok(None);
-        }
-        if detail.run.trigger_id == "pr_approved"
-            && active
+        let used = active
+            .values()
+            .filter(|worker| worker.trigger_id == detail.run.trigger_id)
+            .count();
+        // A cancelled/terminal worker keeps its event reserved until process and
+        // workspace cleanup finish, even when global capacity has spare slots.
+        if active.contains_key(id)
+            || active
                 .values()
-                .any(|worker| worker.trigger_id == "pr_approved")
+                .any(|worker| worker.event_id == detail.run.event_id)
+            || active.len() >= settings.max_concurrent
+            || used >= trigger_limit
         {
             return Ok(None);
         }
@@ -533,13 +612,17 @@ impl Factory {
         active.insert(
             id.into(),
             ActiveWorker {
+                event_id: detail.run.event_id,
                 trigger_id: detail.run.trigger_id,
                 cancel: cancel.clone(),
             },
         );
+        drop(active);
+        self.emit("capacity_changed", Some(id), None);
         Ok(Some(cancel))
     }
     pub fn start(self: &Arc<Self>) {
+        self.start_notification_delivery();
         if self.started.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -568,8 +651,7 @@ impl Factory {
                 if let Ok(runs) = f.store.runs() {
                     let mut scan = QueuedWorkerScan::default();
                     for r in runs.into_iter().rev().filter(|r| r.status == "queued") {
-                        let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id, s.max_concurrent)
-                        else {
+                        let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id) else {
                             continue;
                         };
                         let worker = f.clone();
@@ -603,7 +685,10 @@ impl Factory {
                             }
                             {
                                 let _gate = worker.lifecycle_gate.lock().unwrap();
-                                worker.active.lock().unwrap().remove(&r.id);
+                                let removed = worker.active.lock().unwrap().remove(&r.id).is_some();
+                                if removed {
+                                    worker.emit("capacity_changed", Some(&r.id), None);
+                                }
                             }
                             worker.wake.notify_one();
                         });
@@ -624,6 +709,10 @@ impl Factory {
             }
         }
         self.usage.shutdown().await;
+        let dispatcher = self.connector_dispatcher.lock().unwrap().take();
+        if let Some(dispatcher) = dispatcher {
+            dispatcher.shutdown().await;
+        }
         self.accounts.shutdown().await;
         for _ in 0..100 {
             if self.active.lock().unwrap().is_empty() {

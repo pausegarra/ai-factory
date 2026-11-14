@@ -649,3 +649,114 @@ it("does not carry a model catalog error from one selected workflow step to anot
   expect(screen.queryByText(/first step catalog denied/)).toBeNull();
   expect(screen.queryByText(/Could not load Codex models\./)).toBeNull();
 });
+
+it("preserves connectors refreshed while general settings are dirty", async () => {
+  const original = settings();
+  const onSave = vi.fn(async (value: Settings) => value);
+  const view = render(<SettingsPage settings={original} onSave={onSave} appDir="/fixture/data" />);
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
+  const connector = {id:"external-team",label:"Team",enabled:false,events:[],type:"telegram",config:{chat_id:"",has_token:false}};
+  view.rerender(<SettingsPage settings={{...original, notification_connectors:[connector]}} onSave={onSave} appDir="/fixture/data" />);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  expect(onSave.mock.calls[0][0].max_concurrent).toBe(5);
+  expect(onSave.mock.calls[0][0].notification_connectors).toEqual([connector]);
+});
+it("follows global only for inherited trigger fields", () => {
+  render(<SettingsPage settings={{ ...settings(), max_concurrent: 8 }} onSave={vi.fn()} appDir="/fixture" />);
+  const issue = screen.getByLabelText("New issue concurrent tasks") as HTMLInputElement;
+  const review = screen.getByLabelText("PR review concurrent tasks") as HTMLInputElement;
+  expect(issue.disabled).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for new issue" }));
+  expect(issue.disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "4" } });
+  expect(issue.value).toBe("8");
+  expect(review.value).toBe("4");
+});
+
+it("persists independent trigger ceilings and restores inheritance on discard", async () => {
+  const original = { ...settings(), max_concurrent: 8 };
+  original.flows[0].max_parallel = 2;
+  original.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false } }];
+  const save = vi.fn(async (value: Settings) => value);
+  const view = render(<SettingsPage settings={original} onSave={save} appDir="/fixture" />);
+  for (const [name, label, limit] of [["new issue", "New issue", "4"], ["PR review", "PR review", "4"], ["PR approved", "PR approved", "2"]]) {
+    fireEvent.click(screen.getByRole("checkbox", { name: `Use global capacity for ${name}` }));
+    fireEvent.change(screen.getByLabelText(`${label} concurrent tasks`), { target: { value: limit } });
+  }
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const saved = save.mock.calls[0][0];
+  expect(saved.trigger_max_concurrent).toEqual({ new_issue: 4, pr_review: 4, pr_approved: 2 });
+  expect(saved.flows).toEqual(original.flows);
+  expect(saved.notification_connectors).toEqual(original.notification_connectors);
+  view.rerender(<SettingsPage settings={saved} onSave={save} appDir="/fixture" />);
+  expect((screen.getByLabelText("PR approved concurrent tasks") as HTMLInputElement).value).toBe("2");
+  fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for PR approved" }));
+  expect((screen.getByLabelText("PR approved concurrent tasks") as HTMLInputElement).value).toBe("8");
+  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+  expect((screen.getByLabelText("PR approved concurrent tasks") as HTMLInputElement).value).toBe("2");
+  expect((screen.getByRole("checkbox", { name: "Use global capacity for PR approved" }) as HTMLInputElement).checked).toBe(false);
+});
+
+for (const [label, inherit] of [["Concurrent tasks", undefined], ["New issue concurrent tasks", "new issue"], ["PR review concurrent tasks", "PR review"], ["PR approved concurrent tasks", "PR approved"]] as const) {
+  it.each(["0", "-1", "1.5", "65", "", "text"])(`rejects invalid ${label} input %s without saving`, invalid => {
+    const save = vi.fn();
+    render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+    if (inherit) fireEvent.click(screen.getByRole("checkbox", { name: `Use global capacity for ${inherit}` }));
+    fireEvent.change(screen.getByLabelText(label), { target: { value: invalid } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(screen.getByRole("alert").textContent).toMatch(/Concurrency.*integer from 1 to 64/);
+    expect(save).not.toHaveBeenCalled();
+  });
+}
+
+it("preserves a newer trigger draft when an earlier save completes", async () => {
+  const pending = deferred<Settings>();
+  const save = vi.fn().mockReturnValueOnce(pending.promise).mockImplementation(async value => value);
+  render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for new issue" }));
+  fireEvent.change(screen.getByLabelText("New issue concurrent tasks"), { target: { value: "2" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  fireEvent.change(screen.getByLabelText("New issue concurrent tasks"), { target: { value: "3" } });
+  await act(async () => pending.resolve({ ...settings(), trigger_max_concurrent: { new_issue: 2 } }));
+  expect((screen.getByLabelText("New issue concurrent tasks") as HTMLInputElement).value).toBe("3");
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1][0].trigger_max_concurrent).toEqual({ new_issue: 3 });
+});
+
+it("keeps trigger edits across import refresh and preserves fresh workflow and connector settings", async () => {
+  const pending = deferred<Settings>();
+  vi.mocked(factoryApi.settings).mockReturnValueOnce(pending.promise);
+  vi.mocked(factoryApi.importLegacy).mockResolvedValue({ runs_imported: 0, settings_imported: true, archive_path: "/archive", warnings: [] });
+  const original = settings();
+  const save = vi.fn(async (value: Settings) => value);
+  const view = render(<SettingsPage settings={original} onSave={save} appDir="/fixture" />);
+  fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
+  fireEvent.click(screen.getByRole("button", { name: "Import data" }));
+  await waitFor(() => expect(factoryApi.settings).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for PR review" }));
+  fireEvent.change(screen.getByLabelText("PR review concurrent tasks"), { target: { value: "2" } });
+  await act(async () => pending.resolve({ ...original, trigger_max_concurrent: { pr_review: 5 } }));
+  expect((screen.getByLabelText("PR review concurrent tasks") as HTMLInputElement).value).toBe("2");
+  const refreshed = structuredClone(original);
+  refreshed.flows[0].max_parallel = 3;
+  refreshed.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false } }];
+  view.rerender(<SettingsPage settings={refreshed} onSave={save} appDir="/fixture" />);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].trigger_max_concurrent).toEqual({ pr_review: 2 });
+  expect(save.mock.calls[0][0].flows[0].max_parallel).toBe(3);
+  expect(save.mock.calls[0][0].notification_connectors).toEqual(refreshed.notification_connectors);
+});
+
+it("explains approval followed by version bump without tag or release", () => {
+  render(<FlowsPage settings={settings()} onSave={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: /PR approved/ }));
+  const notice = screen.getByLabelText("Approval and version bump");
+  expect(notice.textContent).toContain("runs the version bump node");
+  expect(notice.textContent).toContain("major for incompatible changes");
+  expect(notice.textContent).toContain("No tag or GitHub release is created");
+  expect(within(notice).queryByText("release")).toBeNull();
+});

@@ -57,6 +57,17 @@ fn contains_credential_marker(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+        || lower.match_indices(':').any(|(index, _)| {
+            lower[..index]
+                .bytes()
+                .next_back()
+                .is_some_and(|b| b.is_ascii_digit())
+                && lower[index + 1..]
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    .count()
+                    >= 20
+        })
         || lower.match_indices("sk-").any(|(index, _)| {
             index == 0
                 || !lower[..index]
@@ -73,7 +84,7 @@ fn visible_text(text: &str, limit: usize) -> String {
             if c.is_whitespace() || matches!(c, '<' | '>' | '&') {
                 Some(' ')
             } else if c.is_control()
-                || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
             {
                 None
             } else {
@@ -103,7 +114,7 @@ fn safe_error_summary(error: &str) -> &'static str {
     } else if error.contains("merge and source branch cleanup were not confirmed") {
         "Merge or branch cleanup was not confirmed."
     } else if error.contains("publication was not confirmed") {
-        "Release publication was not confirmed."
+        "Version publication was not confirmed."
     } else {
         "Execution reported an error. See run details."
     }

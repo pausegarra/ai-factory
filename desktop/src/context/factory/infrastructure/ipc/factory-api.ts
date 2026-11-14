@@ -17,12 +17,14 @@ import type {
 } from "../../domain/types";
 export const native = isTauri();
 const previewSettings: Settings = {
+  notification_connectors: [],
   token_profiles: [],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
   codex_yolo: false,
   poll_interval_seconds: 15,
   max_concurrent: 4,
+  trigger_max_concurrent: {},
   start_at_login: false,
   flows: [
     { id: "new_issue", name: "New task", enabled: true, nodes: [] },
@@ -31,6 +33,14 @@ const previewSettings: Settings = {
   ],
 };
 const previewSnapshot: Snapshot = {
+  capacity: {
+    global: { active: 0, limit: 4 },
+    by_trigger: {
+      new_issue: { active: 0, limit: 4 },
+      pr_review: { active: 0, limit: 4 },
+      pr_approved: { active: 0, limit: 4 },
+    },
+  },
   runs: [],
   deletions: [],
   metrics: {

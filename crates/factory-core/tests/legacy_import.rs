@@ -662,3 +662,27 @@ fn newly_discovered_legacy_conflict_revokes_prior_trust_durably() -> Result<()> 
     assert_conflicts()?;
     Ok(())
 }
+
+#[test]
+fn legacy_global_capacity_inherits_without_overwriting_explicit_trigger_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    config(dir.path());
+    let path = dir.path().join("config.yaml");
+    let raw = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{raw}\nconcurrency:\n  global: 8\n")).unwrap();
+    for explicit in [false, true] {
+        let mut current = Settings::default();
+        if explicit {
+            current.trigger_max_concurrent.insert("new_issue".into(), 2);
+        }
+        let batch = legacy::read_legacy(Some(&path), None, dir.path(), &current).unwrap();
+        let imported = batch.settings.unwrap();
+        assert_eq!(imported.max_concurrent, 8);
+        assert_eq!(
+            imported.concurrency_for("new_issue").unwrap(),
+            if explicit { 2 } else { 8 }
+        );
+        assert_eq!(imported.concurrency_for("pr_approved").unwrap(), 8);
+        assert_eq!(imported.concurrency_for("pr_review").unwrap(), 8);
+    }
+}

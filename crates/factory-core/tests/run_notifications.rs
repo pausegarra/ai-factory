@@ -89,7 +89,7 @@ fn notification_failed_and_blocked_have_safe_details() -> Result<()> {
         (
             "failed",
             Some("publication was not confirmed private"),
-            " · Release publication was not confirmed.",
+            " · Version publication was not confirmed.",
         ),
     ]
     .into_iter()
@@ -254,4 +254,37 @@ fn notification_cached_credentials_are_redacted_without_keychain_io() -> Result<
     assert!(!messages[0].body.contains("PRIVATE_KNOWN_VALUE"));
     assert_eq!(*credentials.gets.lock().unwrap(), gets);
     Ok(())
+}
+#[test]
+fn notification_hides_telegram_shaped_tokens_before_truncation() {
+    let (_dir, f, sink) = setup();
+    for (n, title) in [
+        "prefix 123456:abcdefghijklmnopqrstuvwxyz_0123456789".to_owned(),
+        format!(
+            "{}123456:abcdefghijklmnopqrstuvwxyz_0123456789",
+            "x".repeat(110)
+        ),
+        "123456:abc\u{202e}defghijklmnopqrstuvwxyz_0123456789".into(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = queued(&f, n as u64 + 100, title);
+        f.set_run_status(&id, "running", None).unwrap();
+        assert_eq!(
+            sink.drain()[0].body,
+            format!("acme/repo #{} · [Title hidden]", n + 100)
+        );
+    }
+}
+#[test]
+fn notification_hides_credentials_obfuscated_by_directional_marks() {
+    let (_dir, f, sink) = setup();
+    let id = queued(
+        &f,
+        200,
+        "123456:abc\u{200f}def\u{061c}ghijklmnopqrstuvwxyz_0123456789",
+    );
+    f.set_run_status(&id, "running", None).unwrap();
+    assert_eq!(sink.drain()[0].body, "acme/repo #200 · [Title hidden]");
 }

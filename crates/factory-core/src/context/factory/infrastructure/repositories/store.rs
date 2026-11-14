@@ -28,6 +28,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS nodes (run_id TEXT NOT NULL,node_id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(run_id,node_id));
    CREATE TABLE IF NOT EXISTS observations (key TEXT PRIMARY KEY,json TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS credential_refs (profile_id TEXT PRIMARY KEY,account TEXT NOT NULL,reference TEXT NOT NULL UNIQUE);
+   CREATE TABLE IF NOT EXISTS notification_credential_refs (connector_id TEXT PRIMARY KEY,reference TEXT NOT NULL UNIQUE);
    CREATE TABLE IF NOT EXISTS credential_gc (reference TEXT PRIMARY KEY);")?;
         super::run_deletions::migrate(&mut db)?;
         super::agent_accounts::migrate(&db)?;
@@ -108,7 +109,6 @@ impl Store {
         dedup: bool,
         approval: Option<(&[u64], bool)>,
     ) -> Result<Option<String>> {
-        let flow = &flow.for_event(event)?;
         let id = uuid::Uuid::new_v4().to_string();
         let created = now();
         let run = Run {
@@ -130,43 +130,6 @@ impl Store {
             workspace: None,
         };
         if let Some((comments, approved)) = approval {
-            let release_admitted: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM observations WHERE key=?1)",
-                [format!(
-                    "release-approved:{}#{}@{}",
-                    event.repository, event.number, event.head_sha
-                )],
-                |row| row.get(0),
-            )?;
-            if !event.release_requested() && release_admitted {
-                // Bind already observed OK comments to this head even when a
-                // release supersedes the normal approval. They cannot approve
-                // a later conflict correction.
-                for comment in comments {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO observations VALUES(?1,'true')",
-                        [format!(
-                            "approval-comment:{}#{}:{comment}",
-                            event.repository, event.number
-                        )],
-                    )?;
-                }
-                return Ok(None);
-            }
-            if event.release_requested() {
-                let selected = event.payload["approval"]["comment_id"].as_u64().unwrap();
-                let consumed: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM observations WHERE key=?1)",
-                    [format!(
-                        "approval-comment:{}#{}:{selected}",
-                        event.repository, event.number
-                    )],
-                    |row| row.get(0),
-                )?;
-                if !comments.contains(&selected) || consumed {
-                    return Ok(None);
-                }
-            }
             let mut fresh = false;
             for id in comments {
                 fresh |= tx.execute(
@@ -191,15 +154,6 @@ impl Store {
             )? == 0
         {
             return Ok(None);
-        }
-        if event.release_requested() {
-            tx.execute(
-                "INSERT OR IGNORE INTO observations VALUES(?1,'true')",
-                [format!(
-                    "release-approved:{}#{}@{}",
-                    event.repository, event.number, event.head_sha
-                )],
-            )?;
         }
         tx.execute(
             "INSERT INTO runs VALUES(?1,?2,?3,?4,?5,?6)",
@@ -536,6 +490,8 @@ impl Store {
             .or_else(|| key.strip_prefix("pr-merge:"))
             .or_else(|| key.strip_prefix("release-workspace:"))
             .or_else(|| key.strip_prefix("pr-release:"))
+            .or_else(|| key.strip_prefix("version-workspace:"))
+            .or_else(|| key.strip_prefix("pr-version:"))
             .or_else(|| {
                 key.strip_prefix("review-feedback:")
                     .and_then(|s| s.split(':').next())

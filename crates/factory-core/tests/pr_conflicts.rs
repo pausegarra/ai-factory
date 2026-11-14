@@ -426,16 +426,22 @@ git commit -m 'fix: resolve PR conflicts'
 "#;
 
 #[tokio::test]
-async fn release_authorization_does_not_survive_a_published_conflict_correction() {
+async fn version_bump_waits_for_fresh_approval_after_conflict_correction() {
     let mut f = Fixture::new().await;
-    f.event.payload["approval"] = json!({"command":"release","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    f.event.payload["approval"] =
+        json!({"command":"ok","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    let mut settings = f.factory.settings().unwrap();
+    let mut bump = Settings::default().flows[1].nodes[1].clone();
+    bump.depends_on = vec!["merge".into()];
+    settings.flows[1].nodes.push(bump);
+    f.factory.save_settings(settings).unwrap();
     f.agent(REPAIR, json!({"update_pr":{}}));
     let d = f.run().await;
     assert_eq!(d.run.status, "blocked", "{d:?}");
     assert_eq!(
         d.nodes
             .iter()
-            .find(|node| node.id == "factory_release")
+            .find(|node| node.id == "version_bump")
             .unwrap()
             .status,
         "skipped"
@@ -445,18 +451,23 @@ async fn release_authorization_does_not_survive_a_published_conflict_correction(
 }
 
 #[tokio::test]
-async fn release_step_never_starts_after_failed_merge() {
+async fn version_bump_never_starts_after_failed_merge() {
     let mut f = Fixture::new().await;
-    f.event.payload["approval"] = json!({"command":"release","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
-    one_node_approval_flow(&f);
-    // Fixture denies merge; release preparation must never reach GitHub.
+    f.event.payload["approval"] =
+        json!({"command":"ok","actor":f.event.actor,"head_sha":f.event.head_sha,"comment_id":7});
+    let mut settings = f.factory.settings().unwrap();
+    let mut bump = Settings::default().flows[1].nodes[1].clone();
+    bump.depends_on = vec!["merge".into()];
+    settings.flows[1].nodes.push(bump);
+    f.factory.save_settings(settings).unwrap();
+    // Fixture denies merge; version preparation must never reach GitHub.
     f.agent("", json!({"merge":{"method":"squash"}}));
     let d = f.run().await;
     assert_eq!(d.run.status, "failed", "{d:?}");
     assert_eq!(
         d.nodes
             .iter()
-            .find(|node| node.id == "factory_release")
+            .find(|node| node.id == "version_bump")
             .unwrap()
             .status,
         "skipped"
@@ -904,6 +915,11 @@ async fn preparation_rejects_base_ref_moving_between_api_read_and_fetch() {
 #[tokio::test]
 async fn queued_approval_prepares_live_base_only_after_previous_merge_and_cleanup() {
     let f = Fixture::new().await;
+    let mut limits = f.factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    f.factory.save_settings(limits).unwrap();
     let merged = f.add_second_approval();
     std::fs::write(f.dir.path().join("allow-merge"), "").unwrap();
     std::fs::write(f.dir.path().join("allow-delete"), "").unwrap();
@@ -987,6 +1003,11 @@ async fn queued_approval_prepares_live_base_only_after_previous_merge_and_cleanu
 #[tokio::test]
 async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
     let f = Fixture::new().await;
+    let mut limits = f.factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    f.factory.save_settings(limits).unwrap();
     let moved_head = f.add_second_approval();
     one_node_approval_flow(&f);
     f.agent(blocked_approval_agent(), json!({}));
@@ -1030,6 +1051,11 @@ async fn queued_approval_rejects_moved_head_and_new_head_requires_new_event() {
 #[tokio::test]
 async fn failed_merge_action_releases_next_queued_approval_without_advancing_base() {
     let f = Fixture::new().await;
+    let mut limits = f.factory.settings().unwrap();
+    limits
+        .trigger_max_concurrent
+        .insert("pr_approved".into(), 1);
+    f.factory.save_settings(limits).unwrap();
     f.add_second_approval();
     f.agent(blocked_approval_agent(), json!({}));
     let first = f.factory.enqueue(f.event.clone()).unwrap().unwrap();

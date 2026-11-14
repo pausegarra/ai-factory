@@ -63,6 +63,8 @@ export interface Project {
   source_path: string;
 }
 export interface Settings {
+  approval_workflow_version?: number;
+  notification_connectors?: NotificationConnector[];
   token_profiles: TokenProfile[];
   codex_bindings?: Record<string, string>;
   projects: Project[];
@@ -70,6 +72,7 @@ export interface Settings {
   codex_yolo?: boolean;
   poll_interval_seconds: number;
   max_concurrent: number;
+  trigger_max_concurrent?: Partial<Record<Trigger, number>>;
   start_at_login: boolean;
   flows: Flow[];
 }
@@ -93,7 +96,7 @@ export const TRIGGERS: Record<
     label: "PR approved",
     short: "PR approved",
     description:
-      "Current head approvals or OK comments merge the PR. A release comment also publishes a release.",
+      "Current head approvals or OK comments merge the PR, then bump its version based on the diff. No tags or releases.",
   },
   pr_review: {
     label: "Review requested",
@@ -136,7 +139,13 @@ export interface RunDetail {
   flow: Flow;
   nodes: NodeRun[];
 }
+export interface CapacityUsage { active: number; limit: number }
+export interface ExecutionCapacity {
+  global: CapacityUsage;
+  by_trigger: Record<Trigger, CapacityUsage>;
+}
 export interface Snapshot {
+  capacity: ExecutionCapacity;
   runs: Run[];
   deletions: RunDeletion[];
   metrics: {
@@ -222,3 +231,16 @@ export interface AgentUsage {
   checked_at: string;
   code: UsageCode | null;
 }
+export type NotificationEvent = "run_started" | "run_succeeded" | "run_failed" | "run_blocked";
+export interface NotificationConnector {
+  id: string;
+  label: string;
+  enabled: boolean;
+  events: NotificationEvent[];
+  type: string;
+  config: Record<string, unknown>;
+}
+export type TelegramNotificationConnector = NotificationConnector & {
+  type: "telegram";
+  config: { chat_id: string; has_token: boolean; bot_token?: string };
+};

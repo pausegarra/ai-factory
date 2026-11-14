@@ -120,6 +120,14 @@ impl Store {
                 !["running", "queued"].contains(&run.status.as_str()),
                 "Cannot retry active run"
             );
+            ensure!(
+                !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runs WHERE event_id=?1 AND json_extract(json,'$.status') IN ('queued','running'))",
+                    [&event.event_id],
+                    |row| row.get::<_, bool>(0),
+                )?,
+                "Cannot retry event with another active attempt"
+            );
             let flow = settings
                 .flows
                 .iter()
@@ -208,11 +216,9 @@ mod tests {
     #[test]
     fn suppressed_ok_comments_cannot_approve_a_later_corrected_head() {
         let (_dir, store, _) = setup();
-        let mut release = candidate("pr_approved", 5);
-        release.event_id = format!("approval-release:acme/repo#5@{}", release.head_sha);
-        release.payload = json!({"approval":{"command":"release","actor":"alice","head_sha":release.head_sha,"comment_id":7}});
+        let approved = candidate("pr_approved", 5);
         assert!(store
-            .admit_approval(&release, &[7], false)
+            .admit_approval(&approved, &[], true)
             .unwrap()
             .is_some());
         let mut ordinary = candidate("pr_approved", 5);
@@ -237,30 +243,19 @@ mod tests {
     }
 
     #[test]
-    fn release_requires_its_selected_comment_to_be_fresh_even_with_other_approval_signals() {
+    fn consumed_ok_comment_cannot_approve_a_changed_head_without_fresh_signal() {
         let (_dir, store, _) = setup();
         let mut event = candidate("pr_approved", 5);
-        event.event_id = format!("approval-release:acme/repo#5@{}", event.head_sha);
-        event.payload = json!({"approval":{"command":"release","actor":"alice","head_sha":event.head_sha,"comment_id":7}});
-        store
-            .observe("approval-comment:acme/repo#5:7", &json!(true))
-            .unwrap();
+        assert!(store.admit_approval(&event, &[7], false).unwrap().is_some());
+        event.head_sha = "b".repeat(40);
+        event.event_id = format!("approval:acme/repo#5@{}", event.head_sha);
+        assert!(store.admit_approval(&event, &[7], false).unwrap().is_none());
         assert!(store
-            .admit_approval(&event, &[7, 8], true)
-            .unwrap()
-            .is_none());
-        assert!(store
-            .observation("approval-comment:acme/repo#5:8")
-            .unwrap()
-            .is_none());
-        event.payload["approval"]["comment_id"] = json!(9);
-        assert!(store.admit_approval(&event, &[8], true).unwrap().is_none());
-        assert!(store
-            .admit_approval(&event, &[8, 9], true)
+            .admit_approval(&event, &[7, 8], false)
             .unwrap()
             .is_some());
         assert!(store
-            .observation(&format!("release-approved:acme/repo#5@{}", event.head_sha))
+            .observation("approval-comment:acme/repo#5:8")
             .unwrap()
             .is_some());
     }

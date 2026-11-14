@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -6,11 +6,13 @@ use std::collections::{BTreeMap, HashSet};
 mod default_prompts;
 mod settings_input;
 
-pub(crate) const RELEASE_NODE_ID: &str = "factory_release";
+pub(crate) const VERSION_BUMP_NODE_ID: &str = "version_bump";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(from = "settings_input::SettingsInput")]
+#[serde(try_from = "settings_input::SettingsInput")]
 pub struct Settings {
+    pub approval_workflow_version: u32,
+    pub notification_connectors: Vec<super::notification_connector::NotificationConnector>,
     pub token_profiles: Vec<TokenProfile>,
     #[serde(default)]
     pub codex_bindings: BTreeMap<String, String>,
@@ -19,6 +21,7 @@ pub struct Settings {
     pub codex_yolo: bool,
     pub poll_interval_seconds: u64,
     pub max_concurrent: usize,
+    pub trigger_max_concurrent: BTreeMap<String, usize>,
     pub start_at_login: bool,
     pub flows: Vec<Flow>,
 }
@@ -166,16 +169,16 @@ impl Default for Settings {
                 .enumerate()
                 .map(|(i, (id, prompt, access, deps))| FlowNode {
                     id: id.into(),
-                    name: if id == "publish" && name == "Approved PR" { "Merge".into() } else { id.replace('_', " ") },
+                    name: if id == "publish" && name == "Approved PR" { "Merge".into() } else if id == "version_bump" { "Bump version".into() } else { id.replace('_', " ") },
                     agent: "codex".into(),
                     model: String::new(),
                     effort: String::new(),
                     token_overrides: BTreeMap::new(),
-                    skills: None,
+                    skills: if id == "version_bump" { Some(vec![]) } else { None },
                     codex_account_id: None,
                     access: access.into(),
                     prompt: prompt.into(),
-                    result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"},"publish":false,"update_pr":false,"merge":false,"review":false,"comment":false,"release":false}})}else{empty_schema()},
+                    result_schema: if ["plan_review","review_code","review_tests","review_architecture"].contains(&id){json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"},"publish":false,"update_pr":false,"merge":false,"review":false,"comment":false,"release":false,"bump_version":false}})}else{empty_schema()},
                     depends_on: deps.into_iter().map(String::from).collect(),
                     position: Position {
                         x: 80. + i as f64 * 280.,
@@ -186,6 +189,8 @@ impl Default for Settings {
         }
         };
         Self {
+            approval_workflow_version: 1,
+            notification_connectors: vec![],
             token_profiles: vec![],
             codex_bindings: BTreeMap::new(),
             projects: vec![],
@@ -197,6 +202,7 @@ impl Default for Settings {
             codex_yolo: false,
             poll_interval_seconds: 15,
             max_concurrent: 4,
+            trigger_max_concurrent: BTreeMap::new(),
             start_at_login: false,
             flows: vec![
                 mk(
@@ -251,7 +257,15 @@ impl Default for Settings {
                 mk(
                     "pr_approved",
                     "Approved PR",
-                    vec![("publish", default_prompts::APPROVED_PR, "write", vec![])],
+                    vec![
+                        ("publish", default_prompts::APPROVED_PR, "write", vec![]),
+                        (
+                            "version_bump",
+                            default_prompts::VERSION_BUMP,
+                            "write",
+                            vec!["publish"],
+                        ),
+                    ],
                 ),
                 mk(
                     "pr_review",
@@ -263,6 +277,37 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn validate_concurrency(&self) -> Result<()> {
+        ensure!(
+            (1..=64).contains(&self.max_concurrent),
+            "Concurrency must be between 1 and 64"
+        );
+        for (id, limit) in &self.trigger_max_concurrent {
+            ensure!(
+                ["new_issue", "pr_review", "pr_approved"].contains(&id.as_str()),
+                "Unknown concurrency trigger: {id}"
+            );
+            ensure!(
+                (1..=64).contains(limit),
+                "Concurrency for {id} must be between 1 and 64"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn concurrency_for(&self, trigger_id: &str) -> Result<usize> {
+        self.validate_concurrency()?;
+        ensure!(
+            ["new_issue", "pr_review", "pr_approved"].contains(&trigger_id),
+            "Unknown concurrency trigger: {trigger_id}"
+        );
+        Ok(self
+            .trigger_max_concurrent
+            .get(trigger_id)
+            .copied()
+            .unwrap_or(self.max_concurrent))
+    }
+
     pub fn flow_for_actor(&self, template: &Flow, actor: &str) -> Flow {
         let mut flow = template.for_actor(actor, &self.token_profiles);
         let account = self
@@ -280,10 +325,8 @@ impl Settings {
         flow
     }
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            (1..=64).contains(&self.max_concurrent),
-            "Concurrency must be between 1 and 64"
-        );
+        super::notification_connector::validate_connectors(&self.notification_connectors)?;
+        self.validate_concurrency()?;
         ensure!(
             self.poll_interval_seconds > 0,
             "Poll interval must be positive"
@@ -349,6 +392,13 @@ impl Settings {
     }
     pub fn redacted(&self) -> Self {
         let mut s = self.clone();
+        for c in &mut s.notification_connectors {
+            if let super::notification_connector::ConnectorProvider::Telegram(config) =
+                &mut c.provider
+            {
+                config.bot_token = None;
+            }
+        }
         for t in &mut s.token_profiles {
             t.has_token = t.token.as_ref().is_some_and(|v| !v.is_empty());
             t.token = None;
@@ -369,32 +419,37 @@ impl Settings {
     }
 }
 impl Flow {
-    pub(crate) fn for_event(&self, event: &TriggerEvent) -> Result<Self> {
-        let mut flow = self.clone();
-        if !event.release_requested() {
-            return Ok(flow);
+    pub(super) fn migrate_approval_workflow(&mut self) {
+        if self.id != "pr_approved"
+            || self
+                .nodes
+                .iter()
+                .any(|node| node.id == VERSION_BUMP_NODE_ID)
+        {
+            return;
         }
-        ensure!(
-            flow.nodes.iter().all(|node| node.id != RELEASE_NODE_ID),
-            "Reserved release node ID"
-        );
-        let mut release = flow
+        for node in &mut self.nodes {
+            if node.id == "publish" && node.name == "publish" {
+                node.name = "Merge".into();
+            }
+        }
+        let Some(mut bump) = self
             .nodes
             .iter()
             .rev()
             .find(|node| node.access == "write")
-            .context("Release requires a write node in the approved PR flow")?
-            .clone();
-        release.id = RELEASE_NODE_ID.into();
-        release.name = "Publish release".into();
-        release.prompt = default_prompts::RELEASE_PR.into();
-        release.result_schema = json!({"type":"object"});
-        // Release has its own contract; merge-specific skills must not redefine it.
-        release.skills = Some(vec![]);
-        release.depends_on = flow.nodes.iter().map(|node| node.id.clone()).collect();
-        release.position.x += 280.;
-        flow.nodes.push(release);
-        Ok(flow)
+            .cloned()
+        else {
+            return;
+        };
+        bump.id = VERSION_BUMP_NODE_ID.into();
+        bump.name = "Bump version".into();
+        bump.prompt = default_prompts::VERSION_BUMP.into();
+        bump.result_schema = empty_schema();
+        bump.skills = Some(vec![]);
+        bump.depends_on = self.nodes.iter().map(|node| node.id.clone()).collect();
+        bump.position.x += 280.;
+        self.nodes.push(bump);
     }
 
     pub fn activation_for(&self, actor: &str, profiles: &[TokenProfile]) -> ActivationState {
@@ -535,19 +590,6 @@ pub struct TriggerEvent {
     pub payload: Value,
 }
 impl TriggerEvent {
-    pub fn release_requested(&self) -> bool {
-        let approval = &self.payload["approval"];
-        self.trigger_id == "pr_approved"
-            && approval["command"] == "release"
-            && self.head_sha.len() == 40
-            && self.head_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
-            && approval["head_sha"] == self.head_sha
-            && approval["actor"]
-                .as_str()
-                .is_some_and(|actor| actor.eq_ignore_ascii_case(&self.actor))
-            && approval["comment_id"].as_u64().is_some()
-    }
-
     pub fn issue(repo: &str, number: u64, title: &str, actor: &str, body: &str) -> Self {
         Self {
             event_id: format!("issue:{repo}#{number}"),
@@ -620,11 +662,22 @@ pub struct ServiceStatus {
     pub app_data_dir: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapacityUsage {
+    pub active: usize,
+    pub limit: usize,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionCapacity {
+    pub global: CapacityUsage,
+    pub by_trigger: BTreeMap<String, CapacityUsage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub runs: Vec<Run>,
     #[serde(default)]
     pub deletions: Vec<crate::RunDeletion>,
     pub metrics: Metrics,
+    pub capacity: ExecutionCapacity,
     pub service: ServiceStatus,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

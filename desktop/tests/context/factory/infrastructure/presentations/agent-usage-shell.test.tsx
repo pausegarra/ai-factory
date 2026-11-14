@@ -20,7 +20,7 @@ it("loads only on opening, keeps navigation order, places usage between engine a
   const user = userEvent.setup(); const { container } = render(<App />);
   await screen.findByRole("heading", { name: "Factory overview." });
   expect(factoryApi.agentUsage).not.toHaveBeenCalled();
-  expect(within(screen.getByRole("navigation")).getAllByRole("button").map(button => button.textContent)).toEqual(["Overview", "Runs", "Workflows", "Settings"]);
+  expect(within(screen.getByRole("navigation")).getAllByRole("button").map(button => button.textContent)).toEqual(["Overview", "Runs", "Workflows", "Notifications", "Settings"]);
   const trigger = screen.getByRole("button", { name: "View Usage" });
   expect(trigger.getAttribute("aria-haspopup")).toBe("dialog"); expect(trigger.getAttribute("title")).toBe("View Usage");
   const bottom = container.querySelector(".sidebar-bottom")!;
