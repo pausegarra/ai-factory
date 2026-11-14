@@ -20,15 +20,33 @@ function message(code: UsageCode | null, agent: Agent): string {
     default: return "Could not query usage. Try Refresh.";
   }
 }
-function Metric({ metric }: { metric: UsageMetric }) {
-  const label = { remaining: "Remaining", used: "Used", limit: "Limit", reported: "Reported usage" }[metric.kind];
+function isRemainingPercent(metric: UsageMetric): boolean {
+  return metric.kind === "remaining"
+    && metric.unit === "percent"
+    && Number.isFinite(metric.value)
+    && metric.value >= 0
+    && metric.value <= 100
+    && (metric.resets_at === null || Number.isFinite(Date.parse(metric.resets_at)));
+}
+function Metric({ metric, agent, accountLabel }: {
+  metric: UsageMetric;
+  agent: Agent;
+  accountLabel: string;
+}) {
+  const agentLabel = agent === "codex" ? "Codex" : "OpenCode";
   return <div className="usage-metric">
     <strong>{metric.label}</strong>
-    <span>{label}: {metric.value}{metric.unit === "percent" ? "%" : ` ${metric.unit}`}</span>
-    {metric.derivation === "codex_used_percent_complement" && <small title="Source: Codex usedPercent">Calculated as 100% minus Codex reported usage.</small>}
-    {metric.period && <small>{metric.period}</small>}
-    {metric.resets_at && <time dateTime={metric.resets_at}>Resets {new Date(metric.resets_at).toLocaleString()}</time>}
-    {metric.limit_reached === true && <span>Limit reached</span>}
+    <span>Remaining: {metric.value}%</span>
+    <div className="usage-progress" role="progressbar"
+      aria-label={agentLabel + " " + accountLabel + " " + metric.label + " remaining"}
+      aria-valuemin={0} aria-valuemax={100} aria-valuenow={metric.value}>
+      <span className="usage-progress-fill" aria-hidden="true"
+        style={{ width: metric.value + "%" }} />
+    </div>
+    {metric.resets_at !== null &&
+      <time dateTime={metric.resets_at}>
+        Resets {new Date(metric.resets_at).toLocaleString()}
+      </time>}
   </div>;
 }
 function Section({ agent, section }: { agent: Agent; section: UsageSection }) {
@@ -41,16 +59,27 @@ function Section({ agent, section }: { agent: Agent; section: UsageSection }) {
     {!section.loading && !section.error && code && <p role={section.result?.status === "error" ? "alert" : "status"}>{message(code, agent)}</p>}
     {!section.loading && code === "unsupported" && agent === "opencode" && <p>The Console session could not be determined from this interface.</p>}
     <ul className="usage-accounts">
-      {section.entries.map(({ entry, stale, error }) => <li key={entry.id} className="usage-account">
-        <h4>{entry.label}</h4>
-        {entry.email && <small>{entry.email}</small>}
-        {stale && <p role="alert">Previous data. Refresh failed.</p>}
-        {error && !section.error && <p role="alert">{message(error, agent)}</p>}
-        {entry.observation.code && <p role={entry.observation.status === "error" || entry.observation.status === "failed" ? "alert" : "status"}>{message(entry.observation.code, agent)}</p>}
-        {entry.observation.metrics.map(metric => <Metric key={metric.id} metric={metric} />)}
-        {agent === "opencode" && entry.observation.metrics.some(metric => metric.kind === "reported") && <p>Remaining percentage is not available from this OpenCode response.</p>}
-        <small>Last checked {new Date(entry.checked_at).toLocaleString()}</small>
-      </li>)}
+      {section.entries.map(({ entry, stale, error }) => {
+        const metrics = entry.observation.status === "available"
+          ? entry.observation.metrics.filter(isRemainingPercent)
+          : [];
+        return <li key={entry.id} className="usage-account">
+          <h4>{entry.label}</h4>
+          {stale && <p role="alert">Previous data. Refresh failed.</p>}
+          {error && !section.error && <p role="alert">{message(error, agent)}</p>}
+          {entry.observation.code && <p
+            role={entry.observation.status === "error" || entry.observation.status === "failed" ? "alert" : "status"}>
+            {message(entry.observation.code, agent)}
+          </p>}
+          {metrics.map(metric => <Metric key={metric.id} metric={metric}
+            agent={agent} accountLabel={entry.label} />)}
+          {metrics.length === 0 && !entry.observation.code && <p role="status">
+            {agent === "opencode"
+              ? "Remaining percentage is not available from this OpenCode response."
+              : "Remaining percentage is not available for this account."}
+          </p>}
+        </li>;
+      })}
     </ul>
   </section>;
 }

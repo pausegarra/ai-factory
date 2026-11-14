@@ -26,6 +26,13 @@ it("loads only on opening, keeps navigation order, places usage between engine a
   const bottom = container.querySelector(".sidebar-bottom")!;
   expect([...bottom.children].map(child => child.className)).toEqual(["engine-status", "nav-item usage-trigger", "sidebar-footer"]);
   await user.click(trigger); await screen.findByRole("dialog", { name: "Agent usage" });
+  const bar = await screen.findByRole("progressbar", {
+    name: "Codex Fixture Codex Primary window remaining",
+  });
+  expect(bar.getAttribute("aria-valuenow")).toBe("73");
+  expect(factoryApi.agentUsage).toHaveBeenCalledTimes(2);
+  expect(factoryApi.agentUsage).toHaveBeenCalledWith("codex");
+  expect(factoryApi.agentUsage).toHaveBeenCalledWith("opencode");
   expect(container.querySelector("aside")?.hasAttribute("inert")).toBe(true);
   expect(container.querySelector(".workspace")?.hasAttribute("inert")).toBe(true);
   await user.keyboard("{Escape}");
