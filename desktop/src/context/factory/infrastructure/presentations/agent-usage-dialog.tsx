@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { Agent, UsageCode, UsageMetric } from "../../domain/types";
 import { AgentUsageSession, emptyUsageView, type UsageSection } from "../../application/agent-usage";
 import { factoryApi } from "../ipc/factory-api";
+import { usageResetText, usageWindowLabel } from "./usage-window";
 
 function message(code: UsageCode | null, agent: Agent): string {
   switch (code) {
@@ -28,28 +29,35 @@ function isRemainingPercent(metric: UsageMetric): boolean {
     && metric.value <= 100
     && (metric.resets_at === null || Number.isFinite(Date.parse(metric.resets_at)));
 }
-function Metric({ metric, agent, accountLabel }: {
+function Metric({ metric, agent, accountLabel, nowMs }: {
   metric: UsageMetric;
   agent: Agent;
   accountLabel: string;
+  nowMs: number;
 }) {
+  const resetId = useId();
+  const resetText = usageResetText(metric.resets_at, nowMs);
+  const windowLabel = usageWindowLabel(agent, metric);
   const agentLabel = agent === "codex" ? "Codex" : "OpenCode";
   return <div className="usage-metric">
     <strong>{metric.label}</strong>
+    {windowLabel !== null && <small>{windowLabel}</small>}
     <span>Remaining: {metric.value}%</span>
     <div className="usage-progress" role="progressbar"
       aria-label={agentLabel + " " + accountLabel + " " + metric.label + " remaining"}
+      aria-describedby={resetText !== null ? resetId : undefined}
       aria-valuemin={0} aria-valuemax={100} aria-valuenow={metric.value}>
       <span className="usage-progress-fill" aria-hidden="true"
         style={{ width: metric.value + "%" }} />
     </div>
+    {resetText !== null && <small id={resetId}>{resetText}</small>}
     {metric.resets_at !== null &&
       <time dateTime={metric.resets_at}>
         Resets {new Date(metric.resets_at).toLocaleString()}
       </time>}
   </div>;
 }
-function Section({ agent, section }: { agent: Agent; section: UsageSection }) {
+function Section({ agent, section, nowMs }: { agent: Agent; section: UsageSection; nowMs: number }) {
   const code = section.error ?? section.result?.code ?? null;
   return <section className="usage-section" aria-labelledby={`usage-${agent}`} aria-busy={section.loading}>
     <h3 id={`usage-${agent}`}>{agent === "codex" ? "Codex" : "OpenCode"}</h3>
@@ -72,7 +80,7 @@ function Section({ agent, section }: { agent: Agent; section: UsageSection }) {
             {message(entry.observation.code, agent)}
           </p>}
           {metrics.map(metric => <Metric key={metric.id} metric={metric}
-            agent={agent} accountLabel={entry.label} />)}
+            agent={agent} accountLabel={entry.label} nowMs={nowMs} />)}
           {metrics.length === 0 && !entry.observation.code && <p role="status">
             {agent === "opencode"
               ? "Remaining percentage is not available from this OpenCode response."
@@ -86,6 +94,11 @@ function Section({ agent, section }: { agent: Agent; section: UsageSection }) {
 
 export function AgentUsageDialog({ onClose }: { onClose: () => void }) {
   const [view, setView] = useState(emptyUsageView);
+  const [nowMs, setNowMs] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const session = useRef<AgentUsageSession | null>(null);
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
@@ -127,8 +140,8 @@ export function AgentUsageDialog({ onClose }: { onClose: () => void }) {
       <div className="usage-heading"><h2 id="usage-heading">Agent usage</h2>
         <button ref={close} type="button" className="button button-secondary" aria-label="Close usage" onClick={onClose}>Close</button>
       </div>
-      <Section agent="codex" section={view.codex} />
-      <Section agent="opencode" section={view.opencode} />
+      <Section agent="codex" section={view.codex} nowMs={nowMs} />
+      <Section agent="opencode" section={view.opencode} nowMs={nowMs} />
       <div className="dialog-actions">
         <button type="button" className="button button-secondary" disabled={busy} onClick={() => void session.current?.refresh()}>Refresh</button>
       </div>
