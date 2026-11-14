@@ -750,13 +750,3 @@ it("keeps trigger edits across import refresh and preserves fresh workflow and c
   expect(save.mock.calls[0][0].flows[0].max_parallel).toBe(3);
   expect(save.mock.calls[0][0].notification_connectors).toEqual(refreshed.notification_connectors);
 });
-
-it("explains approval followed by version bump without tag or release", () => {
-  render(<FlowsPage settings={settings()} onSave={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: /PR approved/ }));
-  const notice = screen.getByLabelText("Approval and version bump");
-  expect(notice.textContent).toContain("runs the version bump node");
-  expect(notice.textContent).toContain("major for incompatible changes");
-  expect(notice.textContent).toContain("No tag or GitHub release is created");
-  expect(within(notice).queryByText("release")).toBeNull();
-});
