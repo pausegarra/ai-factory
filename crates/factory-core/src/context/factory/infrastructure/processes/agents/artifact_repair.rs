@@ -55,6 +55,7 @@ pub(super) async fn recover(ctx: RecoveryContext<'_>, mut value: Value) -> Resul
                     .context("Invalid correction JSON")
                     .and_then(|candidate| {
                         results::validate(candidate, ctx.node.agent == "codex", ctx.validator)
+                            .map_err(anyhow::Error::from)
                     })
                     .and_then(|candidate| {
                         results::ensure_hash_only_changes(&value, &candidate)?;
@@ -131,6 +132,7 @@ async fn request_correction(
         run: ctx.run,
         node_id: &ctx.node.id,
         agent: &ctx.node.agent,
+        track_session: false,
         command,
         prompt: &prompt,
         result_path: &result_path,

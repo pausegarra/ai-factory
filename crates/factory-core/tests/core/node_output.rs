@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn output_fixture(
     agent: &str,
@@ -14,10 +15,19 @@ count = result.parent / (node + '.test-count')
 attempt = int(count.read_text()) + 1 if count.exists() else 1
 count.write_text(str(attempt))
 prompt = sys.stdin.read()
+mode = os.environ.get('AI_FACTORY_RESPONSE_MODE', 'initial')
+if 'AI Factory artifact hash correction' in prompt:
+    mode = 'repair'
+if mode != 'repair':
+    work = result.parent / (node + '.work-count')
+    work.write_text(str(int(work.read_text()) + 1 if work.exists() else 1))
 (result.parent / f'{node}.stdin-{attempt}.txt').write_text(prompt)
 (result.parent / f'{node}.launch-{attempt}.json').write_text(json.dumps({
-    'args': sys.argv[1:], 'config': os.environ.get('OPENCODE_CONFIG_CONTENT', '')
+    'args': sys.argv[1:], 'config': os.environ.get('OPENCODE_CONFIG_CONTENT', ''),
+    'mode': mode, 'attempt': os.environ.get('AI_FACTORY_RESPONSE_ATTEMPT'), 'cwd': str(pathlib.Path.cwd()),
+    'home': os.environ.get('CODEX_HOME')
 }))
+print(json.dumps({'thread_id': 'work-session' if mode == 'initial' else 'repair-session'}), flush=True)
 response = responses[min(attempt - 1, len(responses) - 1)]
 if response.get('noise'):
     print(json.dumps({'type': 'tool_use', 'content': 'irrelevant execution trace'}))
@@ -53,6 +63,8 @@ if response.get('artifact'):
             item['kind'] = ''
     if response.get('drop_artifact'):
         value['artifacts'].pop()
+    if response.get('malformed_hash'):
+        value['artifacts'][0]['sha256'] = 'bad??'
     if response.get('change_hash'):
         value['artifacts'][0]['sha256'] = '0' * 64
     if response.get('change_path'):
@@ -76,6 +88,7 @@ elif value is not None:
     std::fs::write(dir.path().join("fake-agent"), script).unwrap();
     let mut settings = factory.settings().unwrap();
     settings.flows[0].nodes[0].agent = agent.into();
+    settings.issue_node_comments_enabled = false;
     factory.save_settings(settings).unwrap();
     (dir, factory)
 }
@@ -114,14 +127,13 @@ fn attempts(dir: &tempfile::TempDir, id: &str) -> usize {
 }
 
 #[tokio::test]
-async fn invalid_first_response_fails_without_a_second_agent_invocation() {
+async fn malformed_output_is_corrected_without_repeating_work() {
     for agent in ["codex", "opencode"] {
         for value in [
             json!("Implementation complete. No JSON envelope."),
             json!("{invalid"),
             json!({"status":"complete","summary":"done","artifacts":[],"data":{}}),
             json!({"status":"succeeded","data":{}}),
-            json!({"status":"succeeded","summary":"rejected","artifacts":[],"data":{"approved":false}}),
         ] {
             let (dir, factory) = output_fixture(
                 agent,
@@ -138,11 +150,11 @@ async fn invalid_first_response_fails_without_a_second_agent_invocation() {
             factory.save_settings(settings).unwrap();
             let (id, detail) = run_output_fixture(&factory).await;
             assert_eq!(
-                detail.run.status, "failed",
+                detail.run.status, "succeeded",
                 "{agent}/{value}: {:?}",
                 detail.nodes
             );
-            assert_eq!(attempts(&dir, &id), 1, "{agent}/{value}");
+            assert_eq!(attempts(&dir, &id), 2, "{agent}/{value}");
             assert_eq!(
                 detail
                     .nodes
@@ -150,7 +162,7 @@ async fn invalid_first_response_fails_without_a_second_agent_invocation() {
                     .find(|node| node.id == "consumer")
                     .unwrap()
                     .status,
-                "skipped"
+                "succeeded"
             );
             let session = dir.path().join("data/sessions").join(&id);
             let rejected =
@@ -158,17 +170,22 @@ async fn invalid_first_response_fails_without_a_second_agent_invocation() {
             assert!(!rejected.contains("irrelevant execution trace"));
             let error = std::fs::read_to_string(session.join("spec.validation-error.txt")).unwrap();
             assert!(!error.is_empty());
-            assert!(detail
-                .nodes
-                .iter()
-                .find(|node| node.id == "spec")
-                .unwrap()
-                .error
-                .as_ref()
-                .unwrap()
-                .contains(&error));
-            assert!(!session.join("spec.launch-2.json").exists());
-            assert!(!session.join("spec.repair-1.prompt.txt").exists());
+            assert!(session.join("spec.launch-2.json").exists());
+            assert!(session.join("spec.repair-1.prompt.txt").exists());
+            assert_eq!(
+                std::fs::read_to_string(session.join("spec.work-count")).unwrap(),
+                "1"
+            );
+            assert_eq!(
+                detail
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "spec")
+                    .unwrap()
+                    .session_id
+                    .as_deref(),
+                Some("work-session")
+            );
         }
     }
 }
@@ -195,9 +212,9 @@ async fn first_response_contract_is_injected_into_system_prompt_and_native_schem
         let session = dir.path().join("data/sessions").join(&id);
         let prompt = std::fs::read_to_string(session.join("spec.stdin-1.txt")).unwrap();
         for instruction in [
-            "Single-attempt output contract",
+            "Single-work-execution output contract",
+            "output-only corrections",
             "at most two output-only corrections solely for malformed artifact sha256 strings",
-            "No general response repair or automatic task retry",
             "Before ending this execution",
             "Return exactly one JSON object",
         ] {
@@ -222,10 +239,10 @@ async fn first_response_contract_is_injected_into_system_prompt_and_native_schem
             let config: serde_json::Value =
                 serde_json::from_str(launch["config"].as_str().unwrap()).unwrap();
             let system = config["agent"]["ai-factory"]["prompt"].as_str().unwrap();
-            assert!(system.contains("Single-attempt output contract"));
+            assert!(system.contains("Single-work-execution output contract"));
             assert!(system.contains("AI Factory unattended execution contract"));
             assert!(system.contains("Output JSON Schema"));
-            assert!(system.contains("No general response repair or automatic task retry"));
+            assert!(system.contains("This node has one work execution"));
             assert!(system.contains(
                 "at most two output-only corrections solely for malformed artifact sha256 strings"
             ));
@@ -358,22 +375,28 @@ async fn process_failures_artifact_errors_and_valid_blockers_are_not_retried() {
 }
 
 #[tokio::test]
-async fn node_schema_and_codex_encoded_data_errors_fail_on_first_response() {
+async fn node_schema_and_codex_encoded_data_errors_are_corrected() {
     for agent in ["codex", "opencode"] {
         let (dir, factory) = output_fixture(
             agent,
             &[
                 json!({"value":valid_result()}),
-                json!({"value":{"status":"succeeded","summary":"done","artifacts":[],"data":{"deliverable":"invented on retry"}}}),
+                json!({"value":{"status":"succeeded","summary":"done","artifacts":[],"data":{"deliverable":"prepared deliverable"}}}),
             ],
         );
         let mut settings = factory.settings().unwrap();
         settings.flows[0].nodes[0].result_schema = json!({"type":"object","required":["deliverable"],"properties":{"deliverable":{"type":"string"}},"additionalProperties":false});
         factory.save_settings(settings).unwrap();
         let (id, detail) = run_output_fixture(&factory).await;
-        assert_eq!(detail.run.status, "failed");
-        assert_eq!(attempts(&dir, &id), 1);
-        let error = detail.nodes[0].error.as_deref().unwrap();
+        assert_eq!(detail.run.status, "succeeded");
+        assert_eq!(attempts(&dir, &id), 2);
+        let error = std::fs::read_to_string(
+            dir.path()
+                .join("data/sessions")
+                .join(&id)
+                .join("spec.validation-error.txt"),
+        )
+        .unwrap();
         assert!(error.contains("/data"));
         assert!(error.contains("deliverable"));
     }
@@ -385,13 +408,16 @@ async fn node_schema_and_codex_encoded_data_errors_fail_on_first_response() {
         ],
     );
     let (id, detail) = run_output_fixture(&factory).await;
-    assert_eq!(detail.run.status, "failed");
-    assert_eq!(attempts(&dir, &id), 1);
-    assert!(detail.nodes[0]
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("data_json contains invalid JSON"));
+    assert_eq!(detail.run.status, "succeeded");
+    assert_eq!(attempts(&dir, &id), 2);
+    let error = std::fs::read_to_string(
+        dir.path()
+            .join("data/sessions")
+            .join(&id)
+            .join("spec.validation-error.txt"),
+    )
+    .unwrap();
+    assert!(error.contains("data_json contains invalid JSON"));
 }
 
 #[tokio::test]
@@ -449,5 +475,452 @@ async fn cancellation_stops_initial_process_without_another_invocation() {
         assert_eq!(detail.run.status, "cancelled");
         assert_eq!(attempts(&dir, &id), 1);
         assert!(!session.join("spec.launch-2.json").exists());
+    }
+}
+
+#[tokio::test]
+async fn repairs_missing_inner_brace_without_repeating_work() {
+    let original = include_str!("../fixtures/node_output/codex-missing-data-json-brace.json")
+        .replace("bump_version", "verification");
+    let correction = include_str!("../fixtures/node_output/codex-corrected-version-result.json")
+        .replace("bump_version", "verification");
+    let (dir, factory) = output_fixture(
+        "codex",
+        &[json!({"value":original}), json!({"value":correction})],
+    );
+    let (id, detail) = run_output_fixture(&factory).await;
+    assert_eq!(detail.run.status, "succeeded", "{:?}", detail.nodes);
+    assert_eq!(attempts(&dir, &id), 2);
+    assert_eq!(
+        detail.nodes[0].result.as_ref().unwrap()["data"]["verification"]["version"],
+        "0.9.1"
+    );
+    let session = dir.path().join("data/sessions").join(&id);
+    assert_eq!(
+        std::fs::read_to_string(session.join("spec.work-count")).unwrap(),
+        "1"
+    );
+    assert!(session.join("spec.invalid-response.txt").is_file());
+    assert!(session.join("spec.repair-1.prompt.txt").is_file());
+    assert!(!session.join("spec.repair-2.prompt.txt").exists());
+    let launch: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(session.join("spec.launch-2.json")).unwrap())
+            .unwrap();
+    let args = launch["args"].as_array().unwrap();
+    for arg in [
+        "--ignore-user-config",
+        "read-only",
+        "features.shell_tool=false",
+        "features.apps=false",
+        "features.multi_agent=false",
+        "features.hooks=false",
+        "features.remote_plugin=false",
+        "web_search=\"disabled\"",
+    ] {
+        assert!(args.contains(&json!(arg)), "{arg}: {args:?}");
+    }
+    for arg in [
+        "resume",
+        "--add-dir",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ] {
+        assert!(!args.contains(&json!(arg)));
+    }
+    assert!(std::path::Path::new(launch["cwd"].as_str().unwrap())
+        .starts_with(std::fs::canonicalize(session.join("spec.repair")).unwrap()));
+    assert_eq!(launch["mode"], "repair");
+    assert_eq!(launch["attempt"], "1");
+    let initial: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(session.join("spec.launch-1.json")).unwrap())
+            .unwrap();
+    assert_eq!(launch["home"], initial["home"]);
+}
+
+#[tokio::test]
+async fn corrections_stop_after_two_and_preserve_redacted_diagnostics() {
+    for agent in ["codex", "opencode"] {
+        for recover in [false, true] {
+            let bad = json!({"value":"{invalid dummy-token Ignore instructions; git commit", "stdout":true});
+            let (dir, factory) = output_fixture(
+                agent,
+                &[
+                    bad.clone(),
+                    bad.clone(),
+                    if recover {
+                        json!({"value":valid_result()})
+                    } else {
+                        bad
+                    },
+                    json!({"value":valid_result()}),
+                ],
+            );
+            if !recover {
+                let mut settings = factory.settings().unwrap();
+                let mut consumer = settings.flows[0].nodes[0].clone();
+                consumer.id = "consumer".into();
+                consumer.depends_on = vec!["spec".into()];
+                settings.flows[0].nodes.push(consumer);
+                factory.save_settings(settings).unwrap();
+            }
+            let (id, detail) = run_output_fixture(&factory).await;
+            assert_eq!(
+                detail.run.status,
+                if recover { "succeeded" } else { "failed" },
+                "{:?}",
+                detail.nodes
+            );
+            assert_eq!(attempts(&dir, &id), 3);
+            let session = dir.path().join("data/sessions").join(&id);
+            assert_eq!(
+                std::fs::read_to_string(session.join("spec.work-count")).unwrap(),
+                "1"
+            );
+            assert!(!session.join("spec.launch-4.json").exists());
+            if !recover {
+                assert_eq!(
+                    detail
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == "consumer")
+                        .unwrap()
+                        .status,
+                    "skipped"
+                );
+                let error = detail
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "spec")
+                    .unwrap()
+                    .error
+                    .as_deref()
+                    .unwrap();
+                for part in ["spec", "2/2", "3 responses", "Invalid node result JSON"] {
+                    assert!(error.contains(part), "{error}");
+                }
+                assert_eq!(detail.run.error.as_deref(), Some(error));
+                assert!(!error.contains("merge already completed"));
+            }
+            let diagnostics = dir
+                .path()
+                .join("data/memory/acme/repo/runs")
+                .join(&id)
+                .join("diagnostics/spec");
+            let evidence = std::fs::read_dir(diagnostics)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            for entry in std::fs::read_dir(&evidence).unwrap() {
+                let entry = entry.unwrap();
+                let text = std::fs::read_to_string(entry.path()).unwrap();
+                assert!(!text.contains("dummy-token"), "{}", entry.path().display());
+            }
+            let outcome: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(evidence.join("outcome.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                outcome["outcome"],
+                if recover { "recovered" } else { "exhausted" }
+            );
+            assert_eq!(outcome["corrections_requested"], 2);
+            assert_eq!(outcome["responses_observed"], 3);
+            if agent == "opencode" {
+                let launch: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(session.join("spec.launch-2.json")).unwrap(),
+                )
+                .unwrap();
+                let config: serde_json::Value =
+                    serde_json::from_str(launch["config"].as_str().unwrap()).unwrap();
+                assert_eq!(config["permission"]["*"], "deny");
+                assert_eq!(
+                    config["agent"]["ai-factory-response-repair"]["permission"]["*"],
+                    "deny"
+                );
+                assert_eq!(
+                    config["agent"]["ai-factory-response-repair"]["tools"]["*"],
+                    false
+                );
+                assert!(!launch["config"].as_str().unwrap().contains("allow"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn correction_transport_failures_and_missing_initial_output_are_terminal() {
+    for agent in ["codex", "opencode"] {
+        for correction in [json!({"exit":7}), json!({})] {
+            let (dir, factory) = output_fixture(
+                agent,
+                &[
+                    json!({"value":"{invalid"}),
+                    correction,
+                    json!({"value":valid_result()}),
+                ],
+            );
+            let (id, detail) = run_output_fixture(&factory).await;
+            assert_eq!(detail.run.status, "failed");
+            assert_eq!(attempts(&dir, &id), 2);
+            let error = detail.nodes[0].error.as_deref().unwrap();
+            assert!(error.contains("1/2"), "{error}");
+            assert!(error.contains("Invalid node result JSON"), "{error}");
+            assert!(error.contains("correction transport failed"), "{error}");
+        }
+        for response in [
+            json!({}),
+            json!({"value":{"status":"succeeded","summary":"rejected","artifacts":[],"data":{"approved":false}}}),
+        ] {
+            let (dir, factory) = output_fixture(agent, &[response]);
+            let (id, detail) = run_output_fixture(&factory).await;
+            assert_eq!(detail.run.status, "failed");
+            assert_eq!(attempts(&dir, &id), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_correction_preserves_work_session_and_stops_further_attempts() {
+    for agent in ["codex", "opencode"] {
+        let (dir, factory) = output_fixture(
+            agent,
+            &[
+                json!({"value":"{invalid"}),
+                json!({"sleep":30}),
+                json!({"value":valid_result()}),
+            ],
+        );
+        let id = factory
+            .enqueue(TriggerEvent::issue(
+                "acme/repo",
+                191,
+                "[AI] cancel repair",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        let session = dir.path().join("data/sessions").join(&id);
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if session.join("spec.launch-2.json").exists()
+                    && factory
+                        .logs(&id, "spec", 0)
+                        .unwrap()
+                        .text
+                        .contains("requesting 1/2")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        factory.cancel(&id).unwrap();
+        let detail = terminal(&factory, &id).await;
+        factory.shutdown().await;
+        ready.unwrap();
+        assert_eq!(detail.run.status, "cancelled");
+        assert_eq!(attempts(&dir, &id), 2);
+        assert_eq!(detail.nodes[0].session_id.as_deref(), Some("work-session"));
+        assert!(!session.join("spec.launch-3.json").exists());
+        let evidence = std::fs::read_dir(
+            dir.path()
+                .join("data/memory/acme/repo/runs")
+                .join(&id)
+                .join("diagnostics/spec"),
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+        let outcome: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(evidence.join("outcome.json")).unwrap()).unwrap();
+        assert_eq!(outcome["outcome"], "cancelled");
+    }
+}
+
+#[tokio::test]
+async fn corrected_actions_still_require_authorization_before_mutations() {
+    for agent in ["codex", "opencode"] {
+        for (data, read_only, expected) in [
+            (
+                json!({"merge":{"method":"squash"}}),
+                true,
+                "Read-only node cannot",
+            ),
+            (
+                json!({"bump_version":{"version":"0.1.1","bump":"patch","reason":"fix"}}),
+                false,
+                "Version bump requires approved PR flow",
+            ),
+            (
+                json!({"release":{}}),
+                false,
+                "Release actions are no longer supported",
+            ),
+            (
+                json!({"update_pr":{},"publish":{"title":"x","body":"Closes #190"}}),
+                false,
+                "Only approved flow can update PR",
+            ),
+        ] {
+            let (dir, factory) = output_fixture(
+                agent,
+                &[
+                    json!({"value":"{invalid"}),
+                    json!({"value":{"status":"succeeded","summary":"done","artifacts":[],"data":data}}),
+                ],
+            );
+            let mut settings = factory.settings().unwrap();
+            settings.flows[0].nodes[0].access = if read_only { "read" } else { "write" }.into();
+            factory.save_settings(settings).unwrap();
+            let (id, detail) = run_output_fixture(&factory).await;
+            assert_eq!(detail.run.status, "failed");
+            assert_eq!(attempts(&dir, &id), 2);
+            assert!(
+                detail.nodes[0].error.as_deref().unwrap().contains(expected),
+                "{:?}",
+                detail.nodes
+            );
+            assert!(dir
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(method, _, _)| method == "GET"));
+            assert!(!dir.path().join("pushes").exists());
+        }
+    }
+}
+
+#[tokio::test]
+async fn unrelated_merge_receipt_does_not_claim_completed_merge_on_failure() {
+    let (dir, factory) = output_fixture("codex", &[json!({"value":"{invalid"})]);
+    let id = factory
+        .enqueue(TriggerEvent::issue(
+            "acme/repo",
+            190,
+            "[AI] invalid",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("data/factory.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO observations VALUES(?1,?2)",
+        rusqlite::params![
+            format!("pr-merge:{id}"),
+            json!({"repository":"acme/repo","number":190,"head_sha":"foreign-head"}).to_string()
+        ],
+    )
+    .unwrap();
+    factory.start();
+    let detail = terminal(&factory, &id).await;
+    factory.shutdown().await;
+    assert_eq!(detail.run.status, "failed");
+    assert_eq!(attempts(&dir, &id), 3);
+    assert!(!detail
+        .run
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("merge already completed"));
+}
+
+#[tokio::test]
+async fn file_result_evidence_is_redacted_after_each_correction() {
+    for agent in ["codex", "opencode"] {
+        let bad = json!({"value":"{invalid dummy-token"});
+        let (dir, factory) =
+            output_fixture(agent, &[bad.clone(), bad, json!({"value":valid_result()})]);
+        let (id, detail) = run_output_fixture(&factory).await;
+        assert_eq!(detail.run.status, "succeeded");
+        assert_eq!(attempts(&dir, &id), 3);
+        let session = dir.path().join("data/sessions").join(&id);
+        for entry in std::fs::read_dir(session).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file()
+                && entry.file_name().to_string_lossy().ends_with("result.json")
+            {
+                let text = std::fs::read_to_string(entry.path()).unwrap();
+                assert!(
+                    !text.contains("dummy-token"),
+                    "{} leaked rejected data",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn json_correction_then_hash_correction_preserves_work_and_result() {
+    for agent in ["codex", "opencode"] {
+        for status in ["succeeded", "failed"] {
+            let mut corrected = valid_result();
+            corrected["status"] = json!(status);
+            let (dir, factory) = output_fixture(
+                agent,
+                &[
+                    json!({"value":{"status":"complete","summary":"work complete","artifacts":[],"data":{"branch":"feature"}},"artifact":true,"malformed_hash":true}),
+                    json!({"value":corrected,"artifact":true,"malformed_hash":true}),
+                    json!({"value":corrected,"artifact":true}),
+                ],
+            );
+            let (id, detail) = run_output_fixture(&factory).await;
+            assert_eq!(
+                detail.run.status, status,
+                "{agent}/{status}: {:?}",
+                detail.nodes
+            );
+            assert_eq!(
+                attempts(&dir, &id),
+                3,
+                "{agent}/{status}: {:?}",
+                detail.nodes
+            );
+            let session = dir.path().join("data/sessions").join(&id);
+            assert_eq!(
+                std::fs::read_to_string(session.join("spec.work-count")).unwrap(),
+                "1"
+            );
+            let node = &detail.nodes[0];
+            assert_eq!(node.session_id.as_deref(), Some("work-session"));
+            let result = node.result.as_ref().unwrap();
+            assert_eq!(result["status"], status);
+            if status == "succeeded" {
+                assert_eq!(result["summary"], "work complete");
+            } else {
+                // The runner adds terminal failure context after archiving.
+                assert!(result["summary"]
+                    .as_str()
+                    .unwrap()
+                    .contains("work complete"));
+            }
+            assert_eq!(result["data"], json!({"branch":"feature"}));
+            let artifact = &result["artifacts"][0];
+            assert_eq!(
+                std::fs::read_to_string(artifact["path"].as_str().unwrap()).unwrap(),
+                "original evidence"
+            );
+            assert_eq!(
+                artifact["sha256"],
+                format!("{:x}", Sha256::digest(b"original evidence"))
+            );
+            assert!(std::fs::read_to_string(session.join("spec.stdin-3.txt"))
+                .unwrap()
+                .contains("AI Factory artifact hash correction"));
+            if status == "failed" {
+                assert!(node
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("structured response correction reported failed"));
+            }
+        }
     }
 }

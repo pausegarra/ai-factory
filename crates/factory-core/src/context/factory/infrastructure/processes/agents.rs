@@ -1,9 +1,8 @@
 mod artifact_repair;
 mod invocation;
 mod output;
+mod repair;
 mod results;
-
-use output::{extract_result, spawn_output};
 
 use super::agent_skills::SkillPolicy;
 use super::workspaces;
@@ -337,7 +336,19 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
                 ),
             )?;
         } else {
-            factory.set_run_status(id, status, None)?;
+            let error = if status == "failed" {
+                let detail = factory.store.detail(id)?;
+                detail.flow.nodes.iter().find_map(|node| {
+                    detail
+                        .nodes
+                        .iter()
+                        .find(|state| state.id == node.id && state.status == "failed")
+                        .and_then(|state| state.error.clone())
+                })
+            } else {
+                None
+            };
+            factory.set_run_status(id, status, error)?;
         }
     }
     Ok(())
@@ -814,6 +825,7 @@ async fn execute_node(
         run,
         node_id: &node.id,
         agent: &node.agent,
+        track_session: true,
         command: cmd,
         prompt: &prompt,
         result_path: &result_path,
@@ -821,31 +833,25 @@ async fn execute_node(
         cancel: &cancel,
     })
     .await?;
-    let validated = raw
-        .as_deref()
-        .context("Agent produced no valid structured final result")
-        .and_then(|text| serde_json::from_str::<Value>(text).context("Invalid node result JSON"))
-        .and_then(|value| results::validate(value, node.agent == "codex", &validator));
-    let mut value = match validated {
-        Ok(value) => value,
-        Err(error) => {
-            let error = factory.redact(&format!("{error:#}"));
-            let rejected = factory.redact(
-                raw.as_deref()
-                    .unwrap_or("(No final response was produced.)"),
-            );
-            std::fs::write(
-                session.join(format!("{}.invalid-response.txt", node.id)),
-                rejected,
-            )?;
-            std::fs::write(
-                session.join(format!("{}.validation-error.txt", node.id)),
-                &error,
-            )?;
-            bail!("Invalid first node response; automatic retries are disabled: {error}");
-        }
+    let evidence = memory
+        .join("diagnostics")
+        .join(&node.id)
+        .join(format!("response-repair-{}", uuid::Uuid::new_v4()));
+    let repair_context = repair::RepairContext {
+        factory,
+        run,
+        node,
+        executable: command,
+        codex_home: codex_home.as_deref(),
+        session: &session,
+        schema_path: &schema_path,
+        memory,
+        evidence: &evidence,
     };
-    value = artifact_repair::recover(
+    let recovered =
+        repair::recover_response(&repair_context, raw, &transport, &validator, event, &cancel)
+            .await?;
+    let mut value = artifact_repair::recover(
         artifact_repair::RecoveryContext {
             factory,
             run,
@@ -860,7 +866,7 @@ async fn execute_node(
             validator: &validator,
             cancel: &cancel,
         },
-        value,
+        recovered.value,
     )
     .await?;
     if node.id == VERSION_BUMP_NODE_ID
@@ -871,6 +877,14 @@ async fn execute_node(
         value["summary"] = json!("Version node did not request publication; return data.bump_version after preparing the version.");
     }
     results::archive_artifacts(&mut value, workspace, memory, &node.id)?;
+    if let Some(error) = recovered.terminal_error {
+        // A valid failed correction still owns artifacts from completed work.
+        // Retain the result only after the usual file/integrity checks; no
+        // actions from this response may reach the dispatch below.
+        factory.store.set_node_result(run, &node.id, &value)?;
+        std::fs::write(&result_path, serde_json::to_vec_pretty(&value)?)?;
+        bail!("{error}");
+    }
     // Keep evidence reachable even if a later API action fails or the app exits.
     let mut partial = value.clone();
     partial["status"] = json!("failed");

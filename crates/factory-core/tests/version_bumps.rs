@@ -84,6 +84,12 @@ mod local {
 
     impl Fixture {
         async fn new() -> Self {
+            Self::configured(None).await
+        }
+        async fn new_runtime(agent: &str) -> Self {
+            Self::configured(Some(agent)).await
+        }
+        async fn configured(runtime_agent: Option<&str>) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let source = dir.path().join("source");
             std::fs::create_dir(&source).unwrap();
@@ -192,7 +198,7 @@ mod local {
                             ),
                             ("GET", "/repos/acme/repo/pulls/5") => (
                                 200,
-                                json!({"number":5,"state":"closed","html_url":"https://github.com/acme/repo/pull/5","merged":!flags.join("unmerged").exists(),
+                                json!({"number":5,"state":if flags.join("runtime-needs-merge").exists(){"open"}else{"closed"},"html_url":"https://github.com/acme/repo/pull/5","merged":!flags.join("unmerged").exists() && !flags.join("runtime-needs-merge").exists(),
                                 "head":{"ref":"feature","sha":if flags.join("changed-head").exists(){"b".repeat(40)}else{head},"repo":{"full_name":"acme/repo"}},
                                 "base":{"ref":"main","repo":{"full_name":"acme/repo"}}, "merge_commit_sha":merge}),
                             ),
@@ -212,6 +218,15 @@ mod local {
                                 } else {
                                     (404, json!({}))
                                 }
+                            }
+                            ("PUT", "/repos/acme/repo/pulls/5/merge") => {
+                                assert_eq!(body["sha"], head);
+                                assert_eq!(body["merge_method"], "squash");
+                                std::fs::remove_file(flags.join("runtime-needs-merge")).unwrap();
+                                (
+                                    200,
+                                    json!({"merged":true,"sha":merge,"message":"fixture merged"}),
+                                )
                             }
                             ("DELETE", "/repos/acme/repo/git/refs/heads/feature") => {
                                 git(&repo, &["update-ref", "-d", "refs/heads/feature"]);
@@ -314,6 +329,13 @@ exec '{actual}' "${{args[@]}}"
                 token: Some("fixture-token".into()),
                 ..Default::default()
             }];
+            if let Some(agent) = runtime_agent {
+                settings.commands.codex = settings.commands.opencode.clone();
+                for node in &mut settings.flows[1].nodes {
+                    node.agent = agent.into();
+                }
+                common::bind_fixture_codex(&factory, &mut settings);
+            }
             factory.save_settings(settings).unwrap();
             let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "release");
             event.trigger_id = "pr_approved".into();
@@ -809,5 +831,373 @@ printf '%s' '{"status":"succeeded","summary":"Prepared version bump","artifacts"
                 json!({"method":"DELETE","path":"/repos/acme/repo/git/refs/heads/feature","body":null})
             ]
         );
+    }
+    enum VersionCorrection {
+        Recovered,
+        Exhausted,
+        Failed,
+    }
+
+    async fn response_recovery_fixture(
+        agent: &str,
+        correction: VersionCorrection,
+    ) -> (Fixture, RunDetail) {
+        let f = Fixture::new_runtime(agent).await;
+        let memory = f
+            .dir
+            .path()
+            .join("factory/memory/acme/repo/runs")
+            .join(&f.run);
+        std::fs::create_dir_all(&memory).unwrap();
+        let codex_bad = include_str!("fixtures/node_output/codex-missing-data-json-brace.json")
+            .replace("0.9.1", "0.1.1");
+        let codex_good = include_str!("fixtures/node_output/codex-corrected-version-result.json")
+            .replace("0.9.1", "0.1.1");
+        let good = if agent == "codex" {
+            codex_good
+        } else {
+            json!({"status":"succeeded","summary":"Version bump prepared","artifacts":[],"data":{"bump_version":{"version":"0.1.1","bump":"patch","reason":"Compatible fix"}}}).to_string()
+        };
+        let bad = if agent == "codex" {
+            codex_bad
+        } else {
+            good[..good.len() - 1].to_string()
+        };
+        std::fs::write(memory.join("invalid-version-result.json"), &bad).unwrap();
+        let corrected = match correction {
+            VersionCorrection::Recovered => good,
+            VersionCorrection::Exhausted => bad,
+            VersionCorrection::Failed => {
+                std::fs::write(memory.join("failed-correction"), "").unwrap();
+                let mut value = json!({"status":"failed","summary":"Prepared version result cannot be recovered truthfully","artifacts":[{"path":"failed-version-report.txt","sha256":"","kind":"diagnostic"}],"data":{"verification":{"prepared":true}}});
+                if agent == "codex" {
+                    value["data_json"] = json!(value
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("data")
+                        .unwrap()
+                        .to_string());
+                }
+                value.to_string()
+            }
+        };
+        std::fs::write(memory.join("corrected-version-result.json"), corrected).unwrap();
+        let agent_path = f.dir.path().join("agent");
+        std::fs::write(&agent_path, r#"#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys
+if 'app-server' in sys.argv:
+    for line in sys.stdin:
+        request = json.loads(line)
+        if 'id' in request:
+            response = {'data':[{'skills':[]}]} if request.get('method') == 'skills/list' else {}
+            print(json.dumps({'id':request['id'],'result':response}), flush=True)
+    sys.exit(0)
+prompt = sys.stdin.read()
+memory = pathlib.Path(os.environ['AI_FACTORY_MEMORY_DIR'])
+result = pathlib.Path(os.environ['AI_FACTORY_RESULT_PATH'])
+node = os.environ['AI_FACTORY_NODE_ID']
+def mark(name):
+    with (memory / name).open('a') as f: f.write('1\n')
+if os.environ.get('AI_FACTORY_RESPONSE_MODE') == 'repair':
+    assert node == 'version_bump'
+    mark('version-repairs')
+    result.write_text((memory / 'corrected-version-result.json').read_text())
+    sys.exit(0)
+mark(node + '-work')
+if node == 'merge':
+    value = {'status':'succeeded','summary':'Merge approved PR','artifacts':[], 'data':{'merge':{'method':'squash'}}}
+    if '--output-schema' in sys.argv:
+        value['data_json'] = json.dumps(value.pop('data'))
+    result.write_text(json.dumps(value))
+    sys.exit(0)
+assert node == 'version_bump'
+def git(*args):
+    return subprocess.check_output(['git', *args], text=True).strip()
+assert git('branch', '--show-current').startswith('ai-factory/version/')
+assert pathlib.Path('VERSION').read_text().strip() == '0.1.0'
+(memory / 'version-context.json').write_text(os.environ['AI_FACTORY_VERSION_CONTEXT'])
+pathlib.Path('VERSION').write_text('0.1.1\n')
+git('-c', 'user.name=Alice', '-c', 'user.email=alice@example.test', 'commit', '-am', 'chore: bump version to 0.1.1')
+mark('local-version-commits')
+(memory / 'prepared-commit').write_text(git('rev-parse','HEAD'))
+(memory / 'prepared-tree').write_text(git('rev-parse','HEAD^{tree}'))
+assert git('status','--porcelain') == ''
+if (memory / 'failed-correction').exists():
+    artifact = pathlib.Path('failed-version-report.txt')
+    artifact.write_text('Prepared version commit retained; publication was not requested.\n')
+    (memory / 'original-artifact-path').write_text(str(artifact.resolve()))
+result.write_text((memory / 'invalid-version-result.json').read_text())
+"#).unwrap();
+        std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let db = rusqlite::Connection::open(f.dir.path().join("factory/factory.sqlite3")).unwrap();
+        db.execute(
+            "DELETE FROM observations WHERE key=?1",
+            [format!("pr-merge:{}", f.run)],
+        )
+        .unwrap();
+        std::fs::write(f.dir.path().join("runtime-needs-merge"), "").unwrap();
+        f.factory.start();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let detail = f.factory.run_detail(&f.run).unwrap();
+                if !["queued", "running"].contains(&detail.run.status.as_str()) {
+                    break detail;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if terminal.is_err() {
+            eprintln!(
+                "timed-out detail: {:?}",
+                f.factory.run_detail(&f.run).unwrap()
+            );
+            for node in ["merge", "version_bump"] {
+                eprintln!("{node} log: {:?}", f.factory.logs(&f.run, node, 0));
+            }
+            eprintln!("mutations: {:?}", f.writes.lock().unwrap());
+        }
+        f.factory.shutdown().await;
+        (f, terminal.unwrap())
+    }
+
+    fn assert_single_preparation(f: &Fixture, repairs: usize) -> PathBuf {
+        let memory = f
+            .dir
+            .path()
+            .join("factory/memory/acme/repo/runs")
+            .join(&f.run);
+        for name in ["merge-work", "version_bump-work", "local-version-commits"] {
+            assert_eq!(
+                std::fs::read_to_string(memory.join(name))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(memory.join("version-repairs"))
+                .unwrap()
+                .lines()
+                .count(),
+            repairs
+        );
+        let writes = f.writes.lock().unwrap();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert_eq!(writes[0]["method"], "PUT");
+        assert_eq!(writes[0]["path"], "/repos/acme/repo/pulls/5/merge");
+        assert_eq!(writes[1]["method"], "DELETE");
+        assert_eq!(writes[1]["path"], "/repos/acme/repo/git/refs/heads/feature");
+        assert!(git(&f.remote, &["tag", "--list"]).is_empty());
+        assert!(f.observation(&format!("pr-merge:{}", f.run)).is_some());
+        memory
+    }
+
+    #[tokio::test]
+    async fn runtime_repairs_version_output_and_publishes_prepared_commit_once() {
+        for agent in ["codex", "opencode"] {
+            let (f, detail) = response_recovery_fixture(agent, VersionCorrection::Recovered).await;
+            assert_eq!(
+                detail.run.status, "succeeded",
+                "{:?} {:?}",
+                detail.run.error, detail.nodes
+            );
+            let memory = assert_single_preparation(&f, 1);
+            let prepared = std::fs::read_to_string(memory.join("prepared-commit")).unwrap();
+            let receipt = f.observation(&format!("pr-version:{}", f.run)).unwrap();
+            assert_eq!(receipt["commit_sha"], prepared);
+            assert_eq!(git(&f.remote, &["rev-parse", "refs/heads/main"]), prepared);
+            assert_eq!(
+                git(&f.remote, &["rev-parse", "main^{tree}"]),
+                std::fs::read_to_string(memory.join("prepared-tree")).unwrap()
+            );
+            assert_eq!(git(&f.remote, &["rev-parse", "main^"]), f.merge_sha);
+            assert_eq!(
+                git(
+                    &f.remote,
+                    &["rev-list", "--count", &format!("{}..main", f.merge_sha)]
+                ),
+                "1"
+            );
+            assert_eq!(git(&f.remote, &["show", "main:VERSION"]), "0.1.1");
+            assert_eq!(
+                std::fs::read_to_string(f.dir.path().join("pushes"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+            assert_eq!(
+                f.observation(&format!("version-workspace:{}", f.run))
+                    .unwrap()["completed"],
+                true
+            );
+            eprintln!(
+                "recovery evidence: {}",
+                json!({"agent":agent,"status":detail.run.status,"merge_puts":1,"cleanup_deletes":1,"version_work":1,"local_commits":1,"repairs":1,"pushes":1,"prepared_commit":prepared,"receipt":receipt})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_exhausted_version_output_reports_completed_merge() {
+        for agent in ["codex", "opencode"] {
+            let (f, detail) = response_recovery_fixture(agent, VersionCorrection::Exhausted).await;
+            assert_eq!(detail.run.status, "failed");
+            let memory = assert_single_preparation(&f, 2);
+            assert!(f.observation(&format!("pr-version:{}", f.run)).is_none());
+            assert!(!f.dir.path().join("pushes").exists());
+            assert_eq!(git(&f.remote, &["rev-parse", "main"]), f.merge_sha);
+            assert_eq!(git(&f.remote, &["show", "main:VERSION"]), "0.1.0");
+            assert_eq!(
+                f.observation(&format!("version-workspace:{}", f.run))
+                    .unwrap()["completed"],
+                false
+            );
+            let error = detail
+                .nodes
+                .iter()
+                .find(|n| n.id == "version_bump")
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap();
+            for part in [
+                "version_bump",
+                "2/2",
+                "3 responses",
+                "EOF",
+                "merge already completed",
+            ] {
+                assert!(error.contains(part), "{error}");
+            }
+            assert_eq!(detail.run.error.as_deref(), Some(error));
+            let evidence = std::fs::read_dir(memory.join("diagnostics/version_bump"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            for name in [
+                "initial-response.txt",
+                "repair-1.response.txt",
+                "repair-2.response.txt",
+                "outcome.json",
+            ] {
+                assert!(evidence.join(name).is_file());
+            }
+            eprintln!(
+                "exhaustion evidence: {}",
+                json!({"agent":agent,"merge_puts":1,"cleanup_deletes":1,"version_work":1,"local_commits":1,"repairs":2,"pushes":0,"error":error,"outcome":std::fs::read_to_string(evidence.join("outcome.json")).unwrap()})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_failed_version_correction_retains_artifact_and_reports_completed_merge() {
+        for agent in ["codex", "opencode"] {
+            let (f, detail) = response_recovery_fixture(agent, VersionCorrection::Failed).await;
+            assert_eq!(detail.run.status, "failed");
+            let memory = assert_single_preparation(&f, 1);
+            assert!(f.observation(&format!("pr-version:{}", f.run)).is_none());
+            assert!(!f.dir.path().join("pushes").exists());
+            assert_eq!(git(&f.remote, &["rev-parse", "main"]), f.merge_sha);
+            assert_eq!(git(&f.remote, &["show", "main:VERSION"]), "0.1.0");
+            assert_eq!(
+                f.observation(&format!("version-workspace:{}", f.run))
+                    .unwrap()["completed"],
+                false
+            );
+            let node = detail
+                .nodes
+                .iter()
+                .find(|n| n.id == "version_bump")
+                .unwrap();
+            assert_eq!(node.status, "failed");
+            let result = node
+                .result
+                .as_ref()
+                .expect("Persisted failed result with artifacts");
+            assert_eq!(result["status"], "failed");
+            assert_eq!(result["data"]["verification"]["prepared"], true);
+            let artifacts = result["artifacts"].as_array().unwrap();
+            assert_eq!(artifacts.len(), 1);
+            let archived = Path::new(artifacts[0]["path"].as_str().unwrap());
+            assert!(archived.starts_with(memory.canonicalize().unwrap()));
+            let bytes = std::fs::read(archived).expect("Archived artifact survives cleanup");
+            assert_eq!(
+                bytes,
+                b"Prepared version commit retained; publication was not requested.\n"
+            );
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                artifacts[0]["sha256"],
+                format!("{:x}", Sha256::digest(&bytes))
+            );
+            assert_eq!(artifacts[0]["kind"], "diagnostic");
+            let original = std::fs::read_to_string(memory.join("original-artifact-path")).unwrap();
+            assert!(
+                !Path::new(&original).exists(),
+                "Workspace artifact must be cleaned up"
+            );
+            let persisted = f.factory.run_detail(&f.run).unwrap();
+            assert_eq!(
+                persisted
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "version_bump")
+                    .unwrap()
+                    .result
+                    .as_ref(),
+                Some(result)
+            );
+            let error = node.error.as_deref().expect("Persisted node diagnostic");
+            for part in [
+                "version_bump",
+                "1/2",
+                "2 responses",
+                "Prepared version result cannot be recovered truthfully",
+                "EOF",
+                "merge already completed",
+                &f.event.head_sha,
+            ] {
+                assert!(error.contains(part), "{agent}: {error}");
+            }
+            assert_eq!(detail.run.error.as_deref(), Some(error));
+            let evidence = std::fs::read_dir(memory.join("diagnostics/version_bump"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            assert!(evidence.join("initial-response.txt").is_file());
+            assert!(evidence.join("initial-validation-error.txt").is_file());
+            let response: Value = serde_json::from_slice(
+                &std::fs::read(evidence.join("repair-1.response.txt")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response["status"], "failed");
+            assert!(!evidence.join("repair-2.prompt.txt").exists());
+            let outcome: Value =
+                serde_json::from_slice(&std::fs::read(evidence.join("outcome.json")).unwrap())
+                    .unwrap();
+            assert_eq!(outcome["outcome"], "terminal");
+            assert_eq!(outcome["corrections_requested"], 1);
+            assert_eq!(outcome["responses_observed"], 2);
+            assert_eq!(outcome["final_error"], error);
+            assert!(outcome["initial_error"].as_str().unwrap().contains("EOF"));
+            assert!(f
+                .factory
+                .logs(&f.run, "version_bump", 0)
+                .unwrap()
+                .text
+                .contains(error));
+            eprintln!(
+                "failed correction evidence: {}",
+                json!({"agent":agent,"merge_puts":1,"cleanup_deletes":1,"version_work":1,"local_commits":1,"repairs":1,"pushes":0,"artifact_sha256":artifacts[0]["sha256"],"artifact_survived_cleanup":true,"result_persisted":true,"error":error,"outcome":outcome})
+            );
+        }
     }
 }

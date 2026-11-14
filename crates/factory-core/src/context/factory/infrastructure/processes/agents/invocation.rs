@@ -1,4 +1,5 @@
-use super::{extract_result, spawn_output, ProcessTree};
+use super::output::{extract_result, spawn_output};
+use super::ProcessTree;
 use crate::*;
 use anyhow::{bail, Context};
 use std::{path::Path, sync::Arc};
@@ -10,6 +11,7 @@ pub(super) struct Invocation<'a> {
     pub run: &'a str,
     pub node_id: &'a str,
     pub agent: &'a str,
+    pub track_session: bool,
     pub command: Command,
     pub prompt: &'a str,
     pub result_path: &'a Path,
@@ -23,6 +25,7 @@ pub(super) async fn run(invocation: Invocation<'_>) -> Result<Option<String>> {
         run,
         node_id,
         agent,
+        track_session,
         command: mut cmd,
         prompt,
         result_path,
@@ -59,6 +62,7 @@ pub(super) async fn run(invocation: Invocation<'_>) -> Result<Option<String>> {
         child.stdout.take().unwrap(),
         log.clone(),
         true,
+        track_session,
     );
     let err = spawn_output(
         factory,
@@ -66,6 +70,7 @@ pub(super) async fn run(invocation: Invocation<'_>) -> Result<Option<String>> {
         node_id,
         child.stderr.take().unwrap(),
         log.clone(),
+        false,
         false,
     );
     let status = tokio::select! {
@@ -88,7 +93,9 @@ pub(super) async fn run(invocation: Invocation<'_>) -> Result<Option<String>> {
         bail!("Agent exited with {status}");
     }
     let raw = if result_path.exists() {
-        Some(std::fs::read_to_string(result_path)?)
+        let raw = std::fs::read_to_string(result_path)?;
+        std::fs::write(result_path, factory.redact(&raw))?;
+        Some(raw)
     } else {
         extract_result(&output)
     };

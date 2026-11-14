@@ -83,10 +83,15 @@ if attempt == 1:
         link.symlink_to(folder, target_is_directory=True)
         artifacts[0]['path'] = 'linked/builder-report.md'
     manifest.write_text(json.dumps(artifacts))
-    if scenario == 'prose':
+    if scenario in ['prose', 'prose_exhausted', 'corrected_mismatch']:
         emit('Implementation complete. Artifacts in memory: artifacts/builder/builder-report.md, implementation.patch, validation/, SHA256SUMS.txt. No GUI verification.')
         sys.exit(0)
+if scenario == 'prose_exhausted':
+    emit('Still not JSON')
+    sys.exit(0)
 artifacts = json.loads(manifest.read_text())
+if scenario == 'corrected_mismatch':
+    artifacts[0]['sha256'] = '0' * 64
 emit({'status': 'succeeded', 'summary': 'Implementation complete; GUI not verified.',
       'artifacts': artifacts, 'data': {'native_smoke': 'not_run_GUI_prohibited'}})
 "#;
@@ -254,16 +259,23 @@ async fn artifact_delivery_rejects_unsafe_ambiguous_or_unverifiable_references()
 }
 
 #[tokio::test]
-async fn prose_artifact_delivery_fails_once_and_preserves_original_memory_files() {
+async fn prose_artifact_delivery_recovers_and_preserves_original_memory_files() {
     for agent in ["codex", "opencode"] {
         let (dir, id, detail) = delivery("prose", agent, true).await;
-        assert_eq!(detail.run.status, "failed");
+        assert_eq!(detail.run.status, "succeeded");
         let session = dir.path().join("data/sessions").join(&id);
         assert_eq!(
             std::fs::read_to_string(session.join("spec.count")).unwrap(),
+            "2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.join("consumer.count")).unwrap(),
             "1"
         );
-        assert!(!session.join("consumer.count").exists());
+        assert_eq!(
+            std::fs::read_to_string(session.join("work-executions")).unwrap(),
+            "1"
+        );
         assert!(session.join("spec.invalid-response.txt").exists());
         let memory = dir.path().join("data/memory/acme/repo/runs").join(&id);
         assert_eq!(
@@ -275,5 +287,40 @@ async fn prose_artifact_delivery_fails_once_and_preserves_original_memory_files(
             "patch"
         );
         assert!(!dir.path().join("data/workspaces").join(&id).exists());
+    }
+}
+
+#[tokio::test]
+async fn prose_exhaustion_and_corrected_hash_mismatch_never_reach_consumer() {
+    for agent in ["codex", "opencode"] {
+        for (scenario, count, diagnostic) in [
+            ("prose_exhausted", "3", "2/2"),
+            ("corrected_mismatch", "2", "Artifact hash mismatch"),
+        ] {
+            let (dir, id, detail) = delivery(scenario, agent, true).await;
+            assert_eq!(detail.run.status, "failed", "{:?}", detail.nodes);
+            let session = dir.path().join("data/sessions").join(&id);
+            assert_eq!(
+                std::fs::read_to_string(session.join("spec.count")).unwrap(),
+                count
+            );
+            assert_eq!(
+                std::fs::read_to_string(session.join("work-executions")).unwrap(),
+                "1"
+            );
+            assert!(!session.join("consumer.count").exists());
+            let node = detail.nodes.iter().find(|n| n.id == "spec").unwrap();
+            assert!(
+                node.error.as_deref().unwrap().contains(diagnostic),
+                "{:?}",
+                node.error
+            );
+            let memory = dir.path().join("data/memory/acme/repo/runs").join(&id);
+            assert_eq!(
+                std::fs::read_to_string(memory.join("artifacts/builder/builder-report.md"))
+                    .unwrap(),
+                "report"
+            );
+        }
     }
 }
