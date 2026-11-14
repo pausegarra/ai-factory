@@ -175,13 +175,16 @@ sys.stdout.write(json.dumps({{'type': 'text', 'part': {{'text': '{{invalid'}}}})
 sys.stdout.flush()
 "#
         );
-        let (_dir, detail) = output_fixture(agent, &output).await;
+        let (dir, detail) = output_fixture(agent, &output).await;
         assert_eq!(detail.run.status, "failed");
         assert!(detail.nodes[0]
             .error
             .as_deref()
             .unwrap()
             .contains("Invalid node result JSON"));
+        let session = dir.path().join("data/sessions").join(&detail.run.id);
+        assert!(session.join("spec.repair-2.prompt.txt").exists());
+        assert!(!session.join("spec.repair-3.prompt.txt").exists());
         assert_eq!(detail.nodes[1].status, "skipped");
     }
 }

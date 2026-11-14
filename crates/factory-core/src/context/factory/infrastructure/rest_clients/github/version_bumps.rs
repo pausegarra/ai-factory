@@ -273,6 +273,14 @@ impl Github {
         factory
             .store
             .observe(&format!("pr-version:{run}"), &receipt)?;
+        // The prepared workspace is complete only after the push is confirmed.
+        // Keep this diagnostic observation consistent with the publication receipt.
+        let mut workspace = serde_json::to_value(&intent.context)?;
+        workspace["completed"] = json!(true);
+        workspace["receipt"] = receipt.clone();
+        factory
+            .store
+            .observe(&format!("version-workspace:{run}"), &workspace)?;
         Ok(receipt)
     }
 

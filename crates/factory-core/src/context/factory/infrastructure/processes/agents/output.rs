@@ -103,6 +103,7 @@ pub(super) fn spawn_output<R: AsyncRead + Unpin + Send + 'static>(
     mut reader: R,
     log: Arc<std::sync::Mutex<std::fs::File>>,
     capture: bool,
+    track_session: bool,
 ) -> tokio::task::JoinHandle<Result<String>> {
     let f = factory.clone();
     let run = run.to_string();
@@ -110,7 +111,7 @@ pub(super) fn spawn_output<R: AsyncRead + Unpin + Send + 'static>(
     tokio::spawn(async move {
         let mut captured = Capture::new(MAX_CAPTURE_BYTES);
         // Trailing diagnostics must not evict the final response. Keep the last
-        // candidate, including invalid JSON payloads, so validation rejects it without another agent invocation.
+        // candidate, including invalid JSON payloads, so validation handles the latest response rather than an earlier success.
         let mut last_candidate = None;
         let mut warned_capture = false;
         let mut record = |line: &[u8]| -> Result<()> {
@@ -121,8 +122,9 @@ pub(super) fn spawn_output<R: AsyncRead + Unpin + Send + 'static>(
                     if result_text(&v, &text).is_some() {
                         last_candidate = Some(text.clone());
                     }
-                    if let Some(session) =
-                        v["thread_id"].as_str().or_else(|| v["sessionID"].as_str())
+                    if let Some(session) = track_session
+                        .then(|| v["thread_id"].as_str().or_else(|| v["sessionID"].as_str()))
+                        .flatten()
                     {
                         if let Ok(d) = f.store.detail(&run) {
                             if let Some(mut state) = d.nodes.into_iter().find(|n| n.id == node) {

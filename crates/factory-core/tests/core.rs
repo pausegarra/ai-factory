@@ -146,7 +146,11 @@ async fn plan_review_report_cannot_be_dispatched_as_github_review() {
         } else {
             assert_eq!(detail.run.status, "failed");
             let error = detail.nodes[0].error.as_deref().unwrap();
-            assert!(error.contains("Invalid first node response"), "{error}");
+            assert!(
+                error
+                    .contains("Node plan_review structured response invalid after 2/2 corrections"),
+                "{error}"
+            );
             assert!(error.contains("/data/review"), "{error}");
             assert!(
                 !error.contains("Only review flow submits reviews"),
