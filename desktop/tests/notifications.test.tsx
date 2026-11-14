@@ -11,7 +11,7 @@ it("adds a disabled Telegram connector and discards the token draft", async () =
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
   expect(screen.getByText("No notification connectors")).toBeTruthy();
   await user.click(screen.getByRole("button", {name:"Add connector"}));
-  await user.selectOptions(screen.getByRole("combobox", {name:"Connector to add"}), "telegram");
+  await user.click(within(screen.getByRole("dialog", {name:"Choose a connector"})).getByRole("button", {name:"Telegram"}));
   expect((screen.getByRole("combobox", {name:"Connector type"}) as HTMLSelectElement).value).toBe("telegram");
   expect((screen.getByRole("checkbox", {name:"Enabled"}) as HTMLInputElement).checked).toBe(false);
   const token = screen.getByLabelText("Bot token"); expect(token.getAttribute("type")).toBe("password");
@@ -23,7 +23,7 @@ it("saves active fields and clears secrets even when the save API returns void",
   const onSave = vi.fn(async (_s: Settings) => {});
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button", {name:"Add connector"}));
-  fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});
+  fireEvent.click(within(screen.getByRole("dialog", {name:"Choose a connector"})).getByRole("button", {name:"Telegram"}));
   fireEvent.click(screen.getByRole("checkbox", {name:"Enabled"}));
   fireEvent.click(screen.getByRole("button", {name:"Save changes"}));
   expect(screen.getByRole("alert").textContent).toContain("Chat ID");expect(onSave).not.toHaveBeenCalled();
@@ -61,7 +61,7 @@ it("disables controls during save, prevents duplicate requests, and preserves dr
   const pending = deferred<Settings>();const onSave = vi.fn(()=>pending.promise);
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button",{name:"Add connector"}));
-  fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});
+  fireEvent.click(within(screen.getByRole("dialog", {name:"Choose a connector"})).getByRole("button", {name:"Telegram"}));
   fireEvent.change(screen.getByLabelText("Bot token"),{target:{value:"PRIVATE_DRAFT"}});
   const save=screen.getByRole("button",{name:"Save changes"});fireEvent.click(save);fireEvent.click(save);
   expect(onSave).toHaveBeenCalledTimes(1);expect((screen.getByLabelText("Bot token") as HTMLInputElement).closest("fieldset")?.disabled).toBe(true);
@@ -92,7 +92,7 @@ it("ignores late saves after unmount and releases page busy state", async () => 
   const pending=deferred<Settings>();const onDirty=vi.fn();const onBusy=vi.fn();
   const view=render(<NotificationsPage settings={noticeSettings()} onSave={()=>pending.promise} onDirtyChange={onDirty} onBusyChange={onBusy} />);
   fireEvent.click(screen.getByRole("button",{name:"Add connector"}));
-  fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
+  fireEvent.click(within(screen.getByRole("dialog", {name:"Choose a connector"})).getByRole("button", {name:"Telegram"}));fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
   expect(onBusy).toHaveBeenLastCalledWith(true);view.unmount();
   expect(onBusy).toHaveBeenLastCalledWith(false);expect(onDirty).toHaveBeenLastCalledWith(false);
   const calls=onBusy.mock.calls.length;
@@ -225,6 +225,10 @@ it("keeps every action group and editor disabled while saving", async () => {
   expect(within(actions).getByRole("button", {name: "Saving…"}).matches(":disabled")).toBe(true);
   expect(within(actions).getByRole("button", {name: "Discard changes"}).matches(":disabled")).toBe(true);
   expect(onSave).toHaveBeenCalledTimes(1);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", {name: "Add connector"}));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(onSave).toHaveBeenCalledTimes(1);
   pending.resolve({...noticeSettings(), notification_connectors: [{...newTelegramConnector("a"), label: "Edited"}]});
   await screen.findByText("Notification settings saved.");
   expect(screen.getByRole("button", {name: "Add connector"}).matches(":disabled")).toBe(false);
@@ -249,4 +253,82 @@ it("keeps field and event errors associated with their controls", () => {
   expect(document.getElementById(events.getAttribute("aria-describedby")!)?.textContent)
     .toBe("Select at least one run event.");
   expect(screen.getByRole("alert").textContent).toContain("Select at least one run event.");
+});
+
+it.each([
+  ["Telegram", "telegram"],
+  ["Google Chat", "google_chat"],
+] as const)("adds a %s draft with defaults, keeps editor focus and saves only explicitly", async (label, kind) => {
+  const user = userEvent.setup(); const dirty = vi.fn();
+  const onSave = vi.fn(async (value: Settings) => value);
+  render(<NotificationsPage settings={noticeSettings()} onSave={onSave} onDirtyChange={dirty} />);
+  await user.click(screen.getByRole("button", { name: "Add connector" }));
+  expect(dirty).not.toHaveBeenCalledWith(true);
+  expect(onSave).not.toHaveBeenCalled();
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: label }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  const card = screen.getByRole("group", { name: label });
+  await waitFor(() => expect(document.activeElement).toBe(card));
+  // Volver a ceder a las microtasks detecta una restauración tardía incorrecta del opener.
+  await Promise.resolve(); expect(document.activeElement).toBe(card);
+  expect((within(card).getByRole("checkbox", { name: "Enabled" }) as HTMLInputElement).checked).toBe(false);
+  expect(dirty).toHaveBeenLastCalledWith(true);
+  expect(onSave).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await screen.findByText("Notification settings saved.");
+  const saved = onSave.mock.calls[0][0].notification_connectors![0];
+  expect(saved.id).toBeTruthy();
+  expect(saved).toEqual({
+    id: saved.id, label, enabled: false,
+    events: ["run_started", "run_succeeded", "run_failed", "run_blocked"],
+    type: kind,
+    config: kind === "telegram"
+      ? {chat_id: "", has_token: false}
+      : {has_webhook_url: false, triggers: ["new_issue", "pr_approved", "pr_review"], token_profile_ids: []},
+  });
+  expect(onSave).toHaveBeenCalledTimes(1);
+});
+
+it.each(["escape", "close"])("preserves dirty fields when cancelling via %s", async method => {
+  const user = userEvent.setup(); const onSave = vi.fn(); const dirty = vi.fn();
+  render(<NotificationsPage settings={{...noticeSettings(), notification_connectors: [newTelegramConnector("existing")]}}
+    onSave={onSave} onDirtyChange={dirty} />);
+  await user.clear(screen.getByLabelText("Name")); await user.type(screen.getByLabelText("Name"), "Edited draft");
+  await user.type(screen.getByLabelText("Bot token"), "fixture_draft");
+  const dirtyCalls = dirty.mock.calls.length;
+  await user.click(screen.getByRole("button", { name: "Add connector" }));
+  if (method === "escape") await user.keyboard("{Escape}");
+  else await user.click(screen.getByRole("button", { name: "Close connector selector" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getAllByLabelText("Name")).toHaveLength(1);
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Edited draft");
+  expect((screen.getByLabelText("Bot token") as HTMLInputElement).value).toBe("fixture_draft");
+  expect(dirty.mock.calls.length).toBe(dirtyCalls);
+  expect(dirty).toHaveBeenLastCalledWith(true); expect(onSave).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Discard changes" }));
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Telegram");
+  expect((screen.getByLabelText("Bot token") as HTMLInputElement).value).toBe("");
+});
+
+it.each(["Telegram", "Google Chat"])("can add repeated %s instances without changing existing connectors", async label => {
+  const user = userEvent.setup();
+  const existing = {...newTelegramConnector("existing"), label: "Existing untouched"};
+  const onSave = vi.fn(async (value: Settings) => value);
+  render(<NotificationsPage settings={{...noticeSettings(), notification_connectors: [existing]}} onSave={onSave} />);
+  for (let index = 0; index < 2; index += 1) {
+    await user.click(screen.getByRole("button", { name: "Add connector" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Telegram" })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "Google Chat" })).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: label }));
+  }
+  expect(screen.getAllByRole("group", { name: label })).toHaveLength(2);
+  expect(onSave).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await screen.findByText("Notification settings saved.");
+  const connectors = onSave.mock.calls[0][0].notification_connectors!;
+  expect(connectors).toHaveLength(3);
+  expect(new Set(connectors.map(item => item.id)).size).toBe(3);
+  expect(connectors[0]).toEqual(existing);
+  expect(connectors.slice(1).map(item => item.type)).toEqual([label === "Telegram" ? "telegram" : "google_chat", label === "Telegram" ? "telegram" : "google_chat"]);
 });
