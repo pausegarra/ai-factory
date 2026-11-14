@@ -20,7 +20,7 @@ pub(crate) struct AccountManager {
     pending: Mutex<Option<PendingLogin>>,
     leases: Mutex<HashMap<String, usize>>,
 }
-/// Keeps a managed home alive during short-lived catalog queries.
+/// Keeps a managed home alive during short-lived catalog and usage queries.
 pub(crate) struct CodexAccountLease<'a> {
     manager: &'a AccountManager,
     id: String,

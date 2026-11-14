@@ -3125,3 +3125,40 @@ select {
     margin-top: 0;
   }
 }
+
+.usage-trigger {
+  width: 100%;
+  margin-bottom: 16px;
+}
+.usage-trigger:hover:not(:disabled) { background: #272727; }
+.usage-trigger:active:not(:disabled) { transform: scale(0.98); }
+.usage-trigger:focus-visible,
+.usage-dialog button:focus-visible { outline: 2px solid #d1d1cf; outline-offset: 2px; }
+.usage-trigger:disabled,
+.usage-dialog button:disabled { opacity: 0.5; cursor: default; }
+.usage-dialog {
+  width: 448px;
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  padding: 24px;
+  background: #1f1f1f;
+  color: #dededc;
+  overflow-wrap: anywhere;
+}
+.usage-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.usage-dialog h2 { font-size: 20px; line-height: 28px; text-wrap: balance; }
+.usage-section { margin-top: 24px; font-size: 14px; line-height: 20px; }
+.usage-section h3 { font-size: 16px; line-height: 24px; font-weight: 600; margin-bottom: 12px; }
+.usage-section h4 { font-size: 14px; line-height: 20px; font-weight: 600; }
+.usage-section p { font-size: 14px; line-height: 20px; margin-top: 8px; text-wrap: pretty; }
+.usage-section small,
+.usage-section time { display: block; color: #aaa; font-size: 12px; line-height: 16px; margin-top: 4px; }
+.usage-accounts { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+.usage-account { padding: 16px; background: #272727; border: 1px solid #4b4b49; border-radius: 8px; }
+.usage-metric { margin: 12px 0; display: grid; gap: 4px; }
+.usage-metric strong { font-weight: 500; }
+.usage-skeleton { display: block; height: 32px; margin-bottom: 8px; }
+.usage-dialog > .dialog-actions { flex-wrap: wrap; }
+@media (max-width: 960px) {
+  .usage-trigger { justify-content: center; }
+}

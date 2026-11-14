@@ -11,6 +11,7 @@ import type {
   Agent,
   AgentModel,
   AgentAccount,
+  AgentUsage,
   CodexLogin,
   InstalledSkill,
 } from "../../domain/types";
@@ -67,6 +68,9 @@ function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(name, args);
 }
 export const factoryApi = {
+  agentUsage: (agent: Agent): Promise<AgentUsage> => native
+    ? command<AgentUsage>("get_agent_usage", { agent })
+    : Promise.resolve({ agent, status: "preview", entries: [], checked_at: new Date().toISOString(), code: "desktop_required" }),
   agentAccounts: () => native ? command<AgentAccount[]>("get_agent_accounts") : Promise.resolve([]),
   startCodexLogin: (label: string) => command<CodexLogin>("start_codex_login", { label }),
   openCodexLogin: (accountId: string) => command<void>("open_codex_login", { accountId }),
