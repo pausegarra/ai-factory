@@ -61,10 +61,11 @@ async fn approval_fixture(state: ApprovalState) -> (tempfile::TempDir, Arc<Facto
             return (200, json!({"login":"alice"}));
         }
         if path.starts_with("/search/") {
-            return (
-                200,
-                json!({"incomplete_results":false,"total_count":0,"items":[]}),
-            );
+            let state = state.lock().unwrap();
+            let rows = if path.contains("is%3Apr") && state.0["state"] == "open" {
+                vec![json!({"number":5,"repository_url":"https://api.github.com/repos/acme/repo","pull_request":{}})]
+            } else { vec![] };
+            return (200,json!({"incomplete_results":false,"total_count":rows.len(),"items":rows}));
         }
         let state = state.lock().unwrap();
         if path == "/repos/acme/repo/pulls/5" {
@@ -223,7 +224,7 @@ async fn approval_requires_current_head_and_consumes_comment_across_heads() {
     let mode = Arc::new(Mutex::new((false, false)));
     let state = mode.clone();
     let base=server(move|path,_|{if path=="/user"{return(200,json!({"login":"alice"}))}
-if path.starts_with("/search/"){return(200,json!({"incomplete_results":false,"total_count":0,"items":[]}))}
+if path.starts_with("/search/"){let rows=if path.contains("is%3Apr"){vec![json!({"number":5,"repository_url":"https://api.github.com/repos/acme/repo","pull_request":{}})]}else{vec![]};return(200,json!({"incomplete_results":false,"total_count":rows.len(),"items":rows}))}
 if path.ends_with("/reviews?per_page=100&page=1"){return(200,json!([{"id":1,"state":"APPROVED","commit_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]))}
 if path.contains("/comments?"){return(200,json!([{"id":7,"body":" OK ","user":{"login":"alice"}}]))}
 if path=="/repos/acme/repo/pulls/5"{let mut p=pr();if state.lock().unwrap().0 {p["head"]["sha"]=json!("cccccccccccccccccccccccccccccccccccccccc")}return(200,p)}panic!("unexpected {path}")}).await;
@@ -335,6 +336,7 @@ async fn deleted_source_origin_polls_without_history_and_revalidates_authorizati
     ] {
         let base=server(move |path,_| {
             if path=="/user" {return (200,json!({"login":if mode=="wrong_token" {"mallory"} else {"alice"}}));}
+            if path.starts_with("/search/") {return (200,json!({"incomplete_results":false,"total_count":1,"items":[{"number":5,"repository_url":"https://api.github.com/repos/acme/repo","pull_request":{}}]}));}
             if path=="/repos/acme/repo/pulls/5" {let mut p=pr();if mode=="changed_author" {p["user"]["login"]=json!("mallory");}return (200,p);}
             if path.contains("/reviews?") {return (200,json!([{"state":"APPROVED","commit_id":if mode=="old_head" {"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} else {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]));}
             if path.contains("/comments?") {return (200,json!([]));}
@@ -376,7 +378,10 @@ async fn deleted_source_origin_polls_without_history_and_revalidates_authorizati
         let result = f.poll_now().await;
         assert_eq!(
             result.is_ok(),
-            matches!(mode, "valid" | "old_head"),
+            matches!(
+                mode,
+                "valid" | "old_head" | "actor_revoked" | "owner_revoked"
+            ),
             "{mode}: {result:?}"
         );
         assert_eq!(
@@ -402,10 +407,10 @@ async fn two_approval_signals_stay_durable_and_deduplicated() {
             return (200, json!({"login":"alice"}));
         }
         if path.starts_with("/search/") {
-            return (
-                200,
-                json!({"total_count":0,"incomplete_results":false,"items":[]}),
-            );
+            let rows = if path.contains("is%3Apr") {
+                vec![json!({"number":5,"repository_url":"https://api.github.com/repos/acme/repo","pull_request":{}}),json!({"number":6,"repository_url":"https://api.github.com/repos/acme/repo","pull_request":{}})]
+            } else { vec![] };
+            return (200,json!({"total_count":rows.len(),"incomplete_results":false,"items":rows}));
         }
         for number in [5, 6] {
             if path == format!("/repos/acme/repo/pulls/{number}") {

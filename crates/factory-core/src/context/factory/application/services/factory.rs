@@ -64,6 +64,8 @@ pub struct Factory {
     pub(crate) active: Mutex<HashMap<String, ActiveWorker>>,
     pub(crate) service: Mutex<ServiceStatus>,
     poll_lock: tokio::sync::Mutex<()>,
+    pub(crate) github_http:
+        Arc<Mutex<crate::context::factory::infrastructure::rest_clients::github::http::HttpState>>,
     pub(crate) lifecycle_gate: Mutex<()>,
     pub(crate) deletion_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     pub(crate) cleanup: Arc<dyn RunCleanup>,
@@ -164,6 +166,7 @@ impl Factory {
             active: Mutex::new(HashMap::new()),
             service: Mutex::new(status),
             poll_lock: tokio::sync::Mutex::new(()),
+            github_http: Arc::new(Mutex::new(Default::default())),
             lifecycle_gate: Mutex::new(()),
             deletion_locks: Mutex::new(HashMap::new()),
             cleanup,
@@ -426,7 +429,7 @@ impl Factory {
         Ok(id)
     }
     pub(crate) fn github(&self, token: &str) -> Result<Github> {
-        Github::with_base(token, &self.github_base)
+        Ok(Github::with_base(token, &self.github_base)?.with_http_state(self.github_http.clone()))
     }
     pub(crate) fn workflow_enabled_for(&self, trigger: &str, actor: &str) -> Result<bool> {
         let settings = self.store.public_settings()?;
