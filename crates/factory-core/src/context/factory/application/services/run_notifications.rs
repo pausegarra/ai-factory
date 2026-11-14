@@ -25,7 +25,11 @@ pub(crate) fn notification_for(
             title
         }
     };
-    let mut body = format!("{repository} #{} · {safe_title}", run.number);
+    let trigger = trigger_label(&run.trigger_id, &redact);
+    let mut body = format!(
+        "Trigger: {trigger} · {repository} #{} · {safe_title}",
+        run.number
+    );
     if matches!(run.status.as_str(), "failed" | "blocked") {
         if let Some(error) = run.error.as_deref().filter(|e| !e.trim().is_empty()) {
             body.push_str(" · ");
@@ -39,6 +43,26 @@ pub(crate) fn notification_for(
         title: title.into(),
         body: visible_text(&body, 360),
     })
+}
+
+fn trigger_label(trigger_id: &str, redact: &impl Fn(&str) -> String) -> String {
+    match trigger_id {
+        "new_issue" => "New task".into(),
+        "pr_approved" => "PR approved".into(),
+        "pr_review" => "Review requested".into(),
+        _ => {
+            let redacted = visible_text(&redact(trigger_id), usize::MAX);
+            if contains_credential_marker(&redacted) {
+                return "Unknown trigger ([hidden])".into();
+            }
+            let id = visible_text(&redacted, 80);
+            if id.is_empty() {
+                "Unknown trigger".into()
+            } else {
+                format!("Unknown trigger ({id})")
+            }
+        }
+    }
 }
 
 fn contains_credential_marker(text: &str) -> bool {
@@ -174,7 +198,10 @@ mod tests {
                 if let Some(m) = actual {
                     assert_eq!(m.run_id, "run-alpha");
                     assert_eq!(m.attempt, 2);
-                    assert_eq!(m.body, "acme/repo #11 · Task-based work");
+                    assert_eq!(
+                        m.body,
+                        "Trigger: New task · acme/repo #11 · Task-based work"
+                    );
                 }
             }
         }
@@ -189,7 +216,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             m.body,
-            "acme/repo #11 · Title · Execution reported an error. See run details."
+            "Trigger: New task · acme/repo #11 · Title · Execution reported an error. See run details."
         );
         for secret in [
             "EXTERNAL_PRIVATE_SENTINEL",
@@ -222,7 +249,10 @@ mod tests {
                 s.to_owned()
             })
             .unwrap();
-            assert_eq!(m.body, "acme/repo #11 · [Title hidden]", "{title}");
+            assert_eq!(
+                m.body, "Trigger: New task · acme/repo #11 · [Title hidden]",
+                "{title}"
+            );
         }
     }
     #[test]
@@ -237,7 +267,7 @@ mod tests {
                 s.to_owned()
             })
             .unwrap();
-            assert_eq!(m.body, "acme/repo #11 · [Title hidden]");
+            assert_eq!(m.body, "Trigger: New task · acme/repo #11 · [Title hidden]");
         }
     }
     #[test]
@@ -255,7 +285,7 @@ mod tests {
             assert!(m.body.chars().count() <= 360);
             assert!(
                 m.body
-                    .strip_prefix("acme/repo #11 · ")
+                    .strip_prefix("Trigger: New task · acme/repo #11 · ")
                     .unwrap()
                     .chars()
                     .count()
@@ -270,7 +300,7 @@ mod tests {
         assert!(m.body.ends_with('…'));
         assert_eq!(
             m.body
-                .strip_prefix("acme/repo #11 · ")
+                .strip_prefix("Trigger: New task · acme/repo #11 · ")
                 .unwrap()
                 .chars()
                 .count(),
@@ -289,14 +319,17 @@ mod tests {
             |s| s.to_owned(),
         )
         .unwrap();
-        assert_eq!(m.body, "acme/repo #11 · Hola bold 🦀 fin");
+        assert_eq!(
+            m.body,
+            "Trigger: New task · acme/repo #11 · Hola bold 🦀 fin"
+        );
         assert!(!m.body.chars().any(char::is_control));
         let m = notification_for(
             &transition("queued", "running", " \n<>&\u{202e}", None),
             |s| s.to_owned(),
         )
         .unwrap();
-        assert_eq!(m.body, "acme/repo #11 · (untitled)");
+        assert_eq!(m.body, "Trigger: New task · acme/repo #11 · (untitled)");
     }
     #[test]
     fn notification_does_not_show_residual_error_on_success_or_start() {
@@ -306,7 +339,147 @@ mod tests {
                 |s| s.to_owned(),
             )
             .unwrap();
-            assert_eq!(m.body, "acme/repo #11 · Title");
+            assert_eq!(m.body, "Trigger: New task · acme/repo #11 · Title");
+        }
+    }
+
+    #[test]
+    fn notification_trigger_labels_cover_every_emitted_edge() {
+        for (trigger, label) in [
+            ("new_issue", "New task"),
+            ("pr_approved", "PR approved"),
+            ("pr_review", "Review requested"),
+        ] {
+            for (previous, status, heading) in [
+                ("queued", "running", "started"),
+                ("queued", "succeeded", "succeeded"),
+                ("running", "succeeded", "succeeded"),
+                ("queued", "failed", "failed"),
+                ("running", "failed", "failed"),
+                ("queued", "blocked", "blocked"),
+                ("running", "blocked", "blocked"),
+            ] {
+                let mut edge = transition(previous, status, "Title", Some("timeout PRIVATE"));
+                edge.run.trigger_id = trigger.into();
+                let message = notification_for(&edge, str::to_owned).unwrap();
+                let suffix = if matches!(status, "failed" | "blocked") {
+                    " · Execution timed out."
+                } else {
+                    ""
+                };
+                assert_eq!(
+                    message.body,
+                    format!("Trigger: {label} · acme/repo #11 · Title{suffix}")
+                );
+                assert_eq!(message.title, format!("AI Factory — Run {heading}"));
+                assert_eq!(message.status, status);
+                assert_eq!(message.run_id, "run-alpha");
+                assert_eq!(message.attempt, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn notification_unknown_trigger_is_visible_plain_and_redacted() {
+        for (raw, expected) in [
+            ("future_trigger", "Unknown trigger (future_trigger)"),
+            ("new_iss\u{202e}ue", "Unknown trigger (new_issue)"),
+            (
+                "  future\r\n<bold>&\u{202e}\u{2066}\u{0007} 🦀  ",
+                "Unknown trigger (future bold 🦀)",
+            ),
+            (" \n<>&\u{200f}\u{061c}\u{0007}", "Unknown trigger"),
+            ("", "Unknown trigger"),
+            (
+                "future_PRIVATE_TOKEN",
+                "Unknown trigger (future_[redacted])",
+            ),
+            ("ghp_PRIVATE", "Unknown trigger ([hidden])"),
+            ("Bearer\nPRIVATE", "Unknown trigger ([hidden])"),
+            ("to\u{202e}ken=PRIVATE", "Unknown trigger ([hidden])"),
+            ("gh\u{0007}p_PRIVATE", "Unknown trigger ([hidden])"),
+            (
+                "123456:abcdefghijklmnopqrstuvwxyz_0123456789",
+                "Unknown trigger ([hidden])",
+            ),
+        ] {
+            let mut edge = transition("queued", "running", "Title", None);
+            edge.run.trigger_id = raw.into();
+            let message =
+                notification_for(&edge, |s| s.replace("PRIVATE_TOKEN", "[redacted]")).unwrap();
+            assert_eq!(
+                message.body,
+                format!("Trigger: {expected} · acme/repo #11 · Title")
+            );
+            assert!(!message.body.contains("PRIVATE"));
+            assert!(!message.body.chars().any(char::is_control));
+            assert_eq!(edge.run.trigger_id, raw);
+        }
+    }
+
+    #[test]
+    fn notification_unknown_trigger_redaction_and_marker_checks_precede_limiting() {
+        let mut edge = transition("queued", "running", "Title", None);
+        // The secret straddles the 80-character limit: truncation before redaction leaks PRI.
+        edge.run.trigger_id = format!("{}PRIVATE_TOKEN tail", "é".repeat(76));
+        let message =
+            notification_for(&edge, |s| s.replace("PRIVATE_TOKEN", "[redacted]")).unwrap();
+        let expected_id = format!("{}[re…", "é".repeat(76));
+        assert_eq!(
+            message.body,
+            format!("Trigger: Unknown trigger ({expected_id}) · acme/repo #11 · Title")
+        );
+        assert!(!message.body.contains("PRI"));
+        edge.run.trigger_id = format!("{}token=PRIVATE", "é".repeat(100));
+        let message = notification_for(&edge, str::to_owned).unwrap();
+        assert_eq!(
+            message.body,
+            "Trigger: Unknown trigger ([hidden]) · acme/repo #11 · Title"
+        );
+    }
+
+    #[test]
+    fn notification_trigger_survives_real_body_truncation() {
+        let mut edge = transition(
+            "running",
+            "failed",
+            &"🦀".repeat(200),
+            Some("PRIVATE_ERROR"),
+        );
+        edge.run.repository = "r".repeat(200);
+        edge.run.number = u64::MAX;
+        // A bounded unknown label plus maximum fields really exceeds the body budget.
+        edge.run.trigger_id = "🦀".repeat(200);
+        let message = notification_for(&edge, str::to_owned).unwrap();
+        let expected_id = format!("{}…", "🦀".repeat(79));
+        let prefix = format!("Trigger: Unknown trigger ({expected_id}) · ");
+        let repository = format!("{}…", "r".repeat(100));
+        let title = format!("{}…", "🦀".repeat(119));
+        let unbounded = format!(
+            "{prefix}{repository} #{} · {title} · Execution reported an error. See run details.",
+            u64::MAX
+        );
+        assert!(unbounded.chars().count() > 360);
+        let expected: String = unbounded
+            .chars()
+            .take(359)
+            .chain(std::iter::once('…'))
+            .collect();
+        assert_eq!(message.body, expected);
+        assert_eq!(message.body.chars().count(), 360);
+        assert!(message.body.starts_with(&prefix));
+        assert!(!message.body.contains("PRIVATE_ERROR"));
+        // Known labels also stay first with oversized fields.
+        for (trigger, label) in [
+            ("new_issue", "New task"),
+            ("pr_approved", "PR approved"),
+            ("pr_review", "Review requested"),
+        ] {
+            edge.run.trigger_id = trigger.into();
+            let message = notification_for(&edge, str::to_owned).unwrap();
+            assert!(message.body.starts_with(&format!("Trigger: {label} · ")));
+            assert!(message.body.chars().count() <= 360);
+            assert!(!message.body.contains("PRIVATE_ERROR"));
         }
     }
 }
