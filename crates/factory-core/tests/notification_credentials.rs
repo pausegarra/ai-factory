@@ -5,7 +5,8 @@ use std::sync::{atomic::Ordering, Arc};
 const TOKEN: &str = "123456:fixture_telegram_secret_abcdefghijklmnopqrstuvwxyz";
 fn input(enabled: bool, token: Option<&str>) -> Settings {
     let mut value = serde_json::to_value(Settings::default()).unwrap();
-    value["notification_connectors"] = json!([{"id":"team","label":"Team","enabled":enabled,"events":["run_failed"],"type":"telegram","config":{"chat_id":" -1001 ","has_token":true,"bot_token":token}}]);
+    value["token_profiles"] = json!([{"id":"work","label":"Work","account":"alice"}]);
+    value["notification_connectors"] = json!([{"id":"team","label":"Team","enabled":enabled,"events":["run_failed"],"type":"telegram","config":{"chat_id":" -1001 ","has_token":true,"bot_token":token,"triggers":["new_issue"],"token_profile_ids":["work"]}}]);
     serde_json::from_value(value).unwrap()
 }
 fn public(store: &Store) -> Value {
@@ -108,13 +109,13 @@ fn notification_gc_retries_after_restart_and_never_collects_live_github_secret()
     let c = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
     let mut settings = input(true, Some(TOKEN));
-    settings.token_profiles.push(factory_core::TokenProfile {
-        id: "team".into(),
+    settings.token_profiles[0] = factory_core::TokenProfile {
+        id: "work".into(),
         label: "GitHub".into(),
         account: "alice".into(),
         token: Some("ghp_fixture_private".into()),
         ..Default::default()
-    });
+    };
     store.save_settings(&settings).unwrap();
     assert_eq!(c.values.lock().unwrap().len(), 2);
     c.fail_delete.store(true, Ordering::SeqCst);
@@ -215,4 +216,118 @@ fn notification_two_destinations_and_provider_change_have_independent_secret_ide
         factory_core::ConnectorProvider::Telegram(Default::default());
     settings.notification_connectors[0].enabled = true;
     assert!(store.save_settings(&settings).is_err());
+}
+
+#[test]
+fn notification_legacy_filters_persist_on_save_without_read_mutation_or_secret_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let credentials = Arc::new(common::MemoryCredentials::default());
+    let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
+    store.save_settings(&input(true, Some(TOKEN))).unwrap();
+    let raw = |store: &Store| -> String {
+        store
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT json FROM settings", [], |r| r.get(0))
+            .unwrap()
+    };
+    let reference = |store: &Store| -> String {
+        store
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT reference FROM notification_credential_refs WHERE connector_id='team'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let original_ref = reference(&store);
+    let mut legacy: Value = serde_json::from_str(&raw(&store)).unwrap();
+    let config = legacy["notification_connectors"][0]["config"]
+        .as_object_mut()
+        .unwrap();
+    config.remove("triggers");
+    config.remove("token_profile_ids");
+    let legacy_json = legacy.to_string();
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE settings SET json=?1", [&legacy_json])
+        .unwrap();
+    let mut loaded = store.public_settings().unwrap();
+    assert_eq!(
+        raw(&store),
+        legacy_json,
+        "reads must not rewrite legacy settings"
+    );
+    let canonical = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(
+        canonical["notification_connectors"][0]["config"]["triggers"],
+        json!(["new_issue", "pr_approved", "pr_review"])
+    );
+    assert_eq!(
+        canonical["notification_connectors"][0]["config"]["token_profile_ids"],
+        json!(["work"])
+    );
+    assert_eq!(
+        canonical["notification_connectors"][0]["config"]["has_token"],
+        true
+    );
+    loaded.token_profiles[0].label = "Renamed".into();
+    loaded.token_profiles.push(factory_core::TokenProfile {
+        id: "new".into(),
+        account: "bob".into(),
+        label: "New".into(),
+        ..Default::default()
+    });
+    store.save_settings(&loaded).unwrap();
+    assert_eq!(reference(&store), original_ref);
+    drop(store);
+    let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
+    let mut loaded = store.public_settings().unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap()["notification_connectors"][0]["config"],
+        canonical["notification_connectors"][0]["config"]
+    );
+    assert_eq!(reference(&store), original_ref);
+    if let factory_core::ConnectorProvider::Telegram(c) =
+        &mut loaded.notification_connectors[0].provider
+    {
+        c.bot_token = Some("123456:rotated_fixture".into());
+    }
+    store.save_settings(&loaded).unwrap();
+    assert_ne!(reference(&store), original_ref);
+    let rotated_ref = reference(&store);
+    let mut loaded = store.public_settings().unwrap();
+    if let factory_core::ConnectorProvider::Telegram(c) =
+        &mut loaded.notification_connectors[0].provider
+    {
+        c.bot_token = Some(" ".into());
+    }
+    store.save_settings(&loaded).unwrap();
+    assert_eq!(reference(&store), rotated_ref);
+    let before = public(&store);
+    store.db.lock().unwrap().execute_batch("CREATE TRIGGER reject_settings BEFORE UPDATE ON settings BEGIN SELECT RAISE(ABORT,'fixture rejection'); END;").unwrap();
+    if let factory_core::ConnectorProvider::Telegram(c) =
+        &mut loaded.notification_connectors[0].provider
+    {
+        c.bot_token = Some("123456:rollback_fixture".into());
+        c.triggers = vec!["pr_review".into()];
+    }
+    assert!(store.save_settings(&loaded).is_err());
+    assert_eq!(public(&store), before);
+    assert_eq!(reference(&store), rotated_ref);
+    for text in [
+        raw(&store),
+        public(&store).to_string(),
+        format!("{:?}", store.public_settings().unwrap()),
+    ] {
+        for secret in [TOKEN, "123456:rotated_fixture", "123456:rollback_fixture"] {
+            assert!(!text.contains(secret));
+        }
+    }
 }

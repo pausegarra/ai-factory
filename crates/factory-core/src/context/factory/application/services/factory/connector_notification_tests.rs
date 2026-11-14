@@ -283,6 +283,8 @@ async fn scenario(mode: &str, shutdown_held: bool) {
                                 chat_id: "fixture".into(),
                                 bot_token: Some("123:fixture".into()),
                                 has_token: false,
+                                triggers: vec!["new_issue".into()],
+                                token_profile_ids: vec!["work".into()],
                             }),
                         },
                     );

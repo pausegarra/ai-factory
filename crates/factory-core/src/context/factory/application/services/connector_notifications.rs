@@ -61,17 +61,14 @@ pub(crate) fn targets_for_event<'a>(
         .filter(|c| {
             c.enabled
                 && c.events.contains(&event)
-                && match &c.provider {
-                    ConnectorProvider::Telegram(_) => true,
-                    ConnectorProvider::GoogleChat(config) => {
-                        config.triggers.contains(&run.trigger_id)
+                && c.provider
+                    .notification_filters()
+                    .is_some_and(|(triggers, profile_ids)| {
+                        triggers.contains(&run.trigger_id)
                             && run.origin_token_profile_id.as_ref().is_some_and(|id| {
-                                config.token_profile_ids.contains(id)
-                                    && profiles.iter().any(|p| &p.id == id)
+                                profile_ids.contains(id) && profiles.iter().any(|p| &p.id == id)
                             })
-                    }
-                    _ => false,
-                }
+                    })
         })
         .collect()
 }
@@ -352,7 +349,7 @@ mod tests {
     fn notification_selection_excludes_disabled_unknown_and_unselected_events() {
         let connectors: Vec<NotificationConnector> = serde_json::from_value(serde_json::json!([
             {"id":"selected", "label":"Selected", "enabled":true,
-             "events":["run_failed"], "type":"telegram", "config":{"chat_id":"a"}},
+             "events":["run_failed"], "type":"telegram", "config":{"chat_id":"a","triggers":["new_issue"],"token_profile_ids":["work"]}},
             {"id":"disabled", "label":"Disabled", "enabled":false,
              "events":["run_started","run_succeeded","run_failed","run_blocked"],
              "type":"telegram", "config":{"chat_id":"b"}},
@@ -363,6 +360,12 @@ mod tests {
              "events":[], "type":"telegram", "config":{"chat_id":"c"}}
         ]))
         .unwrap();
+        let mut run = selection_run();
+        run.origin_token_profile_id = Some("work".into());
+        let profiles = [TokenProfile {
+            id: "work".into(),
+            ..Default::default()
+        }];
         for (event, expected) in [
             (NotificationEvent::RunStarted, vec![]),
             (NotificationEvent::RunSucceeded, vec![]),
@@ -370,7 +373,7 @@ mod tests {
             (NotificationEvent::RunBlocked, vec![]),
         ] {
             assert_eq!(
-                targets_for_event(&connectors, event, &selection_run(), &[])
+                targets_for_event(&connectors, event, &run, &profiles)
                     .iter()
                     .map(|c| c.id.as_str())
                     .collect::<Vec<_>>(),
@@ -380,79 +383,107 @@ mod tests {
         }
     }
     #[test]
-    fn notification_selection_google_chat_ands_dimensions_ors_ids_and_rejects_orphan_origin() {
-        let connectors:Vec<NotificationConnector>=serde_json::from_value(serde_json::json!([
-            {"id":"chat","label":"Team","enabled":true,"events":["run_started","run_failed"],"type":"google_chat","config":{"triggers":["new_issue","pr_review"],"token_profile_ids":["work","personal"]}}
+    fn notification_selection_ands_dimensions_ors_ids_and_rejects_orphan_origin() {
+        let mut connectors: Vec<NotificationConnector> = serde_json::from_value(serde_json::json!([
+            {"id":"tg","label":"Telegram","enabled":true,"events":["run_started","run_failed"],"type":"telegram","config":{"chat_id":"fixture","triggers":["new_issue","pr_review"],"token_profile_ids":["work","personal"]}},
+            {"id":"chat","label":"Chat","enabled":true,"events":["run_started","run_failed"],"type":"google_chat","config":{"triggers":["new_issue","pr_review"],"token_profile_ids":["work","personal"]}},
+            {"id":"unknown","label":"Unknown","enabled":true,"events":["run_started","run_failed"],"type":"future","config":{}}
         ])).unwrap();
-        let profiles = vec![
-            TokenProfile {
-                id: "work".into(),
+        let profiles: Vec<_> = ["work", "personal", "other", "Work"]
+            .iter()
+            .map(|id| TokenProfile {
+                id: (*id).into(),
                 ..Default::default()
-            },
-            TokenProfile {
-                id: "personal".into(),
-                ..Default::default()
-            },
-        ];
-        for (event, trigger, origin, exists, expected) in [
+            })
+            .collect();
+        for (event, trigger, origin, exists, enabled, expected) in [
             (
                 NotificationEvent::RunStarted,
                 "new_issue",
                 Some("work"),
                 true,
-                1,
+                true,
+                vec!["tg", "chat"],
             ),
             (
                 NotificationEvent::RunFailed,
                 "pr_review",
                 Some("personal"),
                 true,
-                1,
+                true,
+                vec!["tg", "chat"],
             ),
             (
                 NotificationEvent::RunSucceeded,
                 "new_issue",
                 Some("work"),
                 true,
-                0,
+                true,
+                vec![],
             ),
             (
                 NotificationEvent::RunStarted,
                 "pr_approved",
                 Some("work"),
                 true,
-                0,
+                true,
+                vec![],
             ),
             (
                 NotificationEvent::RunStarted,
                 "new_issue",
                 Some("other"),
                 true,
-                0,
+                true,
+                vec![],
             ),
-            (NotificationEvent::RunStarted, "new_issue", None, true, 0),
+            (
+                NotificationEvent::RunStarted,
+                "new_issue",
+                Some("Work"),
+                true,
+                true,
+                vec![],
+            ),
+            (
+                NotificationEvent::RunStarted,
+                "new_issue",
+                None,
+                true,
+                true,
+                vec![],
+            ),
             (
                 NotificationEvent::RunStarted,
                 "new_issue",
                 Some("work"),
                 false,
-                0,
+                true,
+                vec![],
+            ),
+            (
+                NotificationEvent::RunStarted,
+                "new_issue",
+                Some("work"),
+                true,
+                false,
+                vec![],
             ),
         ] {
             let mut run = selection_run();
             run.trigger_id = trigger.into();
             run.origin_token_profile_id = origin.map(str::to_owned);
             run.actor = "work".into();
-            assert_eq!(
-                targets_for_event(
-                    &connectors,
-                    event,
-                    &run,
-                    if exists { &profiles } else { &[] }
-                )
-                .len(),
-                expected
-            );
+            for c in &mut connectors {
+                c.enabled = enabled;
+            }
+            let existing: Vec<_> = profiles
+                .iter()
+                .filter(|p| exists || p.id == "personal")
+                .cloned()
+                .collect();
+            assert_eq!(targets_for_event(&connectors,event,&run,&existing).iter().map(|c|c.id.as_str()).collect::<Vec<_>>(),expected,
+                "event={event:?} trigger={trigger} origin={origin:?} exists={exists} enabled={enabled}");
         }
     }
     #[test]

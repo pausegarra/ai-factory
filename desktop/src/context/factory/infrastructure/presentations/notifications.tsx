@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Bell } from "@phosphor-icons/react";
 import type { NotificationConnector, Settings } from "../../domain/types";
-import { cleanNotificationConnectors, isTelegramConnector, isGoogleChatConnector, newGoogleChatConnector, newTelegramConnector, notificationEvents, validateNotificationConnectors } from "../../domain/notification-connectors";
+import { cleanNotificationConnectors, isTelegramConnector, isGoogleChatConnector, newGoogleChatConnector, newTelegramConnector, validateNotificationConnectors } from "../../domain/notification-connectors";
 import { Empty, Field, Notice, Toggle } from "./ui";
 import { ConnectorPicker, type ConnectorKind } from "./connector-picker";
+import { NotificationConnectorFilters } from "./notification-connector-filters";
 import { GoogleChatConnectorEditor } from "./google-chat-connector";
 
 export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChange }: {
@@ -148,13 +149,12 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
                   </Field>
                 </div>
                 <p>{c.config.has_token ? "Token configured" : "Token not configured"}</p>
-                <fieldset className="notifications-events" aria-invalid={attempted && c.enabled && !c.events.length} aria-describedby={attempted && c.enabled && !c.events.length ? `events-error-${c.id}` : undefined}>
-                  <legend>Run events</legend>
-                  <div className="notifications-event-list">
-                    {notificationEvents.map(event => <Toggle key={event.id} label={event.label} checked={c.events.includes(event.id)} onChange={checked => edit(c.id, {events: checked ? [...c.events, event.id] : c.events.filter(e => e !== event.id)})} />)}
-                    {attempted && c.enabled && !c.events.length && <p id={`events-error-${c.id}`}>Select at least one run event.</p>}
-                  </div>
-                </fieldset>
+                <NotificationConnectorFilters
+                  id={c.id} enabled={c.enabled} events={c.events}
+                  triggers={c.config.triggers} tokenProfileIds={c.config.token_profile_ids}
+                  profiles={settings.token_profiles} attempted={attempted}
+                  onChange={({events, triggers, token_profile_ids}) => edit(c.id, {events, config: {...c.config, triggers, token_profile_ids}})}
+                />
               </> : isGoogleChatConnector(c) ? <GoogleChatConnectorEditor connector={c} profiles={settings.token_profiles} busy={busy} attempted={attempted} edit={patch => edit(c.id, patch)} /> : <p>Unsupported connector type: {c.type}</p>}
               <div className="notifications-connector-actions" role="group" aria-label="Connector actions">
                 <button className="button button-secondary" onClick={() => remove(c.id)} aria-label={`Remove connector ${c.label}`}>Remove connector</button>

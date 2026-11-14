@@ -269,9 +269,12 @@ fn google_chat_provider_replacement_never_inherits_another_provider_secret() {
             chat_id: "chat".into(),
             has_token: true,
             bot_token: None,
+            triggers: vec!["new_issue".into()],
+            token_profile_ids: vec!["work".into()],
         });
     s.notification_connectors[0].enabled = true;
-    assert!(store.save_settings(&s).is_err());
+    let error = store.save_settings(&s).unwrap_err().to_string();
+    assert!(error.contains("Bot token"), "{error}");
     s.notification_connectors[0].enabled = false;
     store.save_settings(&s).unwrap();
     s = input(true, None);

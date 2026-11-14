@@ -655,7 +655,7 @@ it("preserves connectors refreshed while general settings are dirty", async () =
   const onSave = vi.fn(async (value: Settings) => value);
   const view = render(<SettingsPage settings={original} onSave={onSave} appDir="/fixture/data" />);
   fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
-  const connector = {id:"external-team",label:"Team",enabled:false,events:[],type:"telegram",config:{chat_id:"",has_token:false}};
+  const connector = {id:"external-team",label:"Team",enabled:false,events:[],type:"telegram",config:{chat_id:"",has_token:false,triggers:["new_issue"],token_profile_ids:["work"]}};
   view.rerender(<SettingsPage settings={{...original, notification_connectors:[connector]}} onSave={onSave} appDir="/fixture/data" />);
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
@@ -677,7 +677,7 @@ it("follows global only for inherited trigger fields", () => {
 it("persists independent trigger ceilings and restores inheritance on discard", async () => {
   const original = { ...settings(), max_concurrent: 8 };
   original.flows[0].max_parallel = 2;
-  original.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false } }];
+  original.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false, triggers: ["new_issue"], token_profile_ids: ["work"] } }];
   const save = vi.fn(async (value: Settings) => value);
   const view = render(<SettingsPage settings={original} onSave={save} appDir="/fixture" />);
   for (const [name, label, limit] of [["new issue", "New issue", "4"], ["PR review", "PR review", "4"], ["PR approved", "PR approved", "2"]]) {
@@ -742,7 +742,7 @@ it("keeps trigger edits across import refresh and preserves fresh workflow and c
   expect((screen.getByLabelText("PR review concurrent tasks") as HTMLInputElement).value).toBe("2");
   const refreshed = structuredClone(original);
   refreshed.flows[0].max_parallel = 3;
-  refreshed.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false } }];
+  refreshed.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false, triggers: ["new_issue"], token_profile_ids: ["work"] } }];
   view.rerender(<SettingsPage settings={refreshed} onSave={save} appDir="/fixture" />);
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));

@@ -6,6 +6,7 @@ import { newTelegramConnector } from "../src/context/factory/domain/notification
 import { noticeSettings, deferred } from "./fixtures/notices";
 import type { Settings } from "../src/context/factory/domain/types";
 afterEach(cleanup);
+const withWork = (): Settings => ({...noticeSettings(),token_profiles:[{id:"work",label:"Work",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}]});
 it("adds a disabled Telegram connector and discards the token draft", async () => {
   const user = userEvent.setup(); const onSave = vi.fn();
   render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
@@ -21,7 +22,7 @@ it("adds a disabled Telegram connector and discards the token draft", async () =
 });
 it("saves active fields and clears secrets even when the save API returns void", async () => {
   const onSave = vi.fn(async (_s: Settings) => {});
-  render(<NotificationsPage settings={noticeSettings()} onSave={onSave} />);
+  render(<NotificationsPage settings={withWork()} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button", {name:"Add connector"}));
   fireEvent.change(screen.getByRole("combobox", {name:"Connector to add"}), {target:{value:"telegram"}});
   fireEvent.click(screen.getByRole("checkbox", {name:"Enabled"}));
@@ -30,6 +31,7 @@ it("saves active fields and clears secrets even when the save API returns void",
   fireEvent.change(screen.getByLabelText("Chat ID"), {target:{value:" -1001 "}});
   fireEvent.change(screen.getByLabelText("Bot token"), {target:{value:"123456:fixture_only"}});
   fireEvent.click(screen.getByRole("checkbox", {name:"Run started"}));
+  fireEvent.click(screen.getByRole("checkbox", {name:"Work (@alice)"}));
   fireEvent.click(screen.getByRole("button", {name:"Save changes"}));
   await screen.findByText("Notification settings saved.");
   expect(onSave.mock.calls[0][0].notification_connectors?.[0].config.chat_id).toBe("-1001");
@@ -101,7 +103,7 @@ it("ignores late saves after unmount and releases page busy state", async () => 
 });
 it("uses public save responses and never restores a submitted secret from old props", async () => {
   const original={...noticeSettings(),notification_connectors:[newTelegramConnector("a")]};
-  const onSave=vi.fn(async (s: Settings)=>({...s,notification_connectors:s.notification_connectors?.map(c=>({...c,config:{chat_id:"saved",has_token:true}}))}));
+  const onSave=vi.fn(async (s: Settings)=>({...s,notification_connectors:s.notification_connectors?.map(c=>({...c,config:{...c.config,chat_id:"saved",has_token:true}}))}));
   const view=render(<NotificationsPage settings={original} onSave={onSave} />);
   fireEvent.change(screen.getByLabelText("Bot token"),{target:{value:"PRIVATE_SUBMITTED"}});
   fireEvent.click(screen.getByRole("button",{name:"Save changes"}));await screen.findByText("Notification settings saved.");
@@ -110,9 +112,9 @@ it("uses public save responses and never restores a submitted secret from old pr
   expect((screen.getByLabelText("Chat ID") as HTMLInputElement).value).toBe("saved");
 });
 it("keeps existing tokens with blank replacement and permits disabled incomplete drafts", async () => {
-  const c=newTelegramConnector("a");c.enabled=true;c.config={chat_id:"@channel",has_token:true};
+  const c=newTelegramConnector("a");c.enabled=true;c.config={...c.config,chat_id:"@channel",has_token:true,token_profile_ids:["work"]};
   const onSave=vi.fn(async (s:Settings)=>s);
-  render(<NotificationsPage settings={{...noticeSettings(),notification_connectors:[c]}} onSave={onSave} />);
+  render(<NotificationsPage settings={{...withWork(),notification_connectors:[c]}} onSave={onSave} />);
   fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Renamed"}});fireEvent.click(screen.getByRole("button",{name:"Save changes"}));await screen.findByText("Notification settings saved.");
   expect(onSave.mock.calls[0][0].notification_connectors?.[0].config.bot_token).toBeUndefined();
   fireEvent.click(screen.getByRole("checkbox",{name:"Enabled"}));fireEvent.change(screen.getByLabelText("Chat ID"),{target:{value:""}});
@@ -120,16 +122,16 @@ it("keeps existing tokens with blank replacement and permits disabled incomplete
   expect(onSave.mock.calls[1][0].notification_connectors?.[0].enabled).toBe(false);
 });
 it("uses refreshed token metadata while retaining a dirty connector draft", async () => {
-  const original={...noticeSettings(),notification_connectors:[newTelegramConnector("a")]};
+  const original={...withWork(),notification_connectors:[{...newTelegramConnector("a"),config:{...newTelegramConnector("a").config,token_profile_ids:["work"]}}]};
   const onSave=vi.fn(async (s:Settings)=>s);
   const view=render(<NotificationsPage settings={original} onSave={onSave} />);
   fireEvent.click(screen.getByRole("checkbox",{name:"Enabled"}));
   fireEvent.change(screen.getByLabelText("Chat ID"),{target:{value:"@local_destination"}});
-  const incoming={...original,notification_connectors:[{...newTelegramConnector("a"),config:{chat_id:"@remote_destination",has_token:true}}]};
+  const incoming={...original,notification_connectors:[{...newTelegramConnector("a"),config:{...newTelegramConnector("a").config,chat_id:"@remote_destination",has_token:true,token_profile_ids:["work"]}}]};
   view.rerender(<NotificationsPage settings={incoming} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
   await waitFor(()=>expect(onSave).toHaveBeenCalledTimes(1));
-  expect(onSave.mock.calls[0][0].notification_connectors?.[0].config).toEqual({chat_id:"@local_destination",has_token:true});
+  expect(onSave.mock.calls[0][0].notification_connectors?.[0].config).toEqual({chat_id:"@local_destination",has_token:true,triggers:["new_issue","pr_approved","pr_review"],token_profile_ids:["work"]});
 });
 
 it("keeps connector and global action groups scoped to their own settings", () => {
@@ -198,6 +200,9 @@ it("preserves keyboard order across connector fields and both action levels", as
     screen.getByRole("checkbox", {name: "Run succeeded"}),
     screen.getByRole("checkbox", {name: "Run failed"}),
     screen.getByRole("checkbox", {name: "Run blocked"}),
+    screen.getByRole("checkbox", {name: "New task"}),
+    screen.getByRole("checkbox", {name: "PR approved"}),
+    screen.getByRole("checkbox", {name: "Review requested"}),
     screen.getByRole("button", {name: "Remove connector Edited"}),
     screen.getByRole("button", {name: "Save changes"}),
     screen.getByRole("button", {name: "Discard changes"}),

@@ -3,23 +3,28 @@ use factory_core::*;
 use serde_json::json;
 use std::sync::Arc;
 fn connector(id: &str, chat: &str, enabled: bool, events: serde_json::Value) -> serde_json::Value {
-    json!({"id":id,"label":id,"enabled":enabled,"events":events,"type":"telegram","config":{"chat_id":chat,"bot_token":"123456:fixture_token_abcdefghijklmnopqrstuvwxyz"}})
+    json!({"id":id,"label":id,"enabled":enabled,"events":events,"type":"telegram","config":{"chat_id":chat,"bot_token":"123456:fixture_token_abcdefghijklmnopqrstuvwxyz","triggers":["new_issue","pr_review"],"token_profile_ids":["work"]}})
 }
 fn configure(f: &Factory, connectors: serde_json::Value) {
     let mut v = serde_json::to_value(f.settings().unwrap()).unwrap();
     v["notification_connectors"] = connectors;
+    if !v["token_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == "work")
+    {
+        v["token_profiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"work","label":"Work","account":"alice"}));
+    }
     f.save_settings(serde_json::from_value(v).unwrap()).unwrap();
 }
 fn enqueue(f: &Factory, n: u64) -> String {
-    f.enqueue(TriggerEvent::issue(
-        "acme/repo",
-        n,
-        "Safe title",
-        "alice",
-        "",
-    ))
-    .unwrap()
-    .unwrap()
+    let mut event = TriggerEvent::issue("acme/repo", n, "Safe title", "alice", "");
+    event.origin_token_profile_id = Some("work".into());
+    f.enqueue(event).unwrap().unwrap()
 }
 fn open(dir: &std::path::Path, t: Arc<common::notifications::RecordingTransport>) -> Arc<Factory> {
     Factory::open_with_notification_transport(
@@ -582,7 +587,7 @@ async fn connector_transition_from_synchronous_thread_uses_started_runtime() {
 }
 
 #[tokio::test]
-async fn google_chat_matches_all_filters_and_notifies_each_transition_once() {
+async fn connectors_match_all_filters_and_notify_each_transition_once() {
     let dir = tempfile::tempdir().unwrap();
     let t = Arc::new(common::notifications::RecordingTransport::default());
     let f = open(dir.path(), t.clone());
@@ -614,7 +619,7 @@ async fn google_chat_matches_all_filters_and_notifies_each_transition_once() {
         (5, "pr_approved", Some("work"), "failed"),
         (6, "new_issue", None, "failed"),
     ] {
-        let mut e = TriggerEvent::issue("acme/repo", n, "PRIVATE_KEY PRIVATE_TOKEN", "alice", "");
+        let mut e = TriggerEvent::issue("acme/repo", n, "PRIVATE_KEY PRIVATE_TOKEN", "work", "");
         e.trigger_id = trigger.into();
         e.event_id = format!("{trigger}:acme/repo#{n}");
         e.origin_token_profile_id = origin.map(str::to_owned);
@@ -627,26 +632,53 @@ async fn google_chat_matches_all_filters_and_notifies_each_transition_once() {
             selected.push(id);
         }
     }
-    // Control message on the same Google Chat FIFO proves earlier work drained.
+    // Each provider's FIFO control proves all preceding transitions were processed.
     let mut e = TriggerEvent::issue("acme/repo", 7, "Control", "alice", "");
     e.origin_token_profile_id = Some("work".into());
     let control = f.enqueue(e).unwrap().unwrap();
     f.set_run_status(&control, "failed", None).unwrap();
-    t.wait_for_calls(20).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let changed = t.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let chats = t.chats();
+            let messages = t.messages();
+            if ["google_chat", "telegram"].iter().all(|destination| {
+                chats
+                    .iter()
+                    .zip(&messages)
+                    .any(|(chat, m)| chat == destination && m.run_id == control)
+            }) {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("both FIFO controls delivered");
     f.shutdown().await;
     let chats = t.chats();
     let messages = t.messages();
-    let gc: Vec<_> = messages
-        .iter()
-        .zip(&chats)
-        .filter(|(_, c)| c.as_str() == "google_chat")
-        .map(|(m, _)| m)
-        .collect();
-    assert_eq!(gc.len(), 7);
-    for id in selected {
-        assert_eq!(gc.iter().filter(|m| m.run_id == id).count(), 2);
+    assert_eq!(messages.len(), 14);
+    for destination in ["google_chat", "telegram"] {
+        let delivered: Vec<_> = messages
+            .iter()
+            .zip(&chats)
+            .filter(|(_, c)| c.as_str() == destination)
+            .map(|(m, _)| m)
+            .collect();
+        assert_eq!(delivered.len(), 7, "{destination}");
+        for id in &selected {
+            assert_eq!(
+                delivered.iter().filter(|m| &m.run_id == id).count(),
+                2,
+                "{destination}"
+            );
+        }
+        assert_eq!(delivered.iter().filter(|m| m.run_id == control).count(), 1);
+        assert_eq!(delivered.last().unwrap().run_id, control);
     }
-    assert_eq!(gc.last().unwrap().run_id, control);
     assert!(messages
         .iter()
         .all(|m| !m.body.contains("PRIVATE_KEY") && !m.body.contains("PRIVATE_TOKEN")));
@@ -779,4 +811,74 @@ async fn google_chat_queue_saturation_is_bounded_and_does_not_change_runs() {
     assert_eq!(t.messages()[0].run_id, first);
     assert!(t.messages().iter().all(|m| !dropped.contains(&m.run_id)));
     assert!(f.snapshot().unwrap().service.last_error.is_none());
+}
+
+#[tokio::test]
+async fn connectors_reject_deleted_profiles_and_suppress_historical_orphan_origins() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = Arc::new(common::notifications::RecordingTransport::default());
+    let f = open(dir.path(), t.clone());
+    configure(
+        &f,
+        json!([
+            connector("tg","telegram",true,json!(["run_failed"])),
+            {"id":"chat","label":"Chat","enabled":true,"events":["run_failed"],"type":"google_chat","config":{"webhook_url":"https://fixture.example/messages?token=fixture","triggers":["new_issue"],"token_profile_ids":["work"]}}
+        ]),
+    );
+    let original = f.settings().unwrap();
+    for kind in ["telegram", "google_chat"] {
+        let mut removed = original.clone();
+        removed.token_profiles.clear();
+        removed
+            .notification_connectors
+            .retain(|c| serde_json::to_value(c).unwrap()["type"] == kind);
+        let error = f.save_settings(removed).unwrap_err().to_string();
+        assert!(
+            error.contains("available GitHub profile"),
+            "{kind}: {error}"
+        );
+    }
+    let orphan = enqueue(&f, 71);
+    let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+    let mut raw: serde_json::Value = serde_json::from_str(
+        &db.query_row("SELECT json FROM settings", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+    )
+    .unwrap();
+    raw["token_profiles"] = json!([]);
+    db.execute("UPDATE settings SET json=?1", [raw.to_string()])
+        .unwrap();
+    f.start_notification_delivery();
+    f.set_run_status(&orphan, "failed", None).unwrap();
+    f.save_settings(original).unwrap();
+    let control = enqueue(&f, 72);
+    f.set_run_status(&control, "failed", None).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let changed = t.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let messages = t.messages();
+            let chats = t.chats();
+            if ["telegram", "google_chat"].iter().all(|dest| {
+                chats
+                    .iter()
+                    .zip(&messages)
+                    .any(|(c, m)| c == dest && m.run_id == control)
+            }) {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("both eligible controls delivered");
+    f.shutdown().await;
+    assert_eq!(
+        t.messages()
+            .iter()
+            .map(|m| m.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![control.as_str(), control.as_str()]
+    );
 }

@@ -327,16 +327,14 @@ impl Settings {
     pub fn validate(&self) -> Result<()> {
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
         for c in &self.notification_connectors {
-            if let super::notification_connector::ConnectorProvider::GoogleChat(config) =
-                &c.provider
-            {
+            if let Some((_, profile_ids)) = c.provider.notification_filters() {
+                let name = c.provider.notification_name();
                 ensure!(
                     !c.enabled
-                        || config
-                            .token_profile_ids
+                        || profile_ids
                             .iter()
                             .all(|id| self.token_profiles.iter().any(|p| &p.id == id)),
-                    "Select an available GitHub profile for Google Chat"
+                    "Select an available GitHub profile for {name}"
                 );
             }
         }
