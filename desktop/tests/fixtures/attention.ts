@@ -1,3 +1,4 @@
+import { capacityFixture } from "./capacity";
 import type { Run, Settings, Snapshot } from "../../src/context/factory/domain/types";
 
 export const attentionSettings: Settings = {
@@ -43,7 +44,9 @@ export function attentionSnapshot(runs: Run[], deletions: Snapshot["deletions"] 
       default: metrics.failed++;
     }
   }
-  return { runs, deletions, metrics, service: {
+  const active = { new_issue: 0, pr_review: 0, pr_approved: 0 };
+  for (const run of runs) if (run.status === "running") active[run.trigger_id]++;
+  return { runs, deletions, metrics, capacity: capacityFixture(active), service: {
     running: true, polling: false, last_poll_at: null,
     last_error: null, app_data_dir: "/fixture-only",
   } };

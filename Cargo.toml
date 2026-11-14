@@ -8,6 +8,7 @@ lto = true
 opt-level = "s"
 strip = true
 
-# Build-time proc macros must remain loadable by the macOS dynamic linker.
+# Keep host proc-macro libraries loadable by rustc on macOS. Product binaries
+# still use the release stripping setting above.
 [profile.release.build-override]
-strip = false
+strip = "none"

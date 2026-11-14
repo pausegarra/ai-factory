@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 mod merge_cleanup;
 mod node_comments;
 mod pr_updates;
-mod releases;
+mod version_bumps;
 
 pub struct Github {
     client: Client,
@@ -250,7 +250,7 @@ impl Github {
                             .is_some_and(|actor| actor.eq_ignore_ascii_case(&origin.actor)),
                         "Tracked PR author mismatch"
                     );
-                    if pr["state"] != "open" && pr["merged"] != true {
+                    if pr["state"] != "open" {
                         return Ok(());
                     }
                     let sha = pr["head"]["sha"].as_str().context("PR head missing")?;
@@ -276,9 +276,7 @@ impl Github {
                                 continue;
                             }
                             let body = comment["body"].as_str().unwrap_or("").trim();
-                            let command = if body.eq_ignore_ascii_case("release") {
-                                "release"
-                            } else if body.eq_ignore_ascii_case("ok") && pr["state"] == "open" {
+                            let command = if body.eq_ignore_ascii_case("ok") {
                                 "ok"
                             } else {
                                 continue;
@@ -294,7 +292,7 @@ impl Github {
                                 continue;
                             }
                             fresh_comments.push(id);
-                            if signal.is_none() || command == "release" {
+                            if signal.is_none() {
                                 signal = Some((command, id));
                             }
                         }
@@ -306,14 +304,9 @@ impl Github {
                         if let Some((_, id)) = signal {
                             approval["comment_id"] = json!(id);
                         }
-                        let prefix = if command == "release" {
-                            "approval-release"
-                        } else {
-                            "approval"
-                        };
                         let event = pr_event(
                             "pr_approved",
-                            format!("{prefix}:{repo}#{n}@{sha}"),
+                            format!("approval:{repo}#{n}@{sha}"),
                             &repo,
                             n,
                             &origin.actor,
@@ -429,24 +422,28 @@ impl Github {
     ) -> Result<()> {
         let data = &result["data"];
         let action = |name| data.get(name).filter(|v| !v.is_null());
-        if action("release").is_some() {
+        ensure!(
+            action("release").is_none(),
+            "Release actions are no longer supported"
+        );
+        if action("bump_version").is_some() {
             ensure!(
-                event.release_requested(),
-                "Release requires an authorized release comment"
+                event.trigger_id == "pr_approved",
+                "Version bump requires approved PR flow"
             );
             ensure!(
-                node_id == RELEASE_NODE_ID,
-                "Only the assigned release node can publish a release"
+                node_id == VERSION_BUMP_NODE_ID,
+                "Only the assigned version node can publish a bump"
             );
             ensure!(
                 ["publish", "update_pr", "merge", "review", "comment"]
                     .iter()
                     .all(|key| action(key).is_none()),
-                "release cannot be combined with other actions"
+                "bump_version cannot be combined with other actions"
             );
             ensure!(
                 result["status"] == "succeeded",
-                "Only succeeded results can publish a release"
+                "Only succeeded results can publish a version bump"
             );
         }
         // Validate the entire request before any externally visible mutation.
@@ -464,9 +461,16 @@ impl Github {
                 "update_pr must be an empty object; Factory selects the PR branch"
             );
             ensure!(
-                ["publish", "merge", "review", "comment", "release"]
-                    .iter()
-                    .all(|k| action(k).is_none()),
+                [
+                    "publish",
+                    "merge",
+                    "review",
+                    "comment",
+                    "release",
+                    "bump_version"
+                ]
+                .iter()
+                .all(|k| action(k).is_none()),
                 "update_pr cannot be combined with other actions"
             );
         }
@@ -628,8 +632,8 @@ impl Github {
                 &json!({"repository":event.repository,"number":event.number,"head_sha":event.head_sha}),
             )?;
         }
-        if let Some(release) = action("release") {
-            self.publish_release(factory, event, run, workspace, release, &check_active)
+        if let Some(bump) = action("bump_version") {
+            self.publish_version_bump(factory, event, run, workspace, bump, &check_active)
                 .await?;
         }
         for kind in ["review", "comment"] {

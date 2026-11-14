@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ActiveWorker {
+    event_id: String,
     trigger_id: String,
     cancel: CancellationToken,
 }
@@ -34,13 +35,12 @@ impl QueuedWorkerScan {
         factory: &Factory,
         id: &str,
         trigger_id: &str,
-        capacity: usize,
     ) -> Result<Option<CancellationToken>> {
         if trigger_id == "pr_approved" && self.approval_deferred {
             return Ok(None);
         }
 
-        let reservation = factory.register_queued_worker(id, capacity);
+        let reservation = factory.register_queued_worker(id);
         if trigger_id == "pr_approved" && !matches!(reservation.as_ref(), Ok(Some(_))) {
             // Preserve FIFO among approvals for the rest of this queue snapshot.
             // Other triggers must still be considered for any free global slots.
@@ -339,7 +339,34 @@ impl Factory {
         });
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
         let (runs, deletions) = self.store.snapshot_history()?;
+        let settings = self.store.public_settings()?;
+        let capacity = {
+            let active = self.active.lock().unwrap();
+            let by_trigger = ["new_issue", "pr_review", "pr_approved"]
+                .into_iter()
+                .map(|id| {
+                    Ok((
+                        id.to_string(),
+                        CapacityUsage {
+                            active: active
+                                .values()
+                                .filter(|worker| worker.trigger_id == id)
+                                .count(),
+                            limit: settings.concurrency_for(id)?,
+                        },
+                    ))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+            ExecutionCapacity {
+                global: CapacityUsage {
+                    active: active.len(),
+                    limit: settings.max_concurrent,
+                },
+                by_trigger,
+            }
+        };
         let mut metrics = Metrics {
             total: runs.len() as u64,
             ..Metrics::default()
@@ -358,6 +385,7 @@ impl Factory {
             runs,
             deletions,
             metrics,
+            capacity,
             service: self.service.lock().unwrap().clone(),
         })
     }
@@ -558,11 +586,7 @@ impl Factory {
             eof: next == total && !["running", "pending"].contains(&n.status.as_str()),
         })
     }
-    pub(crate) fn register_queued_worker(
-        &self,
-        id: &str,
-        capacity: usize,
-    ) -> Result<Option<CancellationToken>> {
+    pub(crate) fn register_queued_worker(&self, id: &str) -> Result<Option<CancellationToken>> {
         let Ok(_gate) = self.lifecycle_gate.try_lock() else {
             return Ok(None);
         };
@@ -575,14 +599,21 @@ impl Factory {
         if detail.run.status != "queued" {
             return Ok(None);
         }
+        let settings = self.store.public_settings()?;
+        let trigger_limit = settings.concurrency_for(&detail.run.trigger_id)?;
         let mut active = self.active.lock().unwrap();
-        if active.len() >= capacity || active.contains_key(id) {
-            return Ok(None);
-        }
-        if detail.run.trigger_id == "pr_approved"
-            && active
+        let used = active
+            .values()
+            .filter(|worker| worker.trigger_id == detail.run.trigger_id)
+            .count();
+        // A cancelled/terminal worker keeps its event reserved until process and
+        // workspace cleanup finish, even when global capacity has spare slots.
+        if active.contains_key(id)
+            || active
                 .values()
-                .any(|worker| worker.trigger_id == "pr_approved")
+                .any(|worker| worker.event_id == detail.run.event_id)
+            || active.len() >= settings.max_concurrent
+            || used >= trigger_limit
         {
             return Ok(None);
         }
@@ -590,10 +621,13 @@ impl Factory {
         active.insert(
             id.into(),
             ActiveWorker {
+                event_id: detail.run.event_id,
                 trigger_id: detail.run.trigger_id,
                 cancel: cancel.clone(),
             },
         );
+        drop(active);
+        self.emit("capacity_changed", Some(id), None);
         Ok(Some(cancel))
     }
     pub fn start(self: &Arc<Self>) {
@@ -626,8 +660,7 @@ impl Factory {
                 if let Ok(runs) = f.store.runs() {
                     let mut scan = QueuedWorkerScan::default();
                     for r in runs.into_iter().rev().filter(|r| r.status == "queued") {
-                        let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id, s.max_concurrent)
-                        else {
+                        let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id) else {
                             continue;
                         };
                         let worker = f.clone();
@@ -661,7 +694,10 @@ impl Factory {
                             }
                             {
                                 let _gate = worker.lifecycle_gate.lock().unwrap();
-                                worker.active.lock().unwrap().remove(&r.id);
+                                let removed = worker.active.lock().unwrap().remove(&r.id).is_some();
+                                if removed {
+                                    worker.emit("capacity_changed", Some(&r.id), None);
+                                }
                             }
                             worker.wake.notify_one();
                         });

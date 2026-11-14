@@ -1,3 +1,4 @@
+import { effectiveTriggerLimit, withTriggerLimit } from "../../domain/execution-capacity";
 import { useEffect, useId, useRef, useState } from "react";
 import {
   FloppyDisk,
@@ -525,8 +526,9 @@ export function SettingsPage({
             <div>
               <h2>Execution</h2>
               <p>
-                All three triggers share this capacity. Extra tasks wait in the
-                queue.
+                All runs share the global limit. Each trigger also has its own ceiling.
+                Extra runs wait in the queue. Trigger limits can add up to more than
+                the global limit. These limits do not reserve slots for a trigger.
               </p>
             </div>
           </div>
@@ -543,6 +545,34 @@ export function SettingsPage({
                 }
               />
             </Field>
+            {([
+              ["new_issue", "New issue", "new issue"],
+              ["pr_review", "PR review", "PR review"],
+              ["pr_approved", "PR approved", "PR approved"],
+            ] as const).map(([trigger, label, inheritLabel]) => (
+              <div key={trigger}>
+                <Field label={`${label} concurrent tasks`} hint="From 1 to 64. Uses the global limit unless you set a value.">
+                  <input
+                    type="number"
+                    min={1}
+                    max={64}
+                    step={1}
+                    disabled={!Object.hasOwn(draft.trigger_max_concurrent ?? {}, trigger)}
+                    value={effectiveTriggerLimit(draft, trigger)}
+                    onChange={(e) => update({ trigger_max_concurrent: withTriggerLimit(
+                      draft, trigger, Number(e.target.value),
+                    ).trigger_max_concurrent })}
+                  />
+                </Field>
+                <Toggle
+                  label={`Use global capacity for ${inheritLabel}`}
+                  checked={!Object.hasOwn(draft.trigger_max_concurrent ?? {}, trigger)}
+                  onChange={(checked) => update({ trigger_max_concurrent: withTriggerLimit(
+                    draft, trigger, checked ? undefined : effectiveTriggerLimit(draft, trigger),
+                  ).trigger_max_concurrent })}
+                />
+              </div>
+            ))}
             <Field
               label="GitHub poll interval · seconds"
               hint="Time between event checks."

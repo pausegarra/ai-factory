@@ -42,6 +42,9 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{"merg
 fn defaults_cover_three_triggers_and_concurrency() {
     let s = Settings::default();
     assert_eq!(s.max_concurrent, 4);
+    for trigger in ["new_issue", "pr_review", "pr_approved"] {
+        assert_eq!(s.concurrency_for(trigger).unwrap(), 4);
+    }
     assert_eq!(s.flows.len(), 3);
     s.validate().unwrap();
 }

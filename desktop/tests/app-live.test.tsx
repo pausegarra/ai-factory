@@ -1,3 +1,4 @@
+import { capacityFixture } from "./fixtures/capacity";
 import { beforeAll, afterEach, it, expect, vi } from "vitest";
 import {
   render,
@@ -81,6 +82,7 @@ const run: Run = {
   workspace: null,
 };
 const snapshot: Snapshot = {
+  capacity: capacityFixture(),
   runs: [],
   deletions: [],
   metrics: {

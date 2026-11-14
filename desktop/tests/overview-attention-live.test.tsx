@@ -174,3 +174,51 @@ it.each(["pending", "failed"] as const)("uses visible history when deletion is %
   await apply(snapshot([]), "run_deleted", failed.id);
   expect(attention()).toBe("00");
 });
+
+it("refreshes capacity after a worker drains without polling GitHub", async () => {
+  const occupied = snapshot([]);
+  occupied.capacity.global.active = 1;
+  occupied.capacity.by_trigger.pr_approved.active = 1;
+  await start(occupied);
+  expect(screen.getByLabelText("Global capacity").textContent).toBe("1 / 4");
+  await apply(snapshot([]), "capacity_changed");
+  await waitFor(() => expect(screen.getByLabelText("Global capacity").textContent).toBe("0 / 4"));
+  const changed = snapshot([]);
+  changed.capacity.global.limit = 2;
+  changed.capacity.by_trigger.pr_approved.limit = 2;
+  await apply(changed, "settings_changed");
+  await waitFor(() => expect(screen.getByLabelText("Global capacity").textContent).toBe("0 / 2"));
+  expect(screen.getByLabelText("PR approved capacity").textContent).toBe("0 / 2");
+  expect(factoryApi.poll).not.toHaveBeenCalled();
+});
+
+it("keeps fresh capacity when a stale snapshot resolves during a resync", async () => {
+  await start(snapshot([]));
+  const stale = deferred<Snapshot>();
+  const current = deferred<Snapshot>();
+  vi.mocked(factoryApi.snapshot).mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+  await act(async () => { emit("capacity_changed"); });
+  await act(async () => { emit("resync"); });
+  const outdated = snapshot([]);
+  outdated.capacity.global.active = 3;
+  outdated.capacity.by_trigger.new_issue.active = 3;
+  await act(async () => stale.resolve(outdated));
+  const fresh = snapshot([]);
+  fresh.capacity.global.limit = 8;
+  await act(async () => current.resolve(fresh));
+  await waitFor(() => expect(screen.getByLabelText("Global capacity").textContent).toBe("0 / 8"));
+  expect(factoryApi.poll).not.toHaveBeenCalled();
+});
+
+it("retains capacity through transport failure and recovers on resync", async () => {
+  const occupied = snapshot([]);
+  occupied.capacity.global.active = 1;
+  occupied.capacity.by_trigger.new_issue.active = 1;
+  await start(occupied);
+  vi.mocked(factoryApi.snapshot).mockRejectedValueOnce(new Error("capacity transport fixture"));
+  await act(async () => { emit("capacity_changed"); });
+  await screen.findByText(/capacity transport fixture/);
+  expect(screen.getByLabelText("Global capacity").textContent).toBe("1 / 4");
+  await apply(snapshot([]), "resync");
+  await waitFor(() => expect(screen.getByLabelText("Global capacity").textContent).toBe("0 / 4"));
+});
