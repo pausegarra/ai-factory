@@ -3,7 +3,9 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: () => false }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn() }));
 
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { App } from "../src/context/factory/infrastructure/presentations/app";
@@ -27,6 +29,12 @@ it("keeps preview guidance without deletion feedback or native events", async ()
     expect(screen.queryByText("This run is no longer available.")).toBeNull();
     expect(screen.queryByRole("button", { name: "Dismiss notice" })).toBeNull();
   }
+  const footer = screen.getByText("LOCAL FIRST").closest(".sidebar-footer");
+  expect(footer).not.toBeNull();
+  expect(footer!.children).toHaveLength(2);
+  expect(footer!.children[1].textContent).toBe("");
+  expect(screen.queryByText("v0.2.0")).toBeNull();
+  expect(getVersion).not.toHaveBeenCalled();
   expect(invoke).not.toHaveBeenCalled();
   expect(listen).not.toHaveBeenCalled();
 });

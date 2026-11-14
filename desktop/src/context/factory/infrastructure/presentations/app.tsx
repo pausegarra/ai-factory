@@ -15,6 +15,7 @@ import {
 import logo from "../../../../assets/generated/app-icon.png";
 import type { Settings, Snapshot } from "../../domain/types";
 import { factoryApi, native } from "../ipc/factory-api";
+import { readAppVersion } from "../ipc/app-version";
 import { LiveResource } from "../../application/live-resource";
 import { OverviewPage } from "./overview";
 import { RunsPage, RunDetailPage } from "./runs";
@@ -37,6 +38,14 @@ const nav = [
   { id: "settings", label: "Settings", icon: Gear },
 ];
 export function App() {
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    void readAppVersion().then((version) => {
+      if (current) setAppVersion(version);
+    });
+    return () => { current = false; };
+  }, []);
   const [usageOpen, setUsageOpen] = useState(false);
   const [page, setPage] = useState("overview");
   const settingsEpoch = useRef(0);
@@ -237,7 +246,7 @@ export function App() {
           </button>
           <div className="sidebar-footer">
             <span>LOCAL FIRST</span>
-            <span>v0.2.0</span>
+            <span>{appVersion === null ? "" : `v${appVersion}`}</span>
           </div>
         </div>
       </aside>
