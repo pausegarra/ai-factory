@@ -13,7 +13,11 @@ if [ "$1" = app-server ]; then
   printf '{"id":2,"result":{"data":[{"cwd":"%s","skills":[{"name":"factory-selected","path":"%s/.agents/skills/factory-selected/SKILL.md","enabled":true},{"name":"factory-unselected","path":"%s/.agents/skills/factory-unselected/SKILL.md","enabled":true}],"errors":[]}]}}\n' "$PWD" "$PWD" "$PWD"
   exit 0
 fi
-printf 'executed\n' >> "$(dirname "$0")/skill-execution.calls"
+if [ "${AI_FACTORY_RESPONSE_MODE:-initial}" = repair ]; then
+  printf 'corrected\n' >> "$(dirname "$0")/skill-correction.calls"
+else
+  printf 'executed\n' >> "$(dirname "$0")/skill-execution.calls"
+fi
 cat > "${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt"
 printf '%s\n' "$@" > "${AI_FACTORY_RESULT_PATH%.result.json}.args.txt"
 printf '%s' "$OPENCODE_CONFIG_CONTENT" > "${AI_FACTORY_RESULT_PATH%.result.json}.config.json"
@@ -237,16 +241,18 @@ async fn unavailable_selection_fails_before_agent_execution() {
 }
 
 #[tokio::test]
-async fn invalid_output_does_not_restart_agent_or_repeat_skill_discovery() {
+async fn output_correction_does_not_repeat_work_or_skill_discovery() {
     let success = r#"printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#;
     let repair = r#"
 attempt=$(wc -l < "$(dirname "$0")/skill-execution.calls" | tr -d ' ')
 base="${AI_FACTORY_RESULT_PATH%.result.json}"
 cp "$base.args.txt" "$base.attempt-$attempt.args.txt"
 cp "$base.config.json" "$base.attempt-$attempt.config.json"
-if [ "$attempt" -eq 1 ]; then
+if [ "${AI_FACTORY_RESPONSE_MODE:-initial}" != repair ]; then
   printf '%s' '{"status":"invalid","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
 else
+  cp "$base.args.txt" "$(dirname "$0")/correction.args.txt"
+  cp "$base.config.json" "$(dirname "$0")/correction.config.json"
   printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
 fi
 "#;
@@ -257,7 +263,11 @@ fi
         settings.flows[0].nodes[0].skills = Some(vec![]);
         factory.save_settings(settings).unwrap();
         let detail = run(&factory, 215).await;
-        assert_eq!(detail.run.status, "failed", "{agent}: {:?}", detail.nodes);
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{agent}: {:?}",
+            detail.nodes
+        );
         for attempt in [1] {
             if agent == "codex" {
                 let args = capture(
@@ -284,7 +294,18 @@ fi
                 .count(),
             1
         );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("skill-correction.calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
         if agent == "codex" {
+            let args = std::fs::read_to_string(root.path().join("correction.args.txt")).unwrap();
+            assert!(args.contains("features.shell_tool=false"));
+            assert!(args.contains("skills.include_instructions=false"));
+            assert!(!args.contains("skills.config="));
             assert_eq!(
                 std::fs::read_to_string(root.path().join("skill-discovery.calls"))
                     .unwrap()
@@ -292,6 +313,17 @@ fi
                     .count(),
                 1
             );
+        } else {
+            let config: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join("correction.config.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(config["permission"]["*"], "deny");
+            assert_eq!(
+                config["agent"]["ai-factory-response-repair"]["tools"]["*"],
+                false
+            );
+            assert!(!config.to_string().contains("allow"));
         }
     }
 }
