@@ -11,7 +11,6 @@ pub(crate) const VERSION_BUMP_NODE_ID: &str = "version_bump";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "settings_input::SettingsInput")]
 pub struct Settings {
-    pub approval_workflow_version: u32,
     pub notification_connectors: Vec<super::notification_connector::NotificationConnector>,
     pub token_profiles: Vec<TokenProfile>,
     #[serde(default)]
@@ -189,7 +188,6 @@ impl Default for Settings {
         }
         };
         Self {
-            approval_workflow_version: 1,
             notification_connectors: vec![],
             token_profiles: vec![],
             codex_bindings: BTreeMap::new(),
@@ -419,39 +417,6 @@ impl Settings {
     }
 }
 impl Flow {
-    pub(super) fn migrate_approval_workflow(&mut self) {
-        if self.id != "pr_approved"
-            || self
-                .nodes
-                .iter()
-                .any(|node| node.id == VERSION_BUMP_NODE_ID)
-        {
-            return;
-        }
-        for node in &mut self.nodes {
-            if node.id == "publish" && node.name == "publish" {
-                node.name = "Merge".into();
-            }
-        }
-        let Some(mut bump) = self
-            .nodes
-            .iter()
-            .rev()
-            .find(|node| node.access == "write")
-            .cloned()
-        else {
-            return;
-        };
-        bump.id = VERSION_BUMP_NODE_ID.into();
-        bump.name = "Bump version".into();
-        bump.prompt = default_prompts::VERSION_BUMP.into();
-        bump.result_schema = empty_schema();
-        bump.skills = Some(vec![]);
-        bump.depends_on = self.nodes.iter().map(|node| node.id.clone()).collect();
-        bump.position.x += 280.;
-        self.nodes.push(bump);
-    }
-
     pub fn activation_for(&self, actor: &str, profiles: &[TokenProfile]) -> ActivationState {
         if !self.enabled {
             return ActivationState::DisabledGlobally;
