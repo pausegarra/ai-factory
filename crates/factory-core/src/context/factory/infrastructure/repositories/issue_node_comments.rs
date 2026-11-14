@@ -9,6 +9,17 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS issue_node_comments (key TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),snapshot TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','delivered','exhausted')),failures INTEGER NOT NULL DEFAULT 0 CHECK(failures>=0),next_at TEXT NOT NULL,last_error TEXT,receipt TEXT,UNIQUE(run_id,node_id,revision));CREATE INDEX IF NOT EXISTS issue_node_comments_due ON issue_node_comments(state,next_at);")?;
     Ok(())
 }
+// Read with the caller's SQLite lock so preference and outbox decisions share a snapshot.
+fn comments_enabled(db: &Connection) -> Result<bool> {
+    let raw: Option<String> = db
+        .query_row("SELECT json FROM settings WHERE id=1", [], |row| row.get(0))
+        .optional()?;
+    let settings: Settings = raw
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(settings.issue_node_comments_enabled)
+}
 pub(super) fn capture(
     tx: &Transaction<'_>,
     store: &Store,
@@ -19,6 +30,9 @@ pub(super) fn capture(
     if !matches!(previous.status.as_str(), "pending" | "running")
         || !terminal_for_issue_comment(&node.status)
     {
+        return Ok(());
+    }
+    if !comments_enabled(tx)? {
         return Ok(());
     }
     let (event, state): (String, String) =
@@ -64,6 +78,9 @@ const ALLOWED:&str="EXISTS(SELECT 1 FROM runs WHERE id=issue_node_comments.run_i
 impl Store {
     pub(crate) fn due_issue_node_comment(&self, at: &str) -> Result<Option<IssueNodeCommentJob>> {
         let db = self.db.lock().unwrap();
+        if !comments_enabled(&db)? {
+            return Ok(None);
+        }
         let row:Option<(String,String,u32)>=db.query_row(&format!("SELECT key,snapshot,failures FROM issue_node_comments WHERE state='pending' AND julianday(next_at)<=julianday(?1) AND {ALLOWED} ORDER BY julianday(next_at),rowid LIMIT 1"),[at],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         row.map(|(key, snapshot, failures)| {
             Ok(IssueNodeCommentJob {
@@ -75,7 +92,11 @@ impl Store {
         .transpose()
     }
     pub(crate) fn issue_node_comment_allowed(&self, key: &str) -> Result<bool> {
-        Ok(self.db.lock().unwrap().query_row(&format!("SELECT EXISTS(SELECT 1 FROM issue_node_comments WHERE key=?1 AND state='pending' AND {ALLOWED})"),[key],|r|r.get(0))?)
+        let db = self.db.lock().unwrap();
+        if !comments_enabled(&db)? {
+            return Ok(false);
+        }
+        Ok(db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM issue_node_comments WHERE key=?1 AND state='pending' AND {ALLOWED})"),[key],|r|r.get(0))?)
     }
     pub(crate) fn issue_node_comment_last_error(&self, key: &str) -> Result<Option<String>> {
         let db = self.db.lock().unwrap();
@@ -138,6 +159,93 @@ mod tests {
             .unwrap()
             .query_row("SELECT count(*) FROM issue_node_comments", [], |r| r.get(0))
             .unwrap()
+    }
+    fn set_comments_enabled(s: &Store, enabled: bool) {
+        let mut settings = s.public_settings().unwrap();
+        settings.issue_node_comments_enabled = enabled;
+        s.save_settings(&settings).unwrap();
+    }
+
+    #[test]
+    fn issue_node_comment_disabled_capture_commits_node_without_backfill() {
+        let (_d, s, id) = setup();
+        set_comments_enabled(&s, false);
+        terminal(&s, &id, "succeeded");
+        assert_eq!(s.nodes(&id).unwrap()[0].status, "succeeded");
+        assert_eq!(count(&s), 0);
+        set_comments_enabled(&s, true);
+        terminal(&s, &id, "succeeded");
+        assert_eq!(count(&s), 0);
+        assert!(s.due_issue_node_comment(&now()).unwrap().is_none());
+    }
+
+    #[test]
+    fn issue_node_comment_disabled_pending_survives_reopen_and_resumes() {
+        let (d, s, id) = setup();
+        terminal(&s, &id, "failed");
+        let job = s
+            .due_issue_node_comment("2099-01-01T00:00:00.000Z")
+            .unwrap()
+            .unwrap();
+        assert!(s
+            .fail_issue_node_comment(&job.key, "http_rejected", "2000-01-01T00:00:00.000Z")
+            .unwrap());
+        let before: (String, u32, String, Option<String>, Option<String>) = s.db.lock().unwrap().query_row(
+        "SELECT snapshot,failures,next_at,last_error,receipt FROM issue_node_comments WHERE key=?1",
+        [&job.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    ).unwrap();
+        set_comments_enabled(&s, false);
+        assert!(s
+            .due_issue_node_comment("2099-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_none());
+        assert!(!s.issue_node_comment_allowed(&job.key).unwrap());
+        drop(s);
+        let s = Store::open(d.path()).unwrap();
+        assert!(!s.issue_node_comment_allowed(&job.key).unwrap());
+        assert!(s
+            .due_issue_node_comment("2099-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_none());
+        let after: (String, u32, String, Option<String>, Option<String>) = s.db.lock().unwrap().query_row(
+        "SELECT snapshot,failures,next_at,last_error,receipt FROM issue_node_comments WHERE key=?1",
+        [&job.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    ).unwrap();
+        assert_eq!(before, after);
+        set_comments_enabled(&s, true);
+        let resumed = s
+            .due_issue_node_comment("2099-01-01T00:00:00.000Z")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.key, job.key);
+        assert_eq!(resumed.failures, 1);
+        assert_eq!(resumed.snapshot.revision, job.snapshot.revision);
+        assert!(s.issue_node_comment_allowed(&job.key).unwrap());
+        assert_eq!(count(&s), 1);
+    }
+
+    #[test]
+    fn issue_node_comment_inflight_receipt_can_commit_while_disabled() {
+        let (_d, s, id) = setup();
+        terminal(&s, &id, "succeeded");
+        let job = s.due_issue_node_comment(&now()).unwrap().unwrap();
+        set_comments_enabled(&s, false);
+        assert!(!s.issue_node_comment_allowed(&job.key).unwrap());
+        assert!(s
+            .confirm_issue_node_comment(
+                &job.key,
+                &IssueNodeCommentReceipt {
+                    comment_id: 9001,
+                    html_url: None,
+                }
+            )
+            .unwrap());
+        set_comments_enabled(&s, true);
+        assert!(s
+            .due_issue_node_comment("2099-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_none());
+        assert!(!s.issue_node_comment_allowed(&job.key).unwrap());
     }
     #[test]
     fn issue_node_comment_captures_only_committed_transition_and_frozen_target() {

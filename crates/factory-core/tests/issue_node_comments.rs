@@ -638,3 +638,309 @@ async fn issue_node_comments_retry_recovers_failed_diagnostic_write() {
     server.assert_done();
     server.shutdown().await;
 }
+
+fn comments_enabled(f: &Factory, enabled: bool) {
+    let mut s = f.settings().unwrap();
+    s.issue_node_comments_enabled = enabled;
+    f.save_settings(s).unwrap();
+}
+fn pending_row(root: &Path) -> (String, String, u32, String, Option<String>, Option<String>) {
+    db(root)
+        .query_row(
+            "SELECT key,state,failures,next_at,last_error,receipt FROM issue_node_comments",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn issue_node_comments_disable_during_list_suppresses_post_and_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    configure(&f);
+    let id = enqueue(&f, 41);
+    f.set_run_status(&id, "failed", None).unwrap();
+    let text = body(dir.path());
+    let before = pending_row(dir.path());
+    f.shutdown().await;
+    drop(f);
+    let holder: Arc<std::sync::Mutex<Option<Arc<Factory>>>> = Arc::default();
+    let h = holder.clone();
+    let paused = Arc::new(tokio::sync::Notify::new());
+    let signal = paused.clone();
+    let mut server = Script::start(vec![
+        user(),
+        list().then(move || {
+            comments_enabled(h.lock().unwrap().as_ref().unwrap(), false);
+            signal.notify_one();
+        }),
+        user(),
+        list(),
+        Step::new(
+            "POST",
+            "/repos/acme/repo/issues/41/comments",
+            Reply::Json(201, receipt(&text)),
+        )
+        .body(json!({"body":text})),
+    ])
+    .await;
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    *holder.lock().unwrap() = Some(f.clone());
+    f.start_notification_delivery();
+    tokio::time::timeout(Duration::from_secs(5), paused.notified())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(pending_row(dir.path()), before);
+    assert!(server.writes().is_empty());
+    assert_eq!(server.requests().len(), 2);
+    let node = &f.run_detail(&id).unwrap().nodes[0].id;
+    assert!(!f
+        .logs(&id, node, 0)
+        .unwrap()
+        .text
+        .contains("issue_node_comment_delivery_failed"));
+    comments_enabled(&f, true);
+    wait(
+        dir.path(),
+        "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+        1,
+    )
+    .await;
+    f.shutdown().await;
+    holder.lock().unwrap().take();
+    server.assert_done();
+    assert_eq!(server.writes().len(), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn issue_node_comments_disabled_transition_has_no_job_or_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = Script::start(vec![]).await;
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    configure(&f);
+    comments_enabled(&f, false);
+    let id = enqueue(&f, 41);
+    f.set_run_status(&id, "failed", None).unwrap();
+    f.start_notification_delivery();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(f.run_detail(&id).unwrap().run.status, "failed");
+    assert_eq!(f.run_detail(&id).unwrap().nodes[0].status, "skipped");
+    assert_eq!(
+        db(dir.path())
+            .query_row("SELECT count(*) FROM issue_node_comments", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    assert!(server.requests().is_empty());
+    comments_enabled(&f, true);
+    f.shutdown().await;
+    drop(f);
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    f.start_notification_delivery();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        db(dir.path())
+            .query_row("SELECT count(*) FROM issue_node_comments", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    f.shutdown().await;
+    assert!(server.requests().is_empty());
+    assert!(server.writes().is_empty());
+    server.assert_done();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn issue_node_comments_paused_pending_resumes_once_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    configure(&f);
+    let id = enqueue(&f, 41);
+    f.set_run_status(&id, "failed", None).unwrap();
+    let text = body(dir.path());
+    let before = pending_row(dir.path());
+    comments_enabled(&f, false);
+    f.shutdown().await;
+    drop(f);
+    let mut server = Script::start(vec![
+        user(),
+        list(),
+        Step::new(
+            "POST",
+            "/repos/acme/repo/issues/41/comments",
+            Reply::Json(201, receipt(&text)),
+        )
+        .body(json!({"body":text})),
+    ])
+    .await;
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    assert!(!f.settings().unwrap().issue_node_comments_enabled);
+    f.start_notification_delivery();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(server.requests().is_empty());
+    assert_eq!(pending_row(dir.path()), before);
+    comments_enabled(&f, true);
+    wait(
+        dir.path(),
+        "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+        1,
+    )
+    .await;
+    let after = pending_row(dir.path());
+    assert_eq!(after.0, before.0);
+    assert_eq!(after.1, "delivered");
+    assert_eq!(after.2, before.2);
+    assert_eq!(
+        db(dir.path())
+            .query_row("SELECT count(*) FROM issue_node_comments", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+    f.shutdown().await;
+    drop(f);
+    server.assert_done();
+    assert_eq!(server.writes().len(), 1);
+    server.shutdown().await;
+    let mut empty = Script::start(vec![]).await;
+    let f = common::open_with_api(dir.path().into(), &empty.base).unwrap();
+    f.start_notification_delivery();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    f.shutdown().await;
+    empty.assert_done();
+    assert!(empty.requests().is_empty());
+    empty.shutdown().await;
+}
+
+#[tokio::test]
+async fn issue_node_comments_disable_after_post_keeps_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    configure(&f);
+    let id = enqueue(&f, 41);
+    f.set_run_status(&id, "failed", None).unwrap();
+    let text = body(dir.path());
+    f.shutdown().await;
+    drop(f);
+    let holder: Arc<std::sync::Mutex<Option<Arc<Factory>>>> = Arc::default();
+    let h = holder.clone();
+    let received = Arc::new(tokio::sync::Notify::new());
+    let signal = received.clone();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut server = Script::start(vec![
+        user(),
+        list(),
+        Step::new(
+            "POST",
+            "/repos/acme/repo/issues/41/comments",
+            Reply::Wait(release.clone(), receipt(&text)),
+        )
+        .body(json!({"body":text}))
+        .then(move || {
+            comments_enabled(h.lock().unwrap().as_ref().unwrap(), false);
+            signal.notify_one();
+        }),
+    ])
+    .await;
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    *holder.lock().unwrap() = Some(f.clone());
+    f.start_notification_delivery();
+    tokio::time::timeout(Duration::from_secs(5), received.notified())
+        .await
+        .unwrap();
+    assert!(!f.settings().unwrap().issue_node_comments_enabled);
+    assert_eq!(pending_row(dir.path()).1, "pending");
+    release.notify_one();
+    wait(
+        dir.path(),
+        "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+        1,
+    )
+    .await;
+    let row = pending_row(dir.path());
+    assert_eq!(row.2, 0);
+    let receipt: Value = serde_json::from_str(row.5.as_deref().unwrap()).unwrap();
+    assert_eq!(receipt["comment_id"], json!(9001));
+    comments_enabled(&f, true);
+    f.shutdown().await;
+    holder.lock().unwrap().take();
+    drop(f);
+    server.assert_done();
+    assert_eq!(server.writes().len(), 1);
+    server.shutdown().await;
+    let mut empty = Script::start(vec![]).await;
+    let f = common::open_with_api(dir.path().into(), &empty.base).unwrap();
+    f.start_notification_delivery();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    f.shutdown().await;
+    empty.assert_done();
+    assert!(empty.requests().is_empty());
+    empty.shutdown().await;
+}
+
+#[tokio::test]
+async fn issue_node_comments_paused_reconciliation_avoids_duplicate_post() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    configure(&f);
+    let id = enqueue(&f, 41);
+    f.set_run_status(&id, "failed", None).unwrap();
+    let text = body(dir.path());
+    let before = pending_row(dir.path());
+    comments_enabled(&f, false);
+    f.shutdown().await;
+    drop(f);
+    let mut server = Script::start(vec![
+        user(),
+        Step::new(
+            "GET",
+            "/repos/acme/repo/issues/41/comments?per_page=100&page=1",
+            Reply::Json(200, json!([receipt(&text)])),
+        ),
+    ])
+    .await;
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    f.start_notification_delivery();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(server.requests().is_empty());
+    assert_eq!(pending_row(dir.path()), before);
+    comments_enabled(&f, true);
+    wait(
+        dir.path(),
+        "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+        1,
+    )
+    .await;
+    assert_eq!(pending_row(dir.path()).0, before.0);
+    assert_eq!(
+        db(dir.path())
+            .query_row("SELECT count(*) FROM issue_node_comments", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+    let raw = pending_row(dir.path()).5.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap()["comment_id"],
+        json!(9001)
+    );
+    f.shutdown().await;
+    server.assert_done();
+    assert!(server.writes().is_empty());
+    server.shutdown().await;
+}

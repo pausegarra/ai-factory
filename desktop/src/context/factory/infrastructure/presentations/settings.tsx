@@ -590,6 +590,14 @@ export function SettingsPage({
           </div>
           <div className="startup-setting">
             <Toggle
+              checked={draft.issue_node_comments_enabled ?? true}
+              onChange={(checked) => update({ issue_node_comments_enabled: checked })}
+              label="Automatic issue comments"
+              description="Post node results to GitHub issues for all accounts in this installation. Turning this off pauses pending comments; turning it back on resumes them."
+            />
+          </div>
+          <div className="startup-setting">
+            <Toggle
               checked={draft.codex_yolo ?? false}
               onChange={(checked) => update({ codex_yolo: checked })}
               label="Codex YOLO mode"

@@ -471,6 +471,9 @@ async fn review_receipt_prevents_duplicate_and_reconciles_actor_and_head() {
 if method=="POST"{w.fetch_add(1,Ordering::SeqCst);let review=json!({"id":9,"body":body["body"],"commit_id":body["commit_id"],"state":"CHANGES_REQUESTED","user":{"login":"alice"}});saved.lock().unwrap().push(review.clone());return(200,review)}
 if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(&served,"feature",&served.head_sha))}).await;
     let (dir, f) = factory(&base);
+    let mut settings = f.settings().unwrap();
+    settings.issue_node_comments_enabled = false;
+    f.save_settings(settings).unwrap();
     let api = Github::with_base("alice-token", &base).unwrap();
     let mut r = result(json!({"review":{"event":"REQUEST_CHANGES","body":"Fix bug"}}));
     let id = admit_then_disable(&f, &e);

@@ -46,3 +46,10 @@ it("exposes empty capacity and inherited trigger limits in preview", async () =>
   expect((await factoryApi.settings()).trigger_max_concurrent).toEqual({});
   expect(invoke).not.toHaveBeenCalled();
 });
+
+it("defaults automatic issue comments to enabled in isolated preview settings", async () => {
+  const first = await factoryApi.settings();
+  expect(first.issue_node_comments_enabled).toBe(true);
+  first.issue_node_comments_enabled = false;
+  expect((await factoryApi.settings()).issue_node_comments_enabled).toBe(true);
+});

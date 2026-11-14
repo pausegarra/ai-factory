@@ -68,6 +68,7 @@ export interface Settings {
   codex_bindings?: Record<string, string>;
   projects: Project[];
   commands: { codex: string; opencode: string; git: string };
+  issue_node_comments_enabled?: boolean;
   codex_yolo?: boolean;
   poll_interval_seconds: number;
   max_concurrent: number;
