@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Plus, TelegramLogo } from "@phosphor-icons/react";
-import googleChatLogo from "./assets/google-chat.svg";
+import { Plus } from "@phosphor-icons/react";
+import { NotificationConnectorIcon } from "./notification-connector-icon";
 
 export type ConnectorKind = "telegram" | "google_chat";
 type ConnectorPickerProps = {
@@ -47,7 +47,7 @@ function ConnectorPickerDialog({ id, buttonRef, onCancel, onSelect }: {
   function select(kind: ConnectorKind) {
     if (selecting.current) return;
     selecting.current = true;
-    // NotificationsPage gives the new editor focus after selection.
+    // The configuration dialog takes focus after selection.
     restoreFocus.current = false;
     onSelect(kind);
   }
@@ -70,9 +70,7 @@ function ConnectorPickerDialog({ id, buttonRef, onCancel, onSelect }: {
       <div className="connector-picker-options">
         {providers.map(provider => <button key={provider.kind} type="button" className="connector-picker-option"
           onClick={() => select(provider.kind)}>
-          {provider.kind === "telegram"
-            ? <TelegramLogo size={24} weight="fill" aria-hidden="true" focusable="false" />
-            : <img src={googleChatLogo} width={24} height={24} alt="" aria-hidden="true" />}
+          <NotificationConnectorIcon type={provider.kind} />
           <span>{provider.label}</span>
         </button>)}
       </div>
