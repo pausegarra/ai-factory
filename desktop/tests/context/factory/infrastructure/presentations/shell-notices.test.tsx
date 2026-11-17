@@ -163,9 +163,9 @@ it("does not reload or update a new App when an old Sync settles", async () => {
 
 it("keeps the import report in the same Settings visit when profile IDs refresh", async () => {
   const original = noticeSettings();
-  original.token_profiles = [{ id: "before-import", label: "Before", account: "worker", has_token: true, owners: [], authors: [], reviewers: [] }];
+  original.source_connectors = [{ id: "before-import", label: "Before", type: "github_issues" as const, account: "worker", has_token: true, owners: [], authors: [], reviewers: [] }];
   const imported = structuredClone(original);
-  imported.token_profiles[0] = { ...imported.token_profiles[0], id: "after-import", label: "After" };
+  imported.source_connectors[0] = { ...imported.source_connectors[0], id: "after-import", label: "After" };
   vi.mocked(factoryApi.settings).mockResolvedValueOnce(original).mockResolvedValue(imported);
   vi.mocked(factoryApi.importLegacy).mockResolvedValue({
     runs_imported: 2,
@@ -192,16 +192,16 @@ it("keeps the import report in the same Settings visit when profile IDs refresh"
 it("preserves partially typed scope separators across equivalent live refreshes", async () => {
   const original = noticeSettings();
   const refreshedSettings = deferred<ReturnType<typeof noticeSettings>>();
-  original.token_profiles = [{
-    id: "profile", label: "Work", account: "worker", has_token: true,
+  original.source_connectors = [{
+    id: "profile", label: "Work", type: "github_issues" as const, account: "worker", has_token: true,
     owners: ["org"], authors: ["alice"], reviewers: ["bob"],
   }];
   vi.mocked(factoryApi.settings)
     .mockResolvedValueOnce(structuredClone(original))
     .mockReturnValueOnce(refreshedSettings.promise);
   await showApp();
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
+  fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+  fireEvent.click(screen.getByRole("button", {name:"Edit connector Work"}));
 
   const owners = screen.getByLabelText("GitHub owners") as HTMLInputElement;
   const authors = screen.getByLabelText("Allowed authors") as HTMLInputElement;

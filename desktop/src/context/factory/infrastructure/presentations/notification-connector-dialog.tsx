@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import type { NotificationConnector, TokenProfile } from "../../domain/types";
+import type { NotificationConnector, SourceConnector } from "../../domain/types";
 import { isTelegramConnector, isGoogleChatConnector, validateNotificationConnectors } from "../../domain/notification-connectors";
 import { Field, Notice, Toggle } from "./ui";
 import { NotificationConnectorFilters } from "./notification-connector-filters";
@@ -9,7 +9,7 @@ import { GoogleChatConnectorEditor } from "./google-chat-connector";
 type NotificationConnectorDialogProps = {
   id: string;
   connector: NotificationConnector;
-  profiles: TokenProfile[];
+  sources: SourceConnector[];
   mode: "new" | "existing";
   attempted: boolean;
   busy: boolean;
@@ -25,7 +25,7 @@ function focusable(node: HTMLElement | null): HTMLElement[] {
     .filter(control => !control.matches(":disabled, [hidden], [type=hidden]") && control.tabIndex >= 0 && !control.closest("[hidden], [inert]"));
 }
 
-export function NotificationConnectorDialog({id, connector: c, profiles, mode, attempted, busy, onChange, onApply, onCancel, onRemove, returnFocus}: NotificationConnectorDialogProps) {
+export function NotificationConnectorDialog({id, connector: c, sources, mode, attempted, busy, onChange, onApply, onCancel, onRemove, returnFocus}: NotificationConnectorDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const restore = useRef(returnFocus);
@@ -54,7 +54,7 @@ export function NotificationConnectorDialog({id, connector: c, profiles, mode, a
     };
   }, []);
   const supported = isTelegramConnector(c) || isGoogleChatConnector(c);
-  const errors = attempted && supported ? validateNotificationConnectors([c], profiles) : [];
+  const errors = attempted && supported ? validateNotificationConnectors([c], sources) : [];
   return createPortal(<div className="dialog-backdrop notification-connector-backdrop" onKeyDown={event => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!busy) onCancel(); return; }
     if (event.key !== "Tab") return;
@@ -94,10 +94,10 @@ export function NotificationConnectorDialog({id, connector: c, profiles, mode, a
           <NotificationConnectorFilters
             id={c.id} enabled={c.enabled} events={c.events}
             triggers={c.config.triggers} tokenProfileIds={c.config.token_profile_ids}
-            profiles={profiles} attempted={attempted}
+            sources={sources} attempted={attempted}
             onChange={({events, triggers, token_profile_ids}) => onChange({events, config: {...c.config, triggers, token_profile_ids}})}
           />
-        </> : isGoogleChatConnector(c) ? <GoogleChatConnectorEditor connector={c} profiles={profiles} busy={busy} attempted={attempted} edit={onChange} /> : <p>Unsupported connector type: {c.type}</p>}
+        </> : isGoogleChatConnector(c) ? <GoogleChatConnectorEditor connector={c} sources={sources} busy={busy} attempted={attempted} edit={onChange} /> : <p>Unsupported connector type: {c.type}</p>}
       </fieldset>
       <div className="notifications-connector-actions" role="group" aria-label="Connector actions">
         {onRemove && <button type="button" className="button button-secondary" disabled={busy} onClick={onRemove} aria-label={`Remove connector ${c.label || "Connector"}`}>Remove connector</button>}

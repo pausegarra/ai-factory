@@ -2,7 +2,7 @@ import { capacityFixture } from "./capacity";
 import type { Run, Settings, Snapshot } from "../../src/context/factory/domain/types";
 
 export const attentionSettings: Settings = {
-  token_profiles: [], projects: [],
+  source_connectors: [], projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
   poll_interval_seconds: 15, max_concurrent: 4, start_at_login: false,
   flows: [

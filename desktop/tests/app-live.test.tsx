@@ -51,7 +51,7 @@ afterEach(() => {
   mocked.listeners.clear();
 });
 const settings: Settings = {
-  token_profiles: [],
+  source_connectors: [],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
   poll_interval_seconds: 15,
@@ -108,7 +108,7 @@ it("considers setup complete with GitHub credentials and owners without a local 
       snapshot={snapshot}
       settings={{
         ...settings,
-        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: true, owners: ["owner"], authors: [], reviewers: [] }],
+        source_connectors: [{ id: "personal", label: "Personal", type: "github_issues" as const, account: "author", has_token: true, owners: ["owner"], authors: [], reviewers: [] }],
       }}
       onPage={() => {}}
       onRun={() => {}}
@@ -122,7 +122,7 @@ it.each(["token", "owner"])("keeps setup guidance when %s is missing without req
       snapshot={snapshot}
       settings={{
         ...settings,
-        token_profiles: [{ id: "personal", label: "Personal", account: "author", has_token: missing !== "token", owners: missing === "owner" ? [] : ["owner"], authors: [], reviewers: [] }],
+        source_connectors: [{ id: "personal", label: "Personal", type: "github_issues" as const, account: "author", has_token: missing !== "token", owners: missing === "owner" ? [] : ["owner"], authors: [], reviewers: [] }],
       }}
       onPage={() => {}}
       onRun={() => {}}
@@ -134,9 +134,9 @@ it.each(["token", "owner"])("keeps setup guidance when %s is missing without req
 });
 it("requires token and owners on the same profile for setup readiness", () => {
   render(<OverviewPage snapshot={snapshot} settings={{ ...settings,
-    token_profiles: [
-      { id: "work", label: "Work", account: "worker", has_token: true, owners: [], authors: [], reviewers: [] },
-      { id: "personal", label: "Personal", account: "alice", has_token: false, owners: ["alice"], authors: [], reviewers: [] },
+    source_connectors: [
+      { id: "work", label: "Work", type: "github_issues" as const, account: "worker", has_token: true, owners: [], authors: [], reviewers: [] },
+      { id: "personal", label: "Personal", type: "github_issues" as const, account: "alice", has_token: false, owners: ["alice"], authors: [], reviewers: [] },
     ],
   }} onPage={() => {}} onRun={() => {}} />);
   expect(screen.getByRole("heading", { name: "Set up your first production line" })).toBeTruthy();
@@ -232,7 +232,7 @@ it("keeps workflow edits when navigation is cancelled", async () => {
 
 function activationSettings(): Settings {
   const value = structuredClone(settings);
-  value.token_profiles = [{ id: "work", label: "Work", account: "alice", has_token: true, owners: [], authors: [], reviewers: [] }];
+  value.source_connectors = [{ id: "work", label: "Work", type: "github_issues" as const, account: "alice", has_token: true, owners: [], authors: [], reviewers: [] }];
   for (const flow of value.flows) {
     flow.nodes = [{ id: "plan", name: "Plan", agent: "codex", model: "", effort: "", access: "read", prompt: "Plan", result_schema: {}, depends_on: [], position: { x: 80, y: 180 } }];
   }
@@ -254,8 +254,7 @@ it("roundtrips workflow activation through Settings saves without changing other
   });
   await screen.findByText("Workflow saved. New tasks will use this version.");
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
-  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "owner" } });
+  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value:"30" } });
   // The notice can render before onDirtyChange's effect updates App. Flush the
   // async save and its effect cascade before issuing the next navigation event.
   await act(async () => {
@@ -326,7 +325,7 @@ it("rehydrates saved account scopes from canonical backend settings without leav
   vi.mocked(factoryApi.snapshot).mockResolvedValue(snapshot);
   vi.mocked(factoryApi.saveSettings).mockImplementation(async (next) => ({
     ...next,
-    token_profiles: next.token_profiles.map((profile) => ({
+    source_connectors: next.source_connectors.map((profile) => ({
       ...profile,
       owners: [...new Set(profile.owners.map((login) => login.toLowerCase()))],
       authors: [...new Set(profile.authors.map((login) => login.toLowerCase()))],
@@ -337,32 +336,46 @@ it("rehydrates saved account scopes from canonical backend settings without leav
   }));
   render(<App />);
   await screen.findByRole("heading", { name: "Factory overview." });
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
+  fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+  fireEvent.click(screen.getByRole("button", {name:"Edit connector Work"}));
   fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "Work-Org, work-org" } });
   fireEvent.change(screen.getByLabelText("Allowed authors"), { target: { value: "ALICE, alice" } });
   fireEvent.change(screen.getByLabelText("Allowed reviewers"), { target: { value: "ALICE, alice" } });
-  fireEvent.change(screen.getByLabelText("Replace token"), { target: { value: "replacement-fixture" } });
-  fireEvent.click(screen.getByRole("tab", { name: "General" }));
-  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value: "30" } });
+  fireEvent.change(screen.getByLabelText("API token"), { target: { value: "replacement-fixture" } });
+  fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   });
-  await screen.findByText("Settings saved.");
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
+  await screen.findByText("Source settings saved.");
+  fireEvent.click(screen.getByRole("button", {name:"Edit connector Work"}));
   expect((screen.getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org");
   expect((screen.getByLabelText("Allowed authors") as HTMLInputElement).value).toBe("alice");
   expect((screen.getByLabelText("Allowed reviewers") as HTMLInputElement).value).toBe("alice");
-  expect((screen.getByLabelText("Replace token") as HTMLInputElement).value).toBe("");
+  expect((screen.getByLabelText("API token") as HTMLInputElement).value).toBe("");
+  fireEvent.click(screen.getByRole("button", {name:"Cancel"}));
   expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
   const submitted = vi.mocked(factoryApi.saveSettings).mock.lastCall![0];
   expect(submitted.projects).toEqual(value.projects);
   expect(submitted.commands).toEqual(value.commands);
   expect(submitted.flows).toEqual(value.flows);
-  expect(submitted.poll_interval_seconds).toBe(30);
-  expect(submitted.token_profiles[0].token).toBe("replacement-fixture");
+  expect(submitted.poll_interval_seconds).toBe(value.poll_interval_seconds);
+  expect(submitted.source_connectors[0].token).toBe("replacement-fixture");
   fireEvent.click(screen.getByRole("button", { name: "Overview" }));
   expect(screen.queryByRole("alertdialog")).toBeNull();
   expect(screen.getByRole("heading", { name: "Factory overview." })).toBeTruthy();
+});
+
+it("opens Sources from navigation and the empty Overview setup action", async () => {
+  vi.mocked(factoryApi.settings).mockResolvedValue({...settings, source_connectors:[]});
+  vi.mocked(factoryApi.snapshot).mockResolvedValue(snapshot);
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", {name:"Set up Factory"}));
+  expect(await screen.findByRole("heading", {name:"Sources", level:1})).toBeTruthy();
+  expect(screen.getByText("No source connectors")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name:"Settings"}));
+  expect(await screen.findByRole("tab", {name:"General"})).toBeTruthy();
+  expect(screen.queryByRole("tab", {name:"GitHub accounts"})).toBeNull();
+  fireEvent.click(screen.getByRole("button", {name:"Sources"}));
+  expect(await screen.findByRole("heading", {name:"Sources", level:1})).toBeTruthy();
 });

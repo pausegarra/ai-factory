@@ -12,6 +12,27 @@ pub(super) struct PreparedNotificationSettings {
     pub connectors: Vec<NotificationConnector>,
     pub references: HashMap<String, String>,
 }
+fn validate_source_filter_changes(settings: &Settings, previous: &Settings) -> Result<()> {
+    for c in &settings.notification_connectors {
+        let Some((triggers, ids)) = c.provider.notification_filters() else {
+            continue;
+        };
+        let unchanged = previous.notification_connectors.iter().any(|old| {
+            old.id == c.id
+                && old.enabled == c.enabled
+                && old.events == c.events
+                && old.provider.notification_name() == c.provider.notification_name()
+                && old.provider.notification_filters() == Some((triggers, ids))
+        });
+        if c.enabled && !unchanged {
+            ensure!(
+                !ids.is_empty() && ids.iter().all(|id| settings.source_by_id(id).is_some()),
+                "Select available GitHub sources for notifications"
+            );
+        }
+    }
+    Ok(())
+}
 impl Store {
     pub(crate) fn notification_targets(
         &self,
@@ -31,7 +52,7 @@ impl Store {
             &settings.notification_connectors,
             event,
             run,
-            &settings.token_profiles,
+            &settings.source_connectors,
         )
         .into_iter()
         .filter_map(|c| {
@@ -85,6 +106,7 @@ impl Store {
         &self,
         settings: &Settings,
     ) -> Result<PreparedNotificationSettings> {
+        validate_source_filter_changes(settings, &self.raw_settings()?)?;
         use crate::context::factory::infrastructure::rest_clients::google_chat::parse_webhook_url;
         const URL_ERROR: &str =
             "Enter a valid HTTPS webhook URL without credentials or a fragment.";

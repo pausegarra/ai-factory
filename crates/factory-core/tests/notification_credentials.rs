@@ -5,7 +5,7 @@ use std::sync::{atomic::Ordering, Arc};
 const TOKEN: &str = "123456:fixture_telegram_secret_abcdefghijklmnopqrstuvwxyz";
 fn input(enabled: bool, token: Option<&str>) -> Settings {
     let mut value = serde_json::to_value(Settings::default()).unwrap();
-    value["token_profiles"] = json!([{"id":"work","label":"Work","account":"alice"}]);
+    value["source_connectors"] = json!([{"token":"fixture-source-only","owners":["acme"],"authors":["alice"],"reviewers":["alice"],"id":"work","label":"Work","type":"github_issues","account":"alice"}]);
     value["notification_connectors"] = json!([{"id":"team","label":"Team","enabled":enabled,"events":["run_failed"],"type":"telegram","config":{"chat_id":" -1001 ","has_token":true,"bot_token":token,"triggers":["new_issue"],"token_profile_ids":["work"]}}]);
     serde_json::from_value(value).unwrap()
 }
@@ -68,7 +68,16 @@ fn notification_blank_preserves_rotation_and_deletion_collect_secrets() {
     let c = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
     store.save_settings(&input(true, Some(TOKEN))).unwrap();
-    let old = c.values.lock().unwrap().keys().next().unwrap().clone();
+    let old: String = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT reference FROM notification_credential_refs WHERE connector_id='team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     store.save_settings(&input(false, Some(" "))).unwrap();
     assert!(c.values.lock().unwrap().contains_key(&old));
     store.save_settings(&input(true, None)).unwrap();
@@ -109,7 +118,11 @@ fn notification_gc_retries_after_restart_and_never_collects_live_github_secret()
     let c = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
     let mut settings = input(true, Some(TOKEN));
-    settings.token_profiles[0] = factory_core::TokenProfile {
+    settings.source_connectors[0] = factory_core::SourceConnector {
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         label: "GitHub".into(),
         account: "alice".into(),
@@ -146,7 +159,7 @@ fn notification_gc_retries_after_restart_and_never_collects_live_github_secret()
             .collect::<Vec<_>>(),
         vec!["ghp_fixture_private"]
     );
-    assert!(store.public_settings().unwrap().token_profiles[0].has_token);
+    assert!(store.public_settings().unwrap().source_connectors[0].has_token);
 }
 #[test]
 fn notification_public_reads_and_disabled_incomplete_saves_do_not_access_locked_keychain() {
@@ -204,14 +217,14 @@ fn notification_two_destinations_and_provider_change_have_independent_secret_ide
     second.id = "second".into();
     settings.notification_connectors.push(second);
     store.save_settings(&settings).unwrap();
-    assert_eq!(c.values.lock().unwrap().len(), 2);
+    assert_eq!(c.values.lock().unwrap().len(), 3);
     let mut settings = store.public_settings().unwrap();
     settings.notification_connectors[0].provider = factory_core::ConnectorProvider::Unsupported {
         kind: "future".into(),
         config: json!({"option":7}),
     };
     store.save_settings(&settings).unwrap();
-    assert_eq!(c.values.lock().unwrap().len(), 1);
+    assert_eq!(c.values.lock().unwrap().len(), 2);
     settings.notification_connectors[0].provider =
         factory_core::ConnectorProvider::Telegram(Default::default());
     settings.notification_connectors[0].enabled = true;
@@ -271,19 +284,26 @@ fn notification_legacy_filters_persist_on_save_without_read_mutation_or_secret_l
     );
     assert_eq!(
         canonical["notification_connectors"][0]["config"]["token_profile_ids"],
-        json!(["work"])
+        json!([])
     );
     assert_eq!(
         canonical["notification_connectors"][0]["config"]["has_token"],
         true
     );
-    loaded.token_profiles[0].label = "Renamed".into();
-    loaded.token_profiles.push(factory_core::TokenProfile {
-        id: "new".into(),
-        account: "bob".into(),
-        label: "New".into(),
-        ..Default::default()
-    });
+    loaded.source_connectors[0].label = "Renamed".into();
+    loaded
+        .source_connectors
+        .push(factory_core::SourceConnector {
+            token: Some("fixture-source-only".into()),
+            owners: vec!["acme".into()],
+            authors: vec!["bob".into()],
+            reviewers: vec!["bob".into()],
+            kind: factory_core::SourceKind::GithubIssues,
+            id: "new".into(),
+            account: "bob".into(),
+            label: "New".into(),
+            ..Default::default()
+        });
     store.save_settings(&loaded).unwrap();
     assert_eq!(reference(&store), original_ref);
     drop(store);

@@ -1,4 +1,5 @@
 use super::{fixture, terminal};
+use crate::common;
 use factory_core::*;
 use serde_json::json;
 use std::time::Duration;
@@ -34,12 +35,9 @@ fn configure(factory: &Factory, agent: &str, parallel: usize, reviewers: &[&str]
 
 fn enqueue(factory: &Factory) -> String {
     factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            91,
-            "[AI] review feedback",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 91, "[AI] review feedback", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap()

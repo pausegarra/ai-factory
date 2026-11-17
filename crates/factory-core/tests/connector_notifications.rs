@@ -8,21 +8,24 @@ fn connector(id: &str, chat: &str, enabled: bool, events: serde_json::Value) -> 
 fn configure(f: &Factory, connectors: serde_json::Value) {
     let mut v = serde_json::to_value(f.settings().unwrap()).unwrap();
     v["notification_connectors"] = connectors;
-    if !v["token_profiles"]
+    if !v["source_connectors"]
         .as_array()
         .unwrap()
         .iter()
         .any(|p| p["id"] == "work")
     {
-        v["token_profiles"]
+        v["source_connectors"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"id":"work","label":"Work","account":"alice"}));
+            .push(json!({"token":"fixture-source-only","owners":["acme"],"authors":["alice"],"reviewers":["alice"],"id":"work","label":"Work","type":"github_issues","account":"alice"}));
     }
     f.save_settings(serde_json::from_value(v).unwrap()).unwrap();
 }
 fn enqueue(f: &Factory, n: u64) -> String {
-    let mut event = TriggerEvent::issue("acme/repo", n, "Safe title", "alice", "");
+    let mut event = common::from_source(
+        TriggerEvent::issue("acme/repo", n, "Safe title", "alice", ""),
+        "alice",
+    );
     event.origin_token_profile_id = Some("work".into());
     f.enqueue(event).unwrap().unwrap()
 }
@@ -607,13 +610,23 @@ async fn connectors_match_all_filters_and_notify_each_transition_once() {
     let t = Arc::new(common::notifications::RecordingTransport::default());
     let f = open(dir.path(), t.clone());
     let mut s = f.settings().unwrap();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         account: "alice".into(),
         label: "Work".into(),
         ..Default::default()
     });
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["bob".into()],
+        reviewers: vec!["bob".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "other".into(),
         account: "bob".into(),
         label: "Other".into(),
@@ -634,11 +647,48 @@ async fn connectors_match_all_filters_and_notify_each_transition_once() {
         (5, "pr_approved", Some("work"), "failed"),
         (6, "new_issue", None, "failed"),
     ] {
-        let mut e = TriggerEvent::issue("acme/repo", n, "PRIVATE_KEY PRIVATE_TOKEN", "work", "");
+        let mut e = common::from_source(
+            TriggerEvent::issue(
+                "acme/repo",
+                n,
+                "PRIVATE_KEY PRIVATE_TOKEN",
+                if origin == Some("other") {
+                    "bob"
+                } else {
+                    "alice"
+                },
+                "",
+            ),
+            "alice",
+        );
         e.trigger_id = trigger.into();
         e.event_id = format!("{trigger}:acme/repo#{n}");
         e.origin_token_profile_id = origin.map(str::to_owned);
-        let id = f.enqueue(e).unwrap().unwrap();
+        let id = if let Some(id) = f.enqueue(e.clone()).unwrap() {
+            id
+        } else {
+            assert!(n >= 4);
+            let store =
+                factory_core::context::factory::infrastructure::repositories::store::Store::open(
+                    dir.path(),
+                )
+                .unwrap();
+            store
+                .insert(
+                    &e,
+                    &f.settings()
+                        .unwrap()
+                        .flows
+                        .iter()
+                        .find(|flow| flow.id == trigger)
+                        .unwrap()
+                        .clone(),
+                    1,
+                    true,
+                )
+                .unwrap()
+                .unwrap()
+        };
         f.set_run_status(&id, "running", None).unwrap();
         f.set_run_status(&id, "running", None).unwrap();
         f.set_run_status(&id, terminal, None).unwrap();
@@ -648,7 +698,10 @@ async fn connectors_match_all_filters_and_notify_each_transition_once() {
         }
     }
     // Each provider's FIFO control proves all preceding transitions were processed.
-    let mut e = TriggerEvent::issue("acme/repo", 7, "Control", "alice", "");
+    let mut e = common::from_source(
+        TriggerEvent::issue("acme/repo", 7, "Control", "alice", ""),
+        "alice",
+    );
     e.origin_token_profile_id = Some("work".into());
     let control = f.enqueue(e).unwrap().unwrap();
     f.set_run_status(&control, "failed", None).unwrap();
@@ -707,7 +760,12 @@ async fn google_chat_revokes_held_http_and_queued_jobs_on_every_lifecycle_change
         *t.hold_chat.lock().unwrap() = Some("google_chat".into());
         let f = open(dir.path(), t.clone());
         let mut s = f.settings().unwrap();
-        s.token_profiles.push(TokenProfile {
+        s.source_connectors.push(SourceConnector {
+            token: Some("fixture-source-only".into()),
+            owners: vec!["acme".into()],
+            authors: vec!["alice".into()],
+            reviewers: vec!["alice".into()],
+            kind: factory_core::SourceKind::GithubIssues,
             id: "work".into(),
             account: "alice".into(),
             label: "Work".into(),
@@ -718,7 +776,10 @@ async fn google_chat_revokes_held_http_and_queued_jobs_on_every_lifecycle_change
         f.save_settings(s).unwrap();
         f.start_notification_delivery();
         let emit = |n| {
-            let mut e = TriggerEvent::issue("acme/repo", n, "Fixture", "alice", "");
+            let mut e = common::from_source(
+                TriggerEvent::issue("acme/repo", n, "Fixture", "alice", ""),
+                "alice",
+            );
             e.origin_token_profile_id = Some("work".into());
             let id = f.enqueue(e).unwrap().unwrap();
             f.set_run_status(&id, "failed", None).unwrap();
@@ -784,7 +845,12 @@ async fn google_chat_queue_saturation_is_bounded_and_does_not_change_runs() {
     *t.hold_chat.lock().unwrap() = Some("google_chat".into());
     let f = open(dir.path(), t.clone());
     let mut s = f.settings().unwrap();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         account: "alice".into(),
         label: "Work".into(),
@@ -794,7 +860,10 @@ async fn google_chat_queue_saturation_is_bounded_and_does_not_change_runs() {
     f.save_settings(s).unwrap();
     f.start_notification_delivery();
     let emit = |n| {
-        let mut e = TriggerEvent::issue("acme/repo", n, "Fixture", "alice", "");
+        let mut e = common::from_source(
+            TriggerEvent::issue("acme/repo", n, "Fixture", "alice", ""),
+            "alice",
+        );
         e.origin_token_profile_id = Some("work".into());
         let id = f.enqueue(e).unwrap().unwrap();
         f.set_run_status(&id, "failed", None).unwrap();
@@ -841,31 +910,29 @@ async fn connectors_reject_deleted_profiles_and_suppress_historical_orphan_origi
         ]),
     );
     let original = f.settings().unwrap();
-    for kind in ["telegram", "google_chat"] {
-        let mut removed = original.clone();
-        removed.token_profiles.clear();
-        removed
-            .notification_connectors
-            .retain(|c| serde_json::to_value(c).unwrap()["type"] == kind);
-        let error = f.save_settings(removed).unwrap_err().to_string();
-        assert!(
-            error.contains("available GitHub profile"),
-            "{kind}: {error}"
-        );
-    }
     let orphan = enqueue(&f, 71);
+    let mut removed = original.clone();
+    removed.source_connectors.clear();
+    f.save_settings(removed).unwrap();
+    assert!(f.settings().unwrap().source_connectors.is_empty());
     let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
     let mut raw: serde_json::Value = serde_json::from_str(
         &db.query_row("SELECT json FROM settings", [], |r| r.get::<_, String>(0))
             .unwrap(),
     )
     .unwrap();
-    raw["token_profiles"] = json!([]);
+    raw["source_connectors"] = json!([]);
     db.execute("UPDATE settings SET json=?1", [raw.to_string()])
         .unwrap();
     f.start_notification_delivery();
     f.set_run_status(&orphan, "failed", None).unwrap();
-    f.save_settings(original).unwrap();
+    configure(
+        &f,
+        json!([
+            connector("tg","telegram",true,json!(["run_failed"])),
+            {"id":"chat","label":"Chat","enabled":true,"events":["run_failed"],"type":"google_chat","config":{"webhook_url":"https://fixture.example/messages?token=fixture","triggers":["new_issue"],"token_profile_ids":["work"]}}
+        ]),
+    );
     let control = enqueue(&f, 72);
     f.set_run_status(&control, "failed", None).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -904,7 +971,12 @@ async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() 
     let transport = Arc::new(common::notifications::RecordingTransport::default());
     let f = open(dir.path(), transport.clone());
     let mut settings = f.settings().unwrap();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         account: "alice".into(),
         label: "Work".into(),
@@ -946,7 +1018,10 @@ async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() 
     ] {
         for status in ["running", "succeeded", "failed", "blocked"] {
             number += 1;
-            let mut event = TriggerEvent::issue("acme/repo", number, "Shared title", "alice", "");
+            let mut event = common::from_source(
+                TriggerEvent::issue("acme/repo", number, "Shared title", "alice", ""),
+                "alice",
+            );
             event.trigger_id = trigger.into();
             event.event_id = format!("{trigger}:acme/repo#{number}");
             event.origin_token_profile_id = Some("work".into());
@@ -998,14 +1073,24 @@ async fn release_routes_each_edge_only_to_matching_trigger_and_profile() {
         let t = Arc::new(common::notifications::RecordingTransport::default());
         let f = open(dir.path(), t.clone());
         let mut settings = f.settings().unwrap();
-        settings.token_profiles = vec![
-            TokenProfile {
+        settings.source_connectors = vec![
+            SourceConnector {
+                token: Some("fixture-source-only".into()),
+                owners: vec!["acme".into()],
+                authors: vec!["alice".into()],
+                reviewers: vec!["alice".into()],
+                kind: factory_core::SourceKind::GithubIssues,
                 id: "work".into(),
                 account: "alice".into(),
                 label: "Work".into(),
                 ..Default::default()
             },
-            TokenProfile {
+            SourceConnector {
+                token: Some("fixture-source-only".into()),
+                owners: vec!["acme".into()],
+                authors: vec!["bob".into()],
+                reviewers: vec!["bob".into()],
+                kind: factory_core::SourceKind::GithubIssues,
                 id: "other".into(),
                 account: "bob".into(),
                 label: "Other".into(),
@@ -1031,8 +1116,10 @@ async fn release_routes_each_edge_only_to_matching_trigger_and_profile() {
         f.save_settings(settings).unwrap();
         f.start_notification_delivery();
         for (n, terminal) in [(91, "succeeded"), (92, "failed"), (93, "blocked")] {
-            let mut event =
-                TriggerEvent::release_issue("acme/repo", n, "[Release] routing", "alice", "");
+            let mut event = common::from_source(
+                TriggerEvent::release_issue("acme/repo", n, "[Release] routing", "alice", ""),
+                "alice",
+            );
             event.origin_token_profile_id = Some("work".into());
             let id = f.enqueue(event).unwrap().unwrap();
             assert_eq!(

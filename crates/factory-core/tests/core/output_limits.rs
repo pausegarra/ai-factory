@@ -1,4 +1,5 @@
 use super::*;
+use crate::common;
 
 async fn output_fixture(agent: &str, output: &str) -> (super::FixtureDir, RunDetail) {
     let script = format!(
@@ -14,12 +15,9 @@ async fn output_fixture(agent: &str, output: &str) -> (super::FixtureDir, RunDet
     settings.flows[0].nodes.push(next);
     factory.save_settings(settings).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            195,
-            "[AI] bounded output",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 195, "[AI] bounded output", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -207,12 +205,9 @@ PY"#,
         settings.flows[0].nodes[0].agent = agent.into();
         factory.save_settings(settings).unwrap();
         let id = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                196,
-                "[AI] cancel output",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 196, "[AI] cancel output", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();

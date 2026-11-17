@@ -104,11 +104,12 @@ async fn get_agent_usage(
 async fn get_agent_models(
     state: State<'_, DesktopState>,
     agent: String,
+    // Compatible IPC argument name; this is a SourceConnector ID.
     token_profile_id: Option<String>,
 ) -> Result<Vec<factory_core::AgentModel>, String> {
     state
         .factory
-        .agent_models_for_profile(&agent, token_profile_id.as_deref())
+        .agent_models_for_source(&agent, token_profile_id.as_deref())
         .await
         .map_err(|error| format!("{error:#}"))
 }

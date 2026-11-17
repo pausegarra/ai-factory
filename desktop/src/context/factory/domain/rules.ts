@@ -1,3 +1,4 @@
+import { validateSourceConnectors } from "./source-connectors";
 import { TRIGGERS, type Flow, type Settings } from "./types";
 export type ActivationStatus = "Enabled" | "Disabled globally" | "Disabled for this account";
 export function profilePreference(flow: Flow, profileId: string): boolean {
@@ -125,20 +126,7 @@ export function validateSettings(s: Settings): string[] {
     errors.push("Poll interval must be a positive integer.");
   if (Object.values(s.commands).some((v) => !v.trim()))
     errors.push("Enter the CLI executable paths.");
-  const accounts = new Set<string>();
-  for (const t of s.token_profiles) {
-    if (!t.label.trim() || !t.account.trim())
-      errors.push("Each token needs a name and GitHub account.");
-    for (const [field, logins] of Object.entries({ account: [t.account], owners: t.owners, authors: t.authors, reviewers: t.reviewers })) {
-      if (logins.some((login) => !/^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(login)))
-        errors.push(`${t.label || "Profile"}: ${field} must contain valid GitHub logins.`);
-    }
-    if (!t.has_token && !t.token?.trim())
-      errors.push(`Add a token for ${t.label || "the new profile"}.`);
-    if (accounts.has(t.account.toLowerCase()))
-      errors.push("Only one profile per GitHub account.");
-    accounts.add(t.account.toLowerCase());
-  }
+  errors.push(...validateSourceConnectors(s.source_connectors));
   for (const p of s.projects) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(p.repository))
       errors.push("Repository must use owner/repository format.");

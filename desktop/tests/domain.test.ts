@@ -90,7 +90,7 @@ describe("settings validation", () => {
       max_concurrent: 4,
       poll_interval_seconds: 10,
       commands: { codex: "codex", opencode: "opencode", git: "git" },
-      token_profiles: [],
+      source_connectors: [],
       projects: [{ id: "legacy", repository: "owner/repo", source_path }],
       flows: [],
     } as unknown as Settings;
@@ -103,8 +103,8 @@ describe("settings validation", () => {
       max_concurrent: 0,
       poll_interval_seconds: 10,
       commands: { codex: "codex", opencode: "opencode", git: "git" },
-      token_profiles: [
-        { id: "a", label: "Work", account: "me", has_token: false, owners: [], authors: [], reviewers: [] },
+      source_connectors: [
+        { id: "a", label: "Work", type: "github_issues" as const, account: "me", has_token: false, owners: [], authors: [], reviewers: [] },
       ],
       projects: [],
       flows: [],

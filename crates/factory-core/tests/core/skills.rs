@@ -1,4 +1,5 @@
 use super::{fixture, terminal};
+use crate::common;
 use factory_core::{Factory, RunDetail, TriggerEvent};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -64,12 +65,9 @@ fn install_project_skills(root: &Path) {
 
 async fn run(factory: &std::sync::Arc<Factory>, number: u64) -> RunDetail {
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            number,
-            "[AI] skills",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", number, "[AI] skills", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -375,12 +373,9 @@ touch "$(dirname "$0")/unexpected-execution"
     settings.flows[0].nodes[0].skills = Some(vec![]);
     factory.save_settings(settings).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            217,
-            "[AI] cancel skills",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 217, "[AI] cancel skills", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -403,12 +398,9 @@ touch "$(dirname "$0")/unexpected-execution"
 
 async fn run_release(factory: &std::sync::Arc<Factory>) -> RunDetail {
     let id = factory
-        .enqueue(TriggerEvent::release_issue(
-            "acme/repo",
-            811,
-            "[Release] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -503,12 +495,9 @@ async fn release_revalidates_fresh_issue_before_any_agent_execution() {
         let (root, factory) = fixture(AGENT, 4);
         configure_release(&root, &factory, "codex", None);
         let id = factory
-            .enqueue(TriggerEvent::release_issue(
-                "acme/repo",
-                811,
-                "[Release] fixture",
+            .enqueue(common::from_source(
+                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -671,11 +660,17 @@ async fn release_publication_permissions_do_not_reach_readonly_or_other_roles() 
             flow.nodes[0].agent = agent.into();
             factory.save_settings(settings).unwrap();
             let event = if trigger == "release" {
-                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", "")
+                common::from_source(
+                    TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
+                    "alice",
+                )
             } else {
                 *root.issue.lock().unwrap() =
                     json!({"state":"open","title":"[AI] work","user":{"login":"alice"}});
-                TriggerEvent::issue("acme/repo", 811, "[AI] work", "alice", "")
+                common::from_source(
+                    TriggerEvent::issue("acme/repo", 811, "[AI] work", "alice", ""),
+                    "alice",
+                )
             };
             let id = factory.enqueue(event).unwrap().unwrap();
             factory.start();
@@ -785,12 +780,9 @@ async fn release_issue_closure_rechecks_identity_and_accepts_already_closed() {
         let (root, factory) = fixture(&script, 4);
         configure_release(&root, &factory, "codex", None);
         let id = factory
-            .enqueue(TriggerEvent::release_issue(
-                "acme/repo",
-                811,
-                "[Release] fixture",
+            .enqueue(common::from_source(
+                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -901,12 +893,9 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
                 .store(1, std::sync::atomic::Ordering::SeqCst);
         }
         let id = factory
-            .enqueue(TriggerEvent::release_issue(
-                "acme/repo",
-                811,
-                "[Release] fixture",
+            .enqueue(common::from_source(
+                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();

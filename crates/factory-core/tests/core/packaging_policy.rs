@@ -1,4 +1,5 @@
 use super::{fixture, terminal};
+use crate::common;
 use factory_core::*;
 use serde_json::json;
 
@@ -73,12 +74,9 @@ printf '{"status":"%s","summary":"%s","artifacts":[],"data":%s}' "$status" "$sum
                 "Align settings styling with existing controls."
             };
             let id = factory
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    91,
-                    "[AI] packaging policy",
+                .enqueue(common::from_source(
+                    TriggerEvent::issue("acme/repo", 91, "[AI] packaging policy", "alice", body),
                     "alice",
-                    body,
                 ))
                 .unwrap()
                 .unwrap();

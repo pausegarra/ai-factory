@@ -7,7 +7,7 @@ const TOKEN: &str =
 fn input(enabled: bool, token: Option<&str>) -> Settings {
     let mut value = serde_json::to_value(Settings::default()).unwrap();
     value["notification_connectors"] = json!([{"id":"team","label":"Team","enabled":enabled,"events":["run_failed"],"type":"google_chat","config":{"has_webhook_url":true,"webhook_url":token,"triggers":["new_issue"],"token_profile_ids":["work"]}}]);
-    value["token_profiles"] = json!([{"id":"work","label":"Work","account":"alice","has_token":false,"owners":[],"authors":[],"reviewers":[]}]);
+    value["source_connectors"] = json!([{"token":"fixture-source-only","id":"work","label":"Work","type":"github_issues","account":"alice","has_token":false,"owners":[],"authors":[],"reviewers":[]}]);
     serde_json::from_value(value).unwrap()
 }
 fn public(store: &Store) -> Value {
@@ -65,7 +65,16 @@ fn notification_blank_preserves_rotation_and_deletion_collect_secrets() {
     let c = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
     store.save_settings(&input(true, Some(TOKEN))).unwrap();
-    let old = c.values.lock().unwrap().keys().next().unwrap().clone();
+    let old: String = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT reference FROM notification_credential_refs WHERE connector_id='team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     store.save_settings(&input(false, Some(" "))).unwrap();
     assert!(c.values.lock().unwrap().contains_key(&old));
     store.save_settings(&input(true, None)).unwrap();
@@ -112,20 +121,26 @@ fn notification_gc_retries_after_restart_and_never_collects_live_github_secret()
     let c = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
     let mut settings = input(true, Some(TOKEN));
-    settings.token_profiles.push(factory_core::TokenProfile {
-        id: "team".into(),
-        label: "GitHub".into(),
-        account: "bob".into(),
-        token: Some("ghp_fixture_private".into()),
-        ..Default::default()
-    });
+    settings
+        .source_connectors
+        .push(factory_core::SourceConnector {
+            owners: vec!["acme".into()],
+            authors: vec!["bob".into()],
+            reviewers: vec!["bob".into()],
+            kind: factory_core::SourceKind::GithubIssues,
+            id: "team".into(),
+            label: "GitHub".into(),
+            account: "bob".into(),
+            token: Some("ghp_fixture_private".into()),
+            ..Default::default()
+        });
     store.save_settings(&settings).unwrap();
-    assert_eq!(c.values.lock().unwrap().len(), 2);
+    assert_eq!(c.values.lock().unwrap().len(), 3);
     c.fail_delete.store(true, Ordering::SeqCst);
     let mut settings = store.public_settings().unwrap();
     settings.notification_connectors.clear();
     store.save_settings(&settings).unwrap();
-    assert_eq!(c.values.lock().unwrap().len(), 2);
+    assert_eq!(c.values.lock().unwrap().len(), 3);
     let abandoned = "abandoned-fixture-reference";
     store
         .db
@@ -146,10 +161,15 @@ fn notification_gc_retries_after_restart_and_never_collects_live_github_secret()
             .unwrap()
             .values()
             .cloned()
-            .collect::<Vec<_>>(),
-        vec!["ghp_fixture_private"]
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "ghp_fixture_private".to_string(),
+            "fixture-source-only".to_string()
+        ]
+        .into_iter()
+        .collect()
     );
-    assert!(store.public_settings().unwrap().token_profiles[1].has_token);
+    assert!(store.public_settings().unwrap().source_connectors[1].has_token);
 }
 #[test]
 fn notification_public_reads_and_disabled_incomplete_saves_do_not_access_locked_keychain() {
@@ -207,14 +227,14 @@ fn notification_two_destinations_and_provider_change_have_independent_secret_ide
     second.id = "second".into();
     settings.notification_connectors.push(second);
     store.save_settings(&settings).unwrap();
-    assert_eq!(c.values.lock().unwrap().len(), 2);
+    assert_eq!(c.values.lock().unwrap().len(), 3);
     let mut settings = store.public_settings().unwrap();
     settings.notification_connectors[0].provider = factory_core::ConnectorProvider::Unsupported {
         kind: "future".into(),
         config: json!({"option":7}),
     };
     store.save_settings(&settings).unwrap();
-    assert_eq!(c.values.lock().unwrap().len(), 1);
+    assert_eq!(c.values.lock().unwrap().len(), 2);
     settings.notification_connectors[0].provider =
         factory_core::ConnectorProvider::Telegram(Default::default());
     settings.notification_connectors[0].enabled = true;

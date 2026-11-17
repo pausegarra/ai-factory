@@ -100,14 +100,18 @@ pub async fn git_output(
     factory: &Factory,
     dir: &Path,
     args: &[&str],
-    actor: Option<&str>,
+    source_id: Option<&str>,
 ) -> Result<String> {
     let s = factory.store.public_settings()?;
     let mut c = Command::new(resolve_command(&s.commands.git));
     c.args(args).current_dir(dir).kill_on_drop(true);
     clean_env(&mut c);
-    if let Some(actor) = actor {
-        let token = factory.store.token_for(actor).await?;
+    if let Some(source_id) = source_id {
+        let actor = &s
+            .source_by_id(source_id)
+            .context("Source connector unavailable")?
+            .account;
+        let token = factory.store.token_for_source(source_id).await?;
         let basic = base64_basic(&format!("x-access-token:{token}"));
         c.env("GIT_CONFIG_COUNT", "4")
             .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
@@ -177,9 +181,7 @@ async fn prepare(
 ) -> Result<PathBuf> {
     let s = factory.store.public_settings()?;
     ensure!(valid_repository(&event.repository), "Invalid repository");
-    let profile = s
-        .profile_for(&event.actor)
-        .with_context(|| format!("No API token configured for actor {}", event.actor))?;
+    let profile = s.source_for_event(event)?;
     ensure!(
         profile.allows_owner(event.repository.split('/').next().unwrap()),
         "Repository owner no longer authorized"
@@ -189,7 +191,12 @@ async fn prepare(
         "Trigger actor no longer authorized"
     );
     {
-        let api = factory.github(&factory.store.token_for(&event.actor).await?)?;
+        let api = factory.github(
+            &factory
+                .store
+                .token_for_source(&factory.store.public_settings()?.source_for_event(event)?.id)
+                .await?,
+        )?;
         let identity = api.verify_actor(&event.actor).await?;
         factory
             .store
@@ -234,7 +241,7 @@ async fn prepare(
             &remote,
             workspace.to_str().context("Workspace path is not UTF-8")?,
         ],
-        Some(&event.actor),
+        Some(&factory.store.public_settings()?.source_for_event(event)?.id),
     )
     .await?;
     git_output(
@@ -308,7 +315,12 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
                 return Ok(());
             }
             release_completion::record_pending(factory, &detail)?;
-            let api = factory.github(&factory.store.token_for(&event.actor).await?)?;
+            let api = factory.github(
+                &factory
+                    .store
+                    .token_for_source(&factory.store.public_settings()?.source_for_event(event)?.id)
+                    .await?,
+            )?;
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => bail!("Run cancelled before release issue closure"),
@@ -583,7 +595,12 @@ async fn execute_node(
             event.trigger_id == "pr_approved",
             "Version node requires approved PR flow"
         );
-        let api = factory.github(&factory.store.token_for(&event.actor).await?)?;
+        let api = factory.github(
+            &factory
+                .store
+                .token_for_source(&factory.store.public_settings()?.source_for_event(event)?.id)
+                .await?,
+        )?;
         let context = tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("Run cancelled"),
@@ -737,7 +754,10 @@ async fn execute_node(
         .env("GIT_CONFIG_KEY_3", "credential.helper")
         .env("GIT_CONFIG_VALUE_3", "");
     if release_publication::allowed(event, node) {
-        let token = factory.store.token_for(&event.actor).await?;
+        let token = factory
+            .store
+            .token_for_source(&factory.store.public_settings()?.source_for_event(event)?.id)
+            .await?;
         release_publication::configure_auth(&mut cmd, &event.repository, &token);
     }
     cmd.env("AI_FACTORY_RESULT_PATH", &result_path)
@@ -960,7 +980,12 @@ async fn execute_node(
                 "Local PR changes must be committed and published with data.update_pr before merge"
             );
         }
-        let api = factory.github(&factory.store.token_for(&event.actor).await?)?;
+        let api = factory.github(
+            &factory
+                .store
+                .token_for_source(&factory.store.public_settings()?.source_for_event(event)?.id)
+                .await?,
+        )?;
         tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("Run cancelled"),

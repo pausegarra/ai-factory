@@ -7,11 +7,11 @@ import { newTelegramConnector, newGoogleChatConnector, cleanNotificationConnecto
 import type { Settings } from "../src/context/factory/domain/types";
 import { noticeSettings, deferred } from "./fixtures/notices";
 afterEach(cleanup);
-const profile = {id:"work",label:"Work",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]};
+const profile = {id:"work",label:"Work",type: "github_issues" as const, account:"alice",has_token:true,owners:[],authors:[],reviewers:[]};
 const checked = (element: HTMLElement) => (element as HTMLInputElement).checked;
 
 it("renders identical filter choices for both providers", () => {
-  render(<NotificationsPage settings={{...noticeSettings(),token_profiles:[profile],notification_connectors:[newTelegramConnector("tg"),newGoogleChatConnector("chat")]}} onSave={vi.fn()} />);
+  render(<NotificationsPage settings={{...noticeSettings(),source_connectors:[profile],notification_connectors:[newTelegramConnector("tg"),newGoogleChatConnector("chat")]}} onSave={vi.fn()} />);
   for(const name of ["Telegram","Google Chat"]) {
     const card = within(openConnector(name));
     expect(within(card.getByRole("group",{name:"Run events"})).getAllByRole("checkbox").map(c=>c.closest("label")?.textContent)).toEqual(["Run started","Run succeeded","Run failed","Run blocked"]);
@@ -24,7 +24,7 @@ it("renders identical filter choices for both providers", () => {
 it("isolates all three groups across two Telegram connectors and Google Chat", async () => {
   const connectors = [newTelegramConnector("a"),{...newTelegramConnector("b"),label:"Second"},newGoogleChatConnector("c")];
   const onSave = vi.fn(async (s:Settings)=>({...s,notification_connectors:cleanNotificationConnectors(s.notification_connectors ?? [])}));
-  render(<NotificationsPage settings={{...noticeSettings(),token_profiles:[profile],notification_connectors:connectors}} onSave={onSave} />);
+  render(<NotificationsPage settings={{...noticeSettings(),source_connectors:[profile],notification_connectors:connectors}} onSave={onSave} />);
   const card = within(openConnector("Telegram"));
   for(const name of ["Run started","New task","Work (@alice)"]) fireEvent.click(card.getByRole("checkbox",{name}));
   applyConnector();
@@ -48,7 +48,7 @@ for(const create of [newTelegramConnector,newGoogleChatConnector]) {
     const c = create("a"); c.enabled = enabled;
     if(c.type === "telegram") {c.config.chat_id = "fixture"; c.config.has_token = true;}
     else c.config.has_webhook_url = true;
-    return {...noticeSettings(),token_profiles:[profile],notification_connectors:[c]};
+    return {...noticeSettings(),source_connectors:[profile],notification_connectors:[c]};
   }
   it(`${kind}: persists filters through save, reopen and discard`, async () => {
     let stored = settings();
@@ -85,7 +85,7 @@ for(const create of [newTelegramConnector,newGoogleChatConnector]) {
     fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Changed"}});
     applyConnector(); fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
     expect(onSave).not.toHaveBeenCalled();
-    for(const name of ["Run events","GitHub triggers","GitHub profiles"]) {
+    for(const name of ["Run events","GitHub triggers","GitHub sources"]) {
       const group = screen.getByRole("group",{name});
       expect(group.getAttribute("aria-invalid")).toBe("true");
       expect(document.getElementById(group.getAttribute("aria-describedby")!)?.textContent).toMatch(/Select/);
@@ -105,15 +105,15 @@ for(const create of [newTelegramConnector,newGoogleChatConnector]) {
     const view=render(<NotificationsPage settings={original} onSave={onSave} />);
     openConnector(create("a").label);
     fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Dirty"}});
-    view.rerender(<NotificationsPage settings={{...original,token_profiles:[{...profile,label:"Renamed",token:"PRIVATE_GITHUB"},{...profile,id:"new",label:"New",account:"bob"}]}} onSave={onSave} />);
+    view.rerender(<NotificationsPage settings={{...original,source_connectors:[{...profile,label:"Renamed",token:"PRIVATE_GITHUB"},{...profile,id:"new",label:"New",account:"bob"}]}} onSave={onSave} />);
     expect(checked(screen.getByRole("checkbox",{name:"Renamed (@alice)"}))).toBe(true);
     expect(checked(screen.getByRole("checkbox",{name:"New (@bob)"}))).toBe(false);
     expect(document.body.innerHTML).not.toContain("PRIVATE_GITHUB");
-    const incoming={...original,token_profiles:[{...profile,id:"new",label:"New",account:"bob"}]};
+    const incoming={...original,source_connectors:[{...profile,id:"new",label:"New",account:"bob"}]};
     view.rerender(<NotificationsPage settings={incoming} onSave={onSave} />);
-    expect(checked(screen.getByRole("checkbox",{name:"Unavailable profile (work)"}))).toBe(true);
+    expect(checked(screen.getByRole("checkbox",{name:"Unavailable source (work)"}))).toBe(true);
     applyConnector(); fireEvent.click(screen.getByRole("button",{name:"Save changes"}));expect(onSave).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("checkbox",{name:"Unavailable profile (work)"}));
+    fireEvent.click(screen.getByRole("checkbox",{name:"Unavailable source (work)"}));
     fireEvent.click(screen.getByRole("checkbox",{name:"New (@bob)"}));
     applyConnector(); fireEvent.click(screen.getByRole("button",{name:"Save changes"}));await screen.findByText("Notification settings saved.");
     expect(onSave.mock.calls[0][0].notification_connectors![0].config.token_profile_ids).toEqual(["new"]);
@@ -154,7 +154,7 @@ for(const create of [newTelegramConnector,newGoogleChatConnector]) {
     await user.tab();expect(document.activeElement).toBe(screen.getByRole("button",{name:`Remove connector ${create("a").label}`}));
   });
   it(`${kind}: distinguishes duplicate profile labels by stable ID`, () => {
-    const original=settings();original.token_profiles=[profile,{...profile,id:"other"}];
+    const original=settings();original.source_connectors=[profile,{...profile,id:"other"}];
     render(<NotificationsPage settings={original} onSave={vi.fn()} />);
     openConnector(create("a").label);
     fireEvent.click(screen.getByRole("checkbox",{name:"Work (@alice) (other)"}));
@@ -167,7 +167,7 @@ it("persists only the edited Release filter and leaves explicit older selections
   const telegram = newTelegramConnector("tg");
   telegram.config.triggers = ["new_issue"];
   const chat = newGoogleChatConnector("chat");
-  const original = {...noticeSettings(), token_profiles:[profile], notification_connectors:[telegram, chat]};
+  const original = {...noticeSettings(), source_connectors:[profile], notification_connectors:[telegram, chat]};
   const save = vi.fn(async (s: Settings) => s);
   const view = render(<NotificationsPage settings={original} onSave={save} />);
   openConnector("Telegram");

@@ -201,10 +201,6 @@ pub fn validate_connectors(connectors: &[NotificationConnector]) -> Result<()> {
                 !c.enabled || !trigger_ids.is_empty(),
                 "Enabled {name} connector requires a trigger"
             );
-            ensure!(
-                !c.enabled || !profile_ids.is_empty(),
-                "Enabled {name} connector requires a GitHub profile"
-            );
         }
         if let ConnectorProvider::Telegram(config) = &c.provider {
             ensure!(

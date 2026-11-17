@@ -1,4 +1,5 @@
 use super::*;
+use crate::common;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -136,12 +137,9 @@ fn setup(scenario: &str, agent: &str) -> (FixtureDir, std::sync::Arc<Factory>) {
 
 async fn run(factory: &std::sync::Arc<Factory>) -> (String, RunDetail) {
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            8,
-            "[AI] hashes",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 8, "[AI] hashes", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -431,12 +429,9 @@ async fn cancellation_during_hash_correction_stops_process_tree() {
     for agent in ["codex", "opencode"] {
         let (dir, f) = setup("cancel", agent);
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                8,
-                "[AI] hashes",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 8, "[AI] hashes", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();

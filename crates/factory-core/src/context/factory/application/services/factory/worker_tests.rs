@@ -5,7 +5,7 @@ struct NoCredentials;
 
 impl Credentials for NoCredentials {
     fn get(&self, _: &str) -> Result<Option<String>> {
-        Ok(None)
+        Ok(Some("worker-fixture-secret".into()))
     }
 
     fn set(&self, _: &str, _: &str) -> Result<()> {
@@ -25,11 +25,34 @@ fn setup() -> (tempfile::TempDir, Arc<Factory>) {
         Arc::new(NoCredentials),
     )
     .unwrap();
+    let mut settings = factory.settings().unwrap();
+    settings.source_connectors.push(SourceConnector {
+        id: "work".into(),
+        label: "Work".into(),
+        account: "alice".into(),
+        token: Some("worker-fixture-secret".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        ..Default::default()
+    });
+    settings.source_connectors.push(SourceConnector {
+        id: "other".into(),
+        label: "Other".into(),
+        account: "bob".into(),
+        token: Some("worker-fixture-secret".into()),
+        owners: vec!["other".into()],
+        authors: vec!["bob".into()],
+        reviewers: vec!["bob".into()],
+        ..Default::default()
+    });
+    factory.save_settings(settings).unwrap();
     (dir, factory)
 }
 
 fn event(trigger: &str, repository: &str, actor: &str, number: u64) -> TriggerEvent {
     let mut event = TriggerEvent::issue(repository, number, "[AI] fixture", actor, "");
+    event.origin_token_profile_id = Some(if actor == "bob" { "other" } else { "work" }.into());
     event.trigger_id = trigger.into();
     event.event_id = format!("{trigger}:{repository}#{number}");
     if !matches!(trigger, "new_issue" | "release") {
@@ -366,7 +389,7 @@ async fn cancelled_worker_holds_approval_until_cleanup_returns_even_on_cleanup_e
             .trigger_max_concurrent
             .insert("pr_approved".into(), 1);
         factory.save_settings(limits).unwrap();
-        assert!(factory.settings().unwrap().token_profiles.is_empty());
+        assert_eq!(factory.settings().unwrap().source_connectors.len(), 2);
         let active = queued(&factory, "pr_approved", 1);
         let (release, receive) = std::sync::mpsc::channel();
         let cleaner = Arc::new(GatedCleanup {
@@ -954,14 +977,16 @@ fn review_scan_generations_and_retry_share_trigger_capacity() {
     let candidate = event("pr_review", "acme/repo", "alice", 31);
     let first = f
         .store
-        .admit_review_scan("acme", "alice", std::slice::from_ref(&candidate))
+        .admit_review_scan("work", "acme", "alice", std::slice::from_ref(&candidate))
         .unwrap()
         .remove(0);
     assert!(f.register_queued_worker(&first).unwrap().is_some());
-    f.store.admit_review_scan("acme", "alice", &[]).unwrap();
+    f.store
+        .admit_review_scan("work", "acme", "alice", &[])
+        .unwrap();
     let second = f
         .store
-        .admit_review_scan("acme", "alice", &[candidate])
+        .admit_review_scan("work", "acme", "alice", &[candidate])
         .unwrap()
         .remove(0);
     assert_ne!(

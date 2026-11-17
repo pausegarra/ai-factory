@@ -11,7 +11,7 @@ vi.mock("../src/context/factory/infrastructure/ipc/factory-api", () => ({
 }));
 const account = (id = "codex-work", status: AgentAccount["status"] = "ready"): AgentAccount => ({ id, agent: "codex", label: "Work Codex", email: status === "ready" ? "person@example.com" : null, status, error: null });
 const settings = (): Settings => ({
-  token_profiles: [{ id: "work", label: "Work", account: "worker", has_token: true, owners: [], authors: [], reviewers: [] }],
+  source_connectors: [{ id: "work", label: "Work", type: "github_issues" as const, account: "worker", has_token: true, owners: [], authors: [], reviewers: [] }],
   projects: [], commands: { codex: "codex", opencode: "opencode", git: "git" },
   poll_interval_seconds: 15, max_concurrent: 4, start_at_login: false,
   flows: [],
@@ -56,18 +56,14 @@ it("offers accessible Settings tabs and keeps agent auth outside GitHub profiles
   for (const tab of screen.getAllByRole("tab")) expect(document.getElementById(tab.getAttribute("aria-controls")!)).toBeTruthy();
   expect(screen.queryByLabelText(/Codex account for/)).toBeNull();
   fireEvent.keyDown(general, { key: "ArrowRight" });
-  const github = screen.getByRole("tab", { name: "GitHub accounts" });
-  expect(document.activeElement).toBe(github);
-  expect(screen.getByRole("tabpanel", { name: "GitHub accounts" })).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "GitHub accounts" })).toBeTruthy();
-  fireEvent.keyDown(github, { key: "ArrowRight" });
+  expect(screen.queryByRole("tab", {name:"GitHub accounts"})).toBeNull();
   await screen.findByRole("heading", { name: "Codex" });
   expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Agents" }));
   expect(screen.getByRole("tabpanel", { name: "Agents" })).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "OpenCode" })).getByText("Default CLI")).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "OpenCode" })).queryByRole("button")).toBeNull();
   await screen.findByText("No Codex accounts yet");
-  expect(screen.getByText(/Unassigned GitHub profiles block Codex steps/)).toBeTruthy();
+  expect(screen.getByText(/Unassigned source connectors block Codex steps/)).toBeTruthy();
   fireEvent.keyDown(screen.getByRole("tab", { name: "Agents" }), { key: "ArrowRight" });
   expect(document.activeElement).toBe(general);
   expect(screen.queryByRole("heading", { name: "GitHub accounts" })).toBeNull();
@@ -152,14 +148,13 @@ it("clears a recovered account-load error without removing account diagnostics",
   expect(screen.getByText("Complete sign-in in your browser")).toBeTruthy();
 });
 
-it("removes stale bindings when deleting a GitHub profile and supports Discard", async () => {
-  const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
-  fireEvent.click(screen.getByRole("button", { name: "Delete profile Work" }));
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  await waitFor(() => expect(save).toHaveBeenCalledOnce());
-  expect(save.mock.calls[0][0].codex_bindings).toEqual({});
+it("exposes orphan source assignments for explicit removal", async () => {
+ const save=vi.fn(async(s:Settings)=>s);
+ render(<SettingsPage settings={{...settings(),source_connectors:[],codex_bindings:{removed:"codex-work"}}} onSave={save} appDir="/app"/>);
+ agents();await screen.findByText("Unavailable source: removed");
+ fireEvent.click(screen.getByRole("button",{name:"Remove binding for removed"}));
+ fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
+ await waitFor(()=>expect(save).toHaveBeenCalledOnce());expect(save.mock.calls[0][0].codex_bindings).toEqual({});
 });
 
 it("ignores account reload results made stale by cancellation", async () => {
@@ -255,14 +250,14 @@ it("preserves unrelated drafts when account removal finishes after switching tab
   agents();
   await screen.findByText("person@example.com");
   fireEvent.click(screen.getByRole("button", { name: "Remove account Work Codex" }));
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
-  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "next-org" } });
+  fireEvent.click(screen.getByRole("tab", { name:"General" }));
+  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value:"30" } });
   expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled).toBe(true);
   await act(async () => finish());
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledOnce());
   expect(save.mock.calls[0][0].codex_bindings).toEqual({});
-  expect(save.mock.calls[0][0].token_profiles[0].owners).toEqual(["next-org"]);
+  expect(save.mock.calls[0][0].poll_interval_seconds).toBe(30);
 });
 
 it("opens initiated sign-in even if the user switches tabs before OAuth starts", async () => {

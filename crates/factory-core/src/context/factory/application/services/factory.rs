@@ -240,14 +240,20 @@ impl Factory {
         self.store.public_settings()
     }
     pub async fn agent_models(&self, agent: &str) -> Result<Vec<AgentModel>> {
-        self.agent_models_for_profile(agent, None).await
+        self.agent_models_for_source(agent, None).await
     }
-    pub async fn agent_models_for_profile(
+    pub async fn agent_models_for_source(
         &self,
         agent: &str,
         token_profile_id: Option<&str>,
     ) -> Result<Vec<AgentModel>> {
         let settings = self.store.public_settings()?;
+        if let Some(id) = token_profile_id {
+            ensure!(
+                settings.source_by_id(id).is_some(),
+                "Source connector unavailable"
+            );
+        }
         let executable = match agent {
             "codex" => &settings.commands.codex,
             "opencode" => &settings.commands.opencode,
@@ -255,9 +261,15 @@ impl Factory {
         };
         let lease = if agent == "codex" {
             let account = match token_profile_id {
-                Some(profile) => settings.codex_bindings.get(profile),
+                Some(source) => {
+                    ensure!(
+                        settings.source_by_id(source).is_some(),
+                        "Source connector unavailable"
+                    );
+                    settings.codex_bindings.get(source)
+                }
                 None => settings
-                    .token_profiles
+                    .source_connectors
                     .iter()
                     .find_map(|profile| settings.codex_bindings.get(&profile.id)),
             }
@@ -273,7 +285,7 @@ impl Factory {
     }
     pub fn save_settings(&self, mut s: Settings) -> Result<Settings> {
         let _gate = self.lifecycle_gate.lock().unwrap();
-        for profile in &mut s.token_profiles {
+        for profile in &mut s.source_connectors {
             profile.account = profile.account.to_lowercase();
             for values in [
                 &mut profile.owners,
@@ -432,28 +444,33 @@ impl Factory {
     pub(crate) fn github(&self, token: &str) -> Result<Github> {
         Ok(Github::with_base(token, &self.github_base)?.with_http_state(self.github_http.clone()))
     }
-    pub(crate) fn workflow_enabled_for(&self, trigger: &str, actor: &str) -> Result<bool> {
+    pub(crate) fn workflow_enabled_for(&self, trigger: &str, source_id: &str) -> Result<bool> {
         let settings = self.store.public_settings()?;
         let flow = settings
             .flows
             .iter()
             .find(|f| f.id == trigger)
             .context("Unknown trigger")?;
-        Ok(flow.activation_for(actor, &settings.token_profiles) == ActivationState::Enabled)
+        Ok(
+            flow.activation_for_source(source_id, &settings.source_connectors)
+                == ActivationState::Enabled,
+        )
     }
     pub(crate) fn enqueue_review_scan(
         &self,
+        source_id: &str,
         owner: &str,
         reviewer: &str,
         candidates: &[TriggerEvent],
     ) -> Result<Vec<String>> {
         ensure!(
-            valid_login(owner) && valid_login(reviewer),
+            safe_id(source_id) && valid_login(owner) && valid_login(reviewer),
             "Invalid review scan identity"
         );
         for e in candidates {
             ensure!(
-                e.trigger_id == "pr_review"
+                e.origin_token_profile_id.as_deref() == Some(source_id)
+                    && e.trigger_id == "pr_review"
                     && valid_repository(&e.repository)
                     && e.number > 0
                     && e.actor.eq_ignore_ascii_case(reviewer)
@@ -465,6 +482,7 @@ impl Factory {
             );
         }
         let ids = self.store.admit_review_scan(
+            source_id,
             &owner.to_lowercase(),
             &reviewer.to_lowercase(),
             candidates,

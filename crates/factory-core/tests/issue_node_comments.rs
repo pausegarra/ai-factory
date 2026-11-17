@@ -11,7 +11,11 @@ fn db(root: &Path) -> rusqlite::Connection {
 fn configure(f: &Factory) {
     let mut s = f.settings().unwrap();
     s.flows[0].nodes.truncate(1);
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),
         account: "alice".into(),
@@ -21,12 +25,9 @@ fn configure(f: &Factory) {
     f.save_settings(s).unwrap();
 }
 fn enqueue(f: &Factory, number: u64) -> String {
-    f.enqueue(TriggerEvent::issue(
-        "acme/repo",
-        number,
-        "[AI] notify",
+    f.enqueue(common::from_source(
+        TriggerEvent::issue("acme/repo", number, "[AI] notify", "alice", ""),
         "alice",
-        "",
     ))
     .unwrap()
     .unwrap()
@@ -334,6 +335,7 @@ async fn issue_node_comments_post_response_after_deletion_cannot_recreate_files(
 async fn issue_node_comments_exhaustion_persists_without_changing_terminal_result() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    configure(&f);
     let mut settings = f.settings().unwrap();
     settings.flows[0].nodes.truncate(1);
     f.save_settings(settings).unwrap();
@@ -464,7 +466,11 @@ async fn issue_node_comments_cold_cache_redacts_all_profiles_before_unicode_limi
     let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
     configure(&f);
     let mut settings = f.settings().unwrap();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        owners: vec!["acme".into()],
+        authors: vec!["bob".into()],
+        reviewers: vec!["bob".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "bob".into(),
         label: "Bob".into(),
         account: "bob".into(),

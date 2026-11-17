@@ -177,7 +177,7 @@ impl Github {
                 &remote,
                 &format!("{sha}:refs/heads/{}", snapshot.head_ref),
             ],
-            Some(&event.actor),
+            Some(&factory.store.public_settings()?.source_for_event(event)?.id),
         )
         .await;
         // A transport failure can occur after GitHub accepted the push. Read

@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { SourcesPage } from "../src/context/factory/infrastructure/presentations/sources";
 import { SettingsPage } from "../src/context/factory/infrastructure/presentations/settings";
 import { FlowsPage } from "../src/context/factory/infrastructure/presentations/flows";
 import { factoryApi } from "../src/context/factory/infrastructure/ipc/factory-api";
@@ -23,11 +24,11 @@ beforeAll(() => {
 });
 afterEach(cleanup);
 function githubAccounts() {
-  fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
+  fireEvent.click(screen.getByRole("button", {name:"Edit connector Work"}));
 }
 const settings = (): Settings => ({
-  token_profiles: [
-    { id: "work", label: "Work", account: "worker", has_token: true, owners: [], authors: [], reviewers: [] },
+  source_connectors: [
+    { id: "work", label: "Work", type: "github_issues" as const, account: "worker", has_token: true, owners: [], authors: [], reviewers: [] },
   ],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
@@ -92,13 +93,14 @@ it("preserves legacy projects when saving unrelated settings", async () => {
   ];
   const save = vi.fn().mockResolvedValue(undefined);
   render(
-    <SettingsPage settings={value} onSave={save} appDir="/app/data" />,
+    <SourcesPage settings={value} onSave={save} />,
   );
 
   githubAccounts();
   fireEvent.change(screen.getByLabelText("GitHub owners"), {
     target: { value: "owner" },
   });
+  fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
   await waitFor(() => expect(save).toHaveBeenCalled());
@@ -108,18 +110,19 @@ it("preserves legacy projects when saving unrelated settings", async () => {
 it("keeps account tokens when replacement is typed then cleared", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(
-    <SettingsPage settings={settings()} onSave={save} appDir="/app/data" />,
+    <SourcesPage settings={settings()} onSave={save} />,
   );
   githubAccounts();
   const user = userEvent.setup();
-  const secret = screen.getByLabelText("Replace token");
+  const secret = screen.getByLabelText("API token");
   await user.type(secret, "replacement");
   await user.clear(secret);
-  await user.clear(screen.getByLabelText("Profile name"));
-  await user.type(screen.getByLabelText("Profile name"), "New label");
+  await user.clear(screen.getByLabelText("Name"));
+  await user.type(screen.getByLabelText("Name"), "New label");
+  fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalled());
-  expect(save.mock.calls[0][0].token_profiles[0].token).toBeUndefined();
+  expect(save.mock.calls[0][0].source_connectors[0].token).toBeUndefined();
 });
 
 it("dismisses Settings save errors without discarding edits and restores page focus", async () => {
@@ -153,14 +156,15 @@ it("keeps newer Settings edits when an earlier save finishes", async () => {
 it("allows comma separated owners while typing", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(
-    <SettingsPage settings={settings()} onSave={save} appDir="/app/data" />,
+    <SourcesPage settings={settings()} onSave={save} />,
   );
   githubAccounts();
   const user = userEvent.setup();
   await user.type(screen.getByLabelText("GitHub owners"), "one, two");
+  fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalled());
-  expect(save.mock.calls[0][0].token_profiles[0].owners).toEqual(["one", "two"]);
+  expect(save.mock.calls[0][0].source_connectors[0].owners).toEqual(["one", "two"]);
 });
 it("blocks saving invalid schema text and keeps invalid draft on node selection", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
@@ -311,7 +315,7 @@ it("preserves schema and activation drafts on settings events, but reflects clea
   expect((screen.getByLabelText("Result schema · JSON") as HTMLTextAreaElement).value).toBe("{");
 });
 
-it.each(["token", "poll interval"])("saves unrelated %s edits with a legacy dotted node ID and preserves activation", async (field) => {
+it.each(["poll interval"])("saves unrelated %s edits with a legacy dotted node ID and preserves activation", async (field) => {
   const value = settings();
   value.flows[0].nodes[0].id = "review.code";
   value.flows[0].profile_activation = { work: false, removed: true };
@@ -320,17 +324,15 @@ it.each(["token", "poll interval"])("saves unrelated %s edits with a legacy dott
   const save = vi.fn().mockResolvedValue(undefined);
   render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
 
-  if (field === "token") githubAccounts();
-  fireEvent.change(screen.getByLabelText(field === "token" ? "Replace token" : "GitHub poll interval · seconds"), {
-    target: { value: field === "token" ? "replacement-fixture" : "30" },
+  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), {
+    target: { value: "30" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   const saved = save.mock.calls[0][0] as Settings;
   expect(saved.flows).toEqual(original.flows);
-  if (field === "token") expect(saved.token_profiles[0].token).toBe("replacement-fixture");
-  else expect(saved.poll_interval_seconds).toBe(30);
+  expect(saved.poll_interval_seconds).toBe(30);
   expect(value).toEqual(original);
   expect(screen.queryByRole("alert")).toBeNull();
 });
@@ -339,17 +341,16 @@ it("Settings validates latest activation metadata instead of stale draft flows",
   const value = settings();
   const save = vi.fn().mockResolvedValue(undefined);
   const view = render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
-  githubAccounts();
-  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "owner" } });
+  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value:"30" } });
   const latest = structuredClone(value);
   latest.flows[0].profile_activation = { work: false };
   view.rerender(<SettingsPage settings={latest} onSave={save} appDir="/app" />);
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  expect(save.mock.calls[0][0]).toMatchObject({ token_profiles: [{ ...value.token_profiles[0], owners: ["owner"] }], flows: latest.flows });
+  expect(save.mock.calls[0][0]).toMatchObject({ source_connectors: value.source_connectors, flows: latest.flows });
   latest.flows[0].profile_activation = { work: "bad" } as unknown as Record<string, boolean>;
   view.rerender(<SettingsPage settings={structuredClone(latest)} onSave={save} appDir="/app" />);
-  fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "other" } });
+  fireEvent.change(screen.getByLabelText("GitHub poll interval · seconds"), { target: { value:"31" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   expect(screen.getByRole("alert").textContent).toMatch(/activation must contain booleans/);
   expect(save).toHaveBeenCalledTimes(1);
@@ -357,11 +358,12 @@ it("Settings validates latest activation metadata instead of stale draft flows",
 
 it('requires a replacement token when changing an existing profile account', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app/data" />);
+  render(<SourcesPage settings={settings()} onSave={save} />);
   githubAccounts();
   fireEvent.change(screen.getByLabelText('GitHub account'), {target: {value: 'another-account'}});
+  fireEvent.click(screen.getByRole('button', {name:'Apply changes'}));
   fireEvent.click(screen.getByRole('button', {name: 'Save changes'}));
-  await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/token/i));
+  await waitFor(() => expect(within(screen.getByRole('dialog')).getByRole('alert').textContent).toMatch(/token/i));
   expect(save).not.toHaveBeenCalled();
 });
 
@@ -402,7 +404,7 @@ it("selects models and efforts from the agent catalog and clears incompatible ch
 it("saves independent agent configurations for every node and GitHub token", async () => {
   const { within } = await import("@testing-library/react");
   const value = settings();
-  value.token_profiles.push({ id: "personal", label: "Personal", account: "bob", has_token: true, owners: [], authors: [], reviewers: [] });
+  value.source_connectors.push({ id: "personal", label: "Personal", type: "github_issues" as const, account: "bob", has_token: true, owners: [], authors: [], reviewers: [] });
   value.flows[0].nodes.push({ ...value.flows[0].nodes[0], id: "build", name: "Build", position: { x: 300, y: 0 } });
   const save = vi.fn().mockResolvedValue(undefined);
   const view = render(<FlowsPage settings={value} onSave={save} />);
@@ -481,15 +483,15 @@ it("clears incompatible token choices without changing step defaults", async () 
 
 it("shows empty profile help and lets users remove inactive overrides", async () => {
   const value = settings();
-  value.token_profiles = [];
+  value.source_connectors = [];
   value.flows[0].nodes[0].token_overrides = { removed: { agent: "codex", model: "codex-a", effort: "high" } };
   const save = vi.fn().mockResolvedValue(undefined);
   render(<FlowsPage settings={value} onSave={save} />);
   fireEvent.click(screen.getByText("Plan", { exact: true }));
-  expect(screen.getByText(/Add GitHub token profiles in Settings/)).toBeTruthy();
-  expect(screen.getByRole("group", { name: "Unavailable profile: removed" })).toBeTruthy();
+  expect(within(screen.getByRole("region",{name:"GitHub token overrides"})).getByText(/Add a GitHub Issues connector in Sources/)).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Unavailable source: removed" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Remove override for removed" }));
-  expect(screen.queryByRole("group", { name: "Unavailable profile: removed" })).toBeNull();
+  expect(screen.queryByRole("group", { name: "Unavailable source: removed" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Save workflow" }));
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][0].flows[0].nodes[0].token_overrides).toEqual({});
@@ -498,7 +500,7 @@ it("shows empty profile help and lets users remove inactive overrides", async ()
 it.each(["constructor", "__proto__"])("stores overrides for profile ID %s without inherited object properties", async (id) => {
   const { within } = await import("@testing-library/react");
   const value = settings();
-  value.token_profiles[0].id = id;
+  value.source_connectors[0].id = id;
   const save = vi.fn().mockResolvedValue(undefined);
   render(<FlowsPage settings={value} onSave={save} />);
   const user = userEvent.setup();
@@ -517,68 +519,53 @@ it.each(["constructor", "__proto__"])("stores overrides for profile ID %s withou
 
 function twoAccountSettings(): Settings {
   const value = settings();
-  value.token_profiles[0] = { ...value.token_profiles[0], owners: ["work-org"], authors: ["worker"], reviewers: [] };
-  value.token_profiles.push({ id: "personal", label: "Personal", account: "alice", has_token: true, owners: ["alice"], authors: [], reviewers: ["alice"] });
+  value.source_connectors[0] = { ...value.source_connectors[0], owners: ["work-org"], authors: ["worker"], reviewers: [] };
+  value.source_connectors.push({ id: "personal", label: "Personal", type: "github_issues" as const, account: "alice", has_token: true, owners: ["alice"], authors: [], reviewers: ["alice"] });
   return value;
 }
 const accountFields = (name: string) => within(screen.getByRole("group", { name }));
 
-it("saves independent account permission scopes while preserving comma drafts and tokens", async () => {
-  const value = twoAccountSettings();
-  const original = structuredClone(value);
-  const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
-  githubAccounts();
-  const work = accountFields("Work (@worker)");
-  const personal = accountFields("Personal (@alice)");
-  const user = userEvent.setup();
-  await user.type(work.getByLabelText("GitHub owners"), ", next-org, ");
-  expect((work.getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org, next-org, ");
-  fireEvent.change(personal.getByLabelText("Allowed authors"), { target: { value: "alice, worker" } });
-  fireEvent.change(personal.getByLabelText("Allowed reviewers"), { target: { value: "" } });
-  fireEvent.change(work.getByLabelText("Replace token"), { target: { value: "replacement-fixture" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  const saved = save.mock.calls[0][0] as Settings;
-  expect(saved.token_profiles[0]).toMatchObject({ owners: ["work-org", "next-org"], authors: ["worker"], reviewers: [], token: "replacement-fixture", has_token: true });
-  expect(saved.token_profiles[1]).toMatchObject({ owners: ["alice"], authors: ["alice", "worker"], reviewers: [], has_token: true });
-  expect(saved.token_profiles[1].token).toBeUndefined();
-  for (const field of ["owners", "authors", "reviewers"]) expect(Object.hasOwn(saved, field)).toBe(false);
-  expect(value).toEqual(original);
+it("saves independent source permission scopes while preserving comma drafts and tokens", async () => {
+ const value=twoAccountSettings(), original=structuredClone(value);const save=vi.fn(async(_s:Settings)=>{});
+ render(<SourcesPage settings={value} onSave={save}/>);
+ githubAccounts();const user=userEvent.setup();
+ await user.type(screen.getByLabelText("GitHub owners"),", next-org, ");
+ expect((screen.getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org, next-org, ");
+ fireEvent.change(screen.getByLabelText("API token"),{target:{value:"replacement-fixture"}});
+ fireEvent.click(screen.getByRole("button",{name:"Apply changes"}));
+ fireEvent.click(screen.getByRole("button",{name:"Edit connector Personal"}));
+ fireEvent.change(screen.getByLabelText("Allowed authors"),{target:{value:"alice, worker"}});
+ fireEvent.change(screen.getByLabelText("Allowed reviewers"),{target:{value:""}});
+ fireEvent.click(screen.getByRole("button",{name:"Apply changes"}));
+ fireEvent.click(screen.getByRole("button",{name:"Save changes"}));
+ await waitFor(()=>expect(save).toHaveBeenCalledOnce());
+ const saved=save.mock.calls[0][0] as Settings;
+ expect(saved.source_connectors[0]).toMatchObject({owners:["work-org","next-org"],authors:["worker"],reviewers:[],token:"replacement-fixture",has_token:true});
+ expect(saved.source_connectors[1]).toMatchObject({owners:["alice"],authors:["alice","worker"],reviewers:[],has_token:true});
+ expect(saved.source_connectors[1].token).toBeUndefined();expect(value).toEqual(original);
 });
 
-it("discards each account scope draft and leaves new accounts unscoped", () => {
-  render(<SettingsPage settings={twoAccountSettings()} onSave={vi.fn()} appDir="/app" />);
-  githubAccounts();
-  fireEvent.change(accountFields("Work (@worker)").getByLabelText("GitHub owners"), { target: { value: "other-org, " } });
-  fireEvent.change(accountFields("Personal (@alice)").getByLabelText("Allowed reviewers"), { target: { value: "worker, " } });
-  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
-  expect((accountFields("Work (@worker)").getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org");
-  expect((accountFields("Personal (@alice)").getByLabelText("Allowed reviewers") as HTMLInputElement).value).toBe("alice");
-  fireEvent.click(screen.getByRole("button", { name: "Add account" }));
-  const fresh = accountFields("Account 3");
-  for (const label of ["GitHub owners", "Allowed authors", "Allowed reviewers"]) expect((fresh.getByLabelText(label) as HTMLInputElement).value).toBe("");
+it("discards source scope drafts and leaves new sources unscoped", () => {
+ render(<SourcesPage settings={twoAccountSettings()} onSave={vi.fn()}/>);
+ githubAccounts();fireEvent.change(screen.getByLabelText("GitHub owners"),{target:{value:"other-org, "}});
+ fireEvent.click(screen.getByRole("button",{name:"Apply changes"}));
+ fireEvent.click(screen.getByRole("button",{name:"Discard changes"}));
+ githubAccounts();expect((screen.getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("work-org");
+ fireEvent.click(screen.getByRole("button",{name:"Cancel"}));
+ fireEvent.click(screen.getByRole("button",{name:"Add connector"}));fireEvent.click(screen.getByRole("button",{name:"GitHub Issues"}));
+ for(const label of ["GitHub owners","Allowed authors","Allowed reviewers"]) expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe("");
 });
 
-it("reloads all per-account scope inputs after legacy import", async () => {
-  const imported = twoAccountSettings();
-  imported.token_profiles[0].owners = ["imported-org"];
-  imported.token_profiles[1].authors = ["alice"];
-  vi.mocked(factoryApi.settings).mockResolvedValue(imported);
-  vi.mocked(factoryApi.importLegacy).mockResolvedValue({ runs_imported: 0, settings_imported: true, archive_path: "/archive", warnings: [] });
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
-  fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
-  fireEvent.click(screen.getByRole("button", { name: "Import data" }));
-  const importSuccess = await screen.findByRole("status");
-  expect(importSuccess.textContent).toContain("0 runs imported. Settings imported.");
-  githubAccounts();
-  expect(screen.queryByRole("status")).toBeNull();
-  await waitFor(() => expect((accountFields("Work (@worker)").getByLabelText("GitHub owners") as HTMLInputElement).value).toBe("imported-org"));
-  expect((accountFields("Personal (@alice)").getByLabelText("Allowed authors") as HTMLInputElement).value).toBe("alice");
-  fireEvent.click(screen.getByRole("tab", { name: "General" }));
-  expect(screen.queryByRole("status")).toBeNull();
-  expect(screen.getByText("/archive")).toBeTruthy();
-  expect(screen.getByText("0 runs imported. Settings imported.")).toBeTruthy();
+it("reloads general options after legacy import while retaining the Sources catalogue", async () => {
+ const imported=twoAccountSettings();imported.max_concurrent=7;
+ vi.mocked(factoryApi.settings).mockResolvedValue(imported);
+ vi.mocked(factoryApi.importLegacy).mockResolvedValue({runs_imported:0,settings_imported:true,archive_path:"/archive",warnings:[]});
+ render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app"/>);
+ fireEvent.change(screen.getByLabelText("Previous YAML config"),{target:{value:"/old/config.yaml"}});
+ fireEvent.click(screen.getByRole("button",{name:"Import data"}));
+ await waitFor(()=>expect((screen.getByLabelText("Concurrent tasks") as HTMLInputElement).value).toBe("7"));
+ expect(screen.queryByRole("tab",{name:"GitHub accounts"})).toBeNull();
+ expect(screen.getByText("/archive")).toBeTruthy();
 });
 
 it("does not let an import refresh overwrite a newer settings draft", async () => {
@@ -598,24 +585,26 @@ it("does not let an import refresh overwrite a newer settings draft", async () =
 
 it.each(["GitHub owners", "Allowed authors", "Allowed reviewers"])("rejects malformed logins in per-account %s", async (label) => {
   const save = vi.fn();
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app" />);
+  render(<SourcesPage settings={settings()} onSave={save} />);
   githubAccounts();
-  fireEvent.change(accountFields("Work (@worker)").getByLabelText(label), { target: { value: "valid-login, owner/repo" } });
+  fireEvent.change(within(screen.getByRole("dialog")).getByLabelText(label), { target: { value: "valid-login, owner/repo" } });
+  fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  expect(screen.getByRole("alert").textContent).toMatch(/GitHub login/);
+  expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toMatch(/GitHub login/);
   expect(save).not.toHaveBeenCalled();
 });
 
 it("preserves backend-compatible bot and legacy logins in each account scope", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app" />);
+  render(<SourcesPage settings={settings()} onSave={save} />);
   githubAccounts();
   for (const label of ["GitHub owners", "Allowed authors", "Allowed reviewers"]) {
-    fireEvent.change(accountFields("Work (@worker)").getByLabelText(label), { target: { value: "dependabot[bot], legacy_login.name" } });
+    fireEvent.change(within(screen.getByRole("dialog")).getByLabelText(label), { target: { value: "dependabot[bot], legacy_login.name" } });
   }
+  fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  expect(save.mock.calls[0][0].token_profiles[0]).toMatchObject({
+  expect(save.mock.calls[0][0].source_connectors[0]).toMatchObject({
     owners: ["dependabot[bot]", "legacy_login.name"],
     authors: ["dependabot[bot]", "legacy_login.name"],
     reviewers: ["dependabot[bot]", "legacy_login.name"],

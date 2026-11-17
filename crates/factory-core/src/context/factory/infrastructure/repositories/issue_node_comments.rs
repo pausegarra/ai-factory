@@ -56,6 +56,7 @@ pub(super) fn capture(
         node_name: store.redact_cached(&node.name),
         repository: event.repository,
         number: event.number,
+        origin_token_profile_id: event.origin_token_profile_id,
         actor: event.actor,
         run_attempt: state.attempt,
         revision,

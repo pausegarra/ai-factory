@@ -32,8 +32,8 @@ it("notifications navigation preserves Settings and warns before discarding edit
   await screen.findByRole("heading",{name:"Runs"});expect(factoryApi.saveSettings).not.toHaveBeenCalled();
 });
 it("ignores a live Settings read started before save and accepts a later refresh",async()=>{
-  const profiles=[{id:"work",label:"Work",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}];
-  vi.mocked(factoryApi.settings).mockResolvedValue({...noticeSettings(),token_profiles:profiles,notification_connectors:[newTelegramConnector("a")]});
+  const profiles=[{id:"work",label:"Work",type: "github_issues" as const, account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}];
+  vi.mocked(factoryApi.settings).mockResolvedValue({...noticeSettings(),source_connectors:profiles,notification_connectors:[newTelegramConnector("a")]});
   render(<App />);await screen.findByRole("heading",{name:/Factory overview/});
   fireEvent.click(screen.getByRole("button",{name:"Notifications"}));
   const stale=deferred<Settings>();vi.mocked(factoryApi.settings).mockReturnValueOnce(stale.promise);
@@ -48,7 +48,7 @@ it("ignores a live Settings read started before save and accepts a later refresh
   expect((screen.getByRole("checkbox",{name:"New task"}) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByRole("checkbox",{name:"Work (@alice)"}) as HTMLInputElement).checked).toBe(true);
   expect(vi.mocked(factoryApi.saveSettings).mock.calls[0][0].notification_connectors![0].config).toMatchObject({triggers:["pr_approved","pr_review","release"],token_profile_ids:["work"]});
-  cancelConnector(); const latest={...noticeSettings(),token_profiles:profiles,notification_connectors:[{...newTelegramConnector("a"),label:"Later refresh"}]};
+  cancelConnector(); const latest={...noticeSettings(),source_connectors:profiles,notification_connectors:[{...newTelegramConnector("a"),label:"Later refresh"}]};
   vi.mocked(factoryApi.settings).mockResolvedValue(latest);
   act(()=>mock.listener?.({kind:"settings_changed",timestamp:"later"}));
   await screen.findByRole("button",{name:"Edit connector Later refresh"}); openConnector("Later refresh");

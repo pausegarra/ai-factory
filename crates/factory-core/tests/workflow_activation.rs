@@ -4,9 +4,9 @@ use serde_json::json;
 
 fn configured() -> Settings {
     let mut value = serde_json::to_value(Settings::default()).unwrap();
-    value["token_profiles"] = json!([
-        {"id":"work","label":"Work","account":"alice","token":"fixture-a"},
-        {"id":"personal","label":"Personal","account":"bob","token":"fixture-b"}
+    value["source_connectors"] = json!([
+        {"owners":["acme"],"authors":["alice"],"reviewers":["alice"],"id":"work","label":"Work","type":"github_issues","account":"alice","token":"fixture-a"},
+        {"owners":["acme"],"authors":["bob"],"reviewers":["bob"],"id":"personal","label":"Personal","type":"github_issues","account":"bob","token":"fixture-b"}
     ]);
     for flow in value["flows"].as_array_mut().unwrap() {
         flow["profile_activation"] = json!({"work":false});
@@ -29,11 +29,15 @@ fn activation_profiles_are_independent_for_all_triggers() {
     let factory = common::open(dir.path().into()).unwrap();
     factory.save_settings(configured()).unwrap();
     for trigger in ["new_issue", "pr_approved", "pr_review"] {
-        let mut event = TriggerEvent::issue("acme/repo", 11, "[AI] fixture", "ALICE", "");
+        let mut event = common::from_source(
+            TriggerEvent::issue("acme/repo", 11, "[AI] fixture", "ALICE", ""),
+            "work",
+        );
         event.trigger_id = trigger.into();
         event.event_id = format!("{trigger}:alice");
         assert!(factory.enqueue(event.clone()).unwrap().is_none());
         event.actor = "bob".into();
+        event.origin_token_profile_id = Some("personal".into());
         event.event_id = format!("{trigger}:bob");
         assert!(factory.enqueue(event).unwrap().is_some());
     }
@@ -56,24 +60,24 @@ fn activation_precedence_defaults_validation_and_stable_ids() {
                 ActivationState::Enabled
             };
             assert_eq!(
-                s.flows[0].activation_for("ALICE", &s.token_profiles),
+                s.flows[0].activation_for_source("work", &s.source_connectors),
                 expected
             );
         }
     }
     s.flows[0].profile_activation.clear();
     assert_eq!(
-        s.flows[0].activation_for("alice", &s.token_profiles),
+        s.flows[0].activation_for_source("work", &s.source_connectors),
         ActivationState::Enabled
     );
     s.flows[0]
         .profile_activation
         .insert("removed".into(), false);
     assert_eq!(
-        s.flows[0].activation_for("carol", &s.token_profiles),
-        ActivationState::Enabled
+        s.flows[0].activation_for_source("carol", &s.source_connectors),
+        ActivationState::UnavailableSource
     );
-    assert!(s.token_for("carol").is_err());
+    assert!(s.source_by_id("carol").is_none());
     for invalid in [
         json!(null),
         json!([]),
@@ -100,11 +104,11 @@ fn activation_precedence_defaults_validation_and_stable_ids() {
     value["flows"][0]["enabled"] = json!(false);
     let old: Settings = serde_json::from_value(value).unwrap();
     assert_eq!(
-        old.flows[0].activation_for("alice", &old.token_profiles),
+        old.flows[0].activation_for_source("work", &old.source_connectors),
         ActivationState::DisabledGlobally
     );
     assert_eq!(
-        old.flows[1].activation_for("alice", &old.token_profiles),
+        old.flows[1].activation_for_source("work", &old.source_connectors),
         ActivationState::Enabled
     );
 }
@@ -116,7 +120,10 @@ fn retry_and_save_failures_preserve_history_and_current_configuration() {
     let mut s = configured();
     s.flows[0].profile_activation.clear();
     f.save_settings(s).unwrap();
-    let event = TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "ALICE", "");
+    let event = common::from_source(
+        TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "ALICE", ""),
+        "work",
+    );
     let id = f.enqueue(event.clone()).unwrap().unwrap();
     let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
     let raw: String = db
@@ -140,7 +147,7 @@ fn retry_and_save_failures_preserve_history_and_current_configuration() {
         let error = f.retry(&id).unwrap_err().to_string();
         assert!(error.contains("new_issue") && error.contains("ALICE"));
         assert!(error.contains(if global {
-            "disabled for this account"
+            "disabled for this source"
         } else {
             "disabled globally"
         }));
@@ -154,7 +161,10 @@ fn retry_and_save_failures_preserve_history_and_current_configuration() {
     let mut next = f.settings().unwrap();
     next.flows[0].profile_activation.clear();
     assert!(f.save_settings(next.clone()).is_err());
-    let other = TriggerEvent::issue("acme/repo", 2, "[AI] another", "alice", "");
+    let other = common::from_source(
+        TriggerEvent::issue("acme/repo", 2, "[AI] another", "alice", ""),
+        "work",
+    );
     assert!(f.enqueue(other).unwrap().is_none());
     db.execute_batch("DROP TRIGGER deny_settings").unwrap();
     next.flows[0].nodes[0].token_overrides.insert(
@@ -198,21 +208,22 @@ fn activation_profile_lifecycle_and_restart_use_id_not_label_or_secret() {
     let f = common::open(dir.path().into()).unwrap();
     f.save_settings(configured()).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles[0].label = "Renamed".into();
-    s.token_profiles[0].token = Some("rotated-fixture".into());
+    s.source_connectors[0].label = "Renamed".into();
+    s.source_connectors[0].token = Some("rotated-fixture".into());
     f.save_settings(s).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles[0].account = "carol".into();
-    s.token_profiles[0].token = Some("replacement-fixture".into());
+    s.source_connectors[0].account = "carol".into();
+    s.source_connectors[0].token = Some("replacement-fixture".into());
     f.save_settings(s).unwrap();
     assert_eq!(
         f.settings().unwrap().flows[0]
-            .activation_for("CAROL", &f.settings().unwrap().token_profiles),
+            .activation_for_source("work", &f.settings().unwrap().source_connectors),
         ActivationState::DisabledForProfile
     );
     let mut s = f.settings().unwrap();
-    s.token_profiles.remove(0);
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.remove(0);
+    s.source_connectors.push(SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "new-id".into(),
         label: "New".into(),
         account: "alice".into(),
@@ -228,7 +239,11 @@ fn activation_profile_lifecycle_and_restart_use_id_not_label_or_secret() {
     let s = f.settings().unwrap();
     assert_eq!(s.flows[0].profile_activation.get("work"), Some(&false));
     assert_eq!(
-        s.flows[0].activation_for("alice", &s.token_profiles),
+        s.flows[0].activation_for_source("work", &s.source_connectors),
+        ActivationState::UnavailableSource
+    );
+    assert_eq!(
+        s.flows[0].activation_for_source("new-id", &s.source_connectors),
         ActivationState::Enabled
     );
     assert!(backend.gets.lock().unwrap().is_empty());

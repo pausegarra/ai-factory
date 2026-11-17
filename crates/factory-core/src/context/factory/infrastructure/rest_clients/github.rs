@@ -326,7 +326,7 @@ impl Github {
                 factory,
                 workspace,
                 &["branch", "--show-current"],
-                Some(&event.actor),
+                Some(&factory.store.public_settings()?.source_for_event(event)?.id),
             )
             .await?;
             ensure!(
@@ -337,7 +337,7 @@ impl Github {
                 factory,
                 workspace,
                 &["rev-parse", "HEAD"],
-                Some(&event.actor),
+                Some(&factory.store.public_settings()?.source_for_event(event)?.id),
             )
             .await?;
             let body = p["body"].as_str().unwrap();
@@ -365,7 +365,7 @@ impl Github {
                     factory,
                     workspace,
                     &["push", "origin", &format!("HEAD:refs/heads/{branch}")],
-                    Some(&event.actor),
+                    Some(&factory.store.public_settings()?.source_for_event(event)?.id),
                 )
                 .await?;
                 check_active()?;

@@ -60,7 +60,7 @@ it.each(["Telegram", "Google Chat"] as const)("transfers focus once from picker 
 
 it("disables every editor control and ignores Escape while busy", async () => {
   const user = userEvent.setup(), cancel = vi.fn(), apply = vi.fn(), remove = vi.fn();
-  render(<NotificationConnectorDialog id="busy-editor" connector={newGoogleChatConnector("a")} profiles={[]} mode="existing" attempted={false} busy
+  render(<NotificationConnectorDialog id="busy-editor" connector={newGoogleChatConnector("a")} sources={[]} mode="existing" attempted={false} busy
     onChange={vi.fn()} onCancel={cancel} onApply={apply} onRemove={remove} returnFocus={() => null} />);
   for (const control of screen.getByRole("dialog").querySelectorAll("button, input, select")) expect(control.matches(":disabled")).toBe(true);
   fireEvent.keyDown(screen.getByRole("dialog"), {key: "Escape"}); await user.click(screen.getByRole("button", {name: "Cancel"}));

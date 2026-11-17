@@ -12,6 +12,7 @@ pub(crate) struct TrackedPrOrigin {
     pub issue_repository: String,
     pub issue_number: u64,
     pub actor: String,
+    pub source_connector_id: Option<String>,
 }
 
 fn trusted_event(repo: &str, event: &TriggerEvent) -> bool {
@@ -46,10 +47,16 @@ fn project_number(
     let event = event.filter(|_| valid);
     tx.execute(
         // Conflict evidence can revoke trust but later imports cannot restore it.
-        "INSERT INTO tracked_pr_origins VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+        "INSERT INTO tracked_pr_origins(repository,number,origin_key,event_id,issue_repository,issue_number,actor,trigger_id,trusted,source_connector_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
          ON CONFLICT(repository,number,origin_key) DO UPDATE SET
-         event_id=NULL,issue_repository=NULL,issue_number=NULL,actor=NULL,trigger_id=NULL,trusted=0
-         WHERE excluded.trusted=0",
+         event_id=NULL,issue_repository=NULL,issue_number=NULL,actor=NULL,trigger_id=NULL,source_connector_id=NULL,trusted=0
+         WHERE excluded.trusted=0
+         OR tracked_pr_origins.source_connector_id IS NOT excluded.source_connector_id
+         OR tracked_pr_origins.event_id IS NOT excluded.event_id
+         OR tracked_pr_origins.issue_repository IS NOT excluded.issue_repository
+         OR tracked_pr_origins.issue_number IS NOT excluded.issue_number
+         OR tracked_pr_origins.actor IS NOT excluded.actor
+         OR tracked_pr_origins.trigger_id IS NOT excluded.trigger_id",
         params![
             repo.to_lowercase(),
             number,
@@ -59,7 +66,8 @@ fn project_number(
             event.map(|e| i64::try_from(e.number)).transpose()?,
             event.map(|e| e.actor.to_lowercase()),
             event.map(|e| e.trigger_id.as_str()),
-            valid
+            valid,
+            event.and_then(|e| e.origin_token_profile_id.as_deref())
         ],
     )?;
     Ok(())
@@ -159,7 +167,7 @@ impl Store {
     }
     pub(crate) fn tracked_prs(&self) -> Result<Vec<TrackedPrOrigin>> {
         let db = self.db.lock().unwrap();
-        let mut q=db.prepare("SELECT repository,number,event_id,issue_repository,issue_number,actor FROM tracked_pr_origins GROUP BY repository,number HAVING MIN(trusted)=1 AND COUNT(DISTINCT json_array(event_id,issue_repository,issue_number,actor,trigger_id))=1 AND COUNT(event_id)=COUNT(*) AND COUNT(issue_repository)=COUNT(*) AND COUNT(issue_number)=COUNT(*) AND COUNT(actor)=COUNT(*) AND MIN(trigger_id)='new_issue'")?;
+        let mut q=db.prepare("SELECT repository,number,event_id,issue_repository,issue_number,actor,source_connector_id FROM tracked_pr_origins GROUP BY repository,number HAVING MIN(trusted)=1 AND COUNT(DISTINCT json_array(event_id,issue_repository,issue_number,actor,trigger_id,source_connector_id))=1 AND COUNT(event_id)=COUNT(*) AND COUNT(issue_repository)=COUNT(*) AND COUNT(issue_number)=COUNT(*) AND COUNT(actor)=COUNT(*) AND MIN(trigger_id)='new_issue'")?;
         let rows = q.query_map([], |r| {
             Ok(TrackedPrOrigin {
                 repository: r.get(0)?,
@@ -174,6 +182,7 @@ impl Store {
                     .try_into()
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 actor: r.get(5)?,
+                source_connector_id: r.get(6)?,
             })
         })?;
         let origins = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -381,6 +390,42 @@ mod tests {
         assert!(store
             .record_action_receipt("action:bad", &serde_json::json!({}))
             .is_err());
+        Ok(())
+    }
+    #[test]
+    fn source_origin_survives_deletion_and_conflicting_source_revokes_trust() -> Result<()> {
+        for conflict in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let store = Store::open(dir.path())?;
+            let mut event = TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "alice", "");
+            event.origin_token_profile_id = Some("src-a".into());
+            let id = store
+                .insert(&event, &Settings::default().flows[0], 1, true)?
+                .unwrap();
+            store.track_pr("acme/repo", 5, &id)?;
+            assert_eq!(
+                store.tracked_prs()?[0].source_connector_id.as_deref(),
+                Some("src-a")
+            );
+            if conflict {
+                event.origin_token_profile_id = Some("src-b".into());
+                store.db.lock().unwrap().execute(
+                    "UPDATE runs SET event=?1 WHERE id=?2",
+                    params![serde_json::to_string(&event)?, id],
+                )?;
+                store.track_pr("acme/repo", 5, &id)?;
+                assert!(store.tracked_prs()?.is_empty());
+            }
+            store.db.lock().unwrap().execute("DELETE FROM runs", [])?;
+            drop(store);
+            let reopened = Store::open(dir.path())?;
+            let origins = reopened.tracked_prs()?;
+            if conflict {
+                assert!(origins.is_empty());
+            } else {
+                assert_eq!(origins[0].source_connector_id.as_deref(), Some("src-a"));
+            }
+        }
         Ok(())
     }
 }

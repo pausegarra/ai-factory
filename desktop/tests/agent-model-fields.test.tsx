@@ -70,9 +70,9 @@ it("refreshes catalogs when GitHub profile changes and ignores the previous acco
   vi.mocked(factoryApi.agentModels)
     .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
     .mockResolvedValue([{ id: "personal-model", name: "Personal model", efforts: [] }]);
-  const view = render(<AgentModelFields node={node} command="codex" tokenProfileId="work" onChange={vi.fn()} />);
+  const view = render(<AgentModelFields node={node} command="codex" sourceConnectorId="work" onChange={vi.fn()} />);
   expect(factoryApi.agentModels).toHaveBeenLastCalledWith("codex", "work");
-  view.rerender(<AgentModelFields node={node} command="codex" tokenProfileId="personal" onChange={vi.fn()} />);
+  view.rerender(<AgentModelFields node={node} command="codex" sourceConnectorId="personal" onChange={vi.fn()} />);
   await screen.findByRole("option", { name: "Personal model" });
   expect(factoryApi.agentModels).toHaveBeenLastCalledWith("codex", "personal");
   await act(async () => finish([{ id: "work-model", name: "Work model", efforts: [] }]));
@@ -85,8 +85,8 @@ it("refreshes catalogs when GitHub profile changes and ignores the previous acco
 it("loads each GitHub override with its own profile scope", async () => {
   const { TokenAgentFields } = await import("../src/context/factory/infrastructure/presentations/token-agent-fields");
   vi.mocked(factoryApi.agentModels).mockResolvedValue([]);
-  const profile = { label: "Work", account: "worker", has_token: true, owners: [], authors: [], reviewers: [] };
-  render(<TokenAgentFields node={{ ...node, token_overrides: { work: { agent: "codex", model: "", effort: "" }, personal: { agent: "codex", model: "", effort: "" } } }} profiles={[{ ...profile, id: "work" }, { ...profile, id: "personal" }]} commands={{ codex: "codex", opencode: "opencode", git: "git" }} onChange={vi.fn()} />);
+  const profile = { label: "Work", type: "github_issues" as const, account: "worker", has_token: true, owners: [], authors: [], reviewers: [] };
+  render(<TokenAgentFields node={{ ...node, token_overrides: { work: { agent: "codex", model: "", effort: "" }, personal: { agent: "codex", model: "", effort: "" } } }} sources={[{ ...profile, id: "work" }, { ...profile, id: "personal" }]} commands={{ codex: "codex", opencode: "opencode", git: "git" }} onChange={vi.fn()} />);
   expect(factoryApi.agentModels).toHaveBeenCalledWith("codex", "work");
   expect(factoryApi.agentModels).toHaveBeenCalledWith("codex", "personal");
   await act(async () => {});
@@ -97,8 +97,8 @@ it("invalidates a profile catalog after rebinding to another Codex account", asy
   vi.mocked(factoryApi.agentModels)
     .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
     .mockResolvedValue([{ id: "account-b-model", name: "Account B model", efforts: [] }]);
-  const view = render(<AgentModelFields node={node} command="codex" tokenProfileId="work" boundAccountId="account-a" onChange={vi.fn()} />);
-  view.rerender(<AgentModelFields node={node} command="codex" tokenProfileId="work" boundAccountId="account-b" onChange={vi.fn()} />);
+  const view = render(<AgentModelFields node={node} command="codex" sourceConnectorId="work" boundAccountId="account-a" onChange={vi.fn()} />);
+  view.rerender(<AgentModelFields node={node} command="codex" sourceConnectorId="work" boundAccountId="account-b" onChange={vi.fn()} />);
   await screen.findByRole("option", { name: "Account B model" });
   expect(factoryApi.agentModels).toHaveBeenCalledTimes(2);
   expect(factoryApi.agentModels).toHaveBeenLastCalledWith("codex", "work");

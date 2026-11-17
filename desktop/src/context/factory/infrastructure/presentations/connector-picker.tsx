@@ -1,24 +1,26 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Plus } from "@phosphor-icons/react";
 import { NotificationConnectorIcon } from "./notification-connector-icon";
 
 export type ConnectorKind = "telegram" | "google_chat";
-type ConnectorPickerProps = {
+export type ConfiguredConnectorPickerProps<K extends string> = {
   disabled: boolean;
   buttonRef: RefObject<HTMLButtonElement | null>;
-  onSelect: (kind: ConnectorKind) => void;
+  onSelect: (kind: K) => void;
+  options: readonly {kind: K; label: string; icon: ReactNode}[];
 };
 const providers: ReadonlyArray<{ kind: ConnectorKind; label: string }> = [
   { kind: "telegram", label: "Telegram" },
   { kind: "google_chat", label: "Google Chat" },
 ];
 
-function ConnectorPickerDialog({ id, buttonRef, onCancel, onSelect }: {
+function ConnectorPickerDialog<K extends string>({ id, buttonRef, onCancel, onSelect, options }: {
   id: string;
-  buttonRef: ConnectorPickerProps["buttonRef"];
+  buttonRef: ConfiguredConnectorPickerProps<K>["buttonRef"];
   onCancel: () => void;
-  onSelect: ConnectorPickerProps["onSelect"];
+  options: ConfiguredConnectorPickerProps<K>["options"];
+  onSelect: ConfiguredConnectorPickerProps<K>["onSelect"];
 }) {
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
@@ -44,7 +46,7 @@ function ConnectorPickerDialog({ id, buttonRef, onCancel, onSelect }: {
       });
     };
   }, [buttonRef]);
-  function select(kind: ConnectorKind) {
+  function select(kind: K) {
     if (selecting.current) return;
     selecting.current = true;
     // The configuration dialog takes focus after selection.
@@ -68,9 +70,9 @@ function ConnectorPickerDialog({ id, buttonRef, onCancel, onSelect }: {
           aria-label="Close connector selector" onClick={onCancel}>Close</button>
       </div>
       <div className="connector-picker-options">
-        {providers.map(provider => <button key={provider.kind} type="button" className="connector-picker-option"
+        {options.map(provider => <button key={provider.kind} type="button" className="connector-picker-option"
           onClick={() => select(provider.kind)}>
-          <NotificationConnectorIcon type={provider.kind} />
+          {provider.icon}
           <span>{provider.label}</span>
         </button>)}
       </div>
@@ -78,7 +80,7 @@ function ConnectorPickerDialog({ id, buttonRef, onCancel, onSelect }: {
   </div>, document.body);
 }
 
-export function ConnectorPicker({ disabled, buttonRef, onSelect }: ConnectorPickerProps) {
+export function ConfiguredConnectorPicker<K extends string>({ disabled, buttonRef, onSelect, options }: ConfiguredConnectorPickerProps<K>) {
   const [open, setOpen] = useState(false);
   const id = useId();
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
@@ -88,7 +90,11 @@ export function ConnectorPicker({ disabled, buttonRef, onSelect }: ConnectorPick
       onClick={() => { if (!disabled) setOpen(true); }}>
       <Plus size={16} aria-hidden="true" />Add connector
     </button>
-    {open && !disabled && <ConnectorPickerDialog id={id} buttonRef={buttonRef} onCancel={() => setOpen(false)}
+    {open && !disabled && <ConnectorPickerDialog options={options} id={id} buttonRef={buttonRef} onCancel={() => setOpen(false)}
       onSelect={kind => { if (disabled) return; setOpen(false); onSelect(kind); }} />}
   </div>;
+}
+
+export function ConnectorPicker(props: Omit<ConfiguredConnectorPickerProps<ConnectorKind>, "options">) {
+  return <ConfiguredConnectorPicker {...props} options={providers.map(p => ({...p, icon:<NotificationConnectorIcon type={p.kind} />}))} />;
 }

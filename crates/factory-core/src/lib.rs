@@ -11,6 +11,7 @@ pub mod context {
                 pub mod notification_connector;
                 pub mod run_deletion;
                 pub(crate) mod run_transition;
+                pub mod source_connector;
             }
         }
         pub mod application {
@@ -106,3 +107,5 @@ pub use context::factory::application::dto::connector_notification::Notification
 pub use context::factory::application::interfaces::notification_transport::{
     DeliveryFailure, NotificationTransport,
 };
+
+pub use context::factory::domain::entities::source_connector::*;

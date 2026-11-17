@@ -309,7 +309,11 @@ async fn removing_account_clears_only_its_bindings_and_preserves_github_credenti
         ("first", "octocat", &first.account.id),
         ("second", "hubot", &second.account.id),
     ] {
-        settings.token_profiles.push(TokenProfile {
+        settings.source_connectors.push(SourceConnector {
+            owners: vec!["acme".into()],
+            authors: vec![account.into()],
+            reviewers: vec![account.into()],
+            kind: factory_core::SourceKind::GithubIssues,
             id: id.into(),
             label: id.into(),
             account: account.into(),
@@ -327,7 +331,7 @@ async fn removing_account_clears_only_its_bindings_and_preserves_github_credenti
     assert_eq!(settings.codex_bindings.len(), 1);
     assert_eq!(settings.codex_bindings["second"], second.account.id);
     assert!(settings
-        .token_profiles
+        .source_connectors
         .iter()
         .all(|profile| profile.has_token && profile.token.is_none()));
     assert_eq!(factory.agent_accounts().unwrap().len(), 1);
@@ -340,7 +344,13 @@ async fn pending_or_missing_accounts_cannot_be_bound_to_github_profiles() {
     let (_dir, factory) = fixture("pending");
     let login = factory.start_codex_login("Pending".into()).await.unwrap();
     let mut settings = factory.settings().unwrap();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        label: "Fixture source".into(),
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["octocat".into()],
+        reviewers: vec!["octocat".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         account: "octocat".into(),
         ..Default::default()
@@ -408,7 +418,13 @@ async fn removing_account_without_managed_home_clears_metadata_and_bindings() {
             .unwrap();
         terminal(&factory, &login.account.id).await;
         let mut settings = factory.settings().unwrap();
-        settings.token_profiles.push(TokenProfile {
+        settings.source_connectors.push(SourceConnector {
+            label: "Fixture source".into(),
+            token: Some("fixture-source-only".into()),
+            owners: vec!["acme".into()],
+            authors: vec!["octocat".into()],
+            reviewers: vec!["octocat".into()],
+            kind: factory_core::SourceKind::GithubIssues,
             id: "work".into(),
             account: "octocat".into(),
             ..Default::default()

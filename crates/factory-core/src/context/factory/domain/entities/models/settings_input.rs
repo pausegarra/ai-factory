@@ -1,17 +1,14 @@
-use super::{Commands, Flow, Project, Settings, TokenProfile};
-use serde::{Deserialize, Deserializer};
+use super::super::source_connector::SourceConnector;
+use super::{Commands, Flow, Project, Settings};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 
-// Legacy lists are accepted only at this input boundary. Canonical settings
-// always serialize scopes on each profile, including explicit empty lists.
+// Legacy GitHub configuration is deliberately ignored.
 #[derive(Deserialize)]
 #[serde(default)]
 pub(super) struct SettingsInput {
     notification_connectors: Vec<serde_json::Value>,
-    owners: Vec<String>,
-    authors: Vec<String>,
-    reviewers: Vec<String>,
-    token_profiles: Vec<TokenProfileInput>,
+    source_connectors: Vec<SourceConnector>,
     codex_bindings: BTreeMap<String, String>,
     projects: Vec<Project>,
     commands: Commands,
@@ -24,34 +21,12 @@ pub(super) struct SettingsInput {
     flows: Vec<Flow>,
 }
 
-#[derive(Deserialize)]
-struct TokenProfileInput {
-    #[serde(flatten)]
-    profile: TokenProfile,
-    #[serde(default, deserialize_with = "present_scope")]
-    owners: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "present_scope")]
-    authors: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "present_scope")]
-    reviewers: Option<Vec<String>>,
-}
-
-fn present_scope<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Vec<String>>, D::Error> {
-    // Missing fields may inherit legacy values; explicit null is invalid input.
-    Vec::<String>::deserialize(deserializer).map(Some)
-}
-
 impl Default for SettingsInput {
     fn default() -> Self {
         let defaults = Settings::default();
         Self {
-            owners: vec![],
-            authors: vec![],
-            reviewers: vec![],
             notification_connectors: vec![],
-            token_profiles: vec![],
+            source_connectors: vec![],
             codex_bindings: defaults.codex_bindings,
             projects: defaults.projects,
             commands: defaults.commands,
@@ -70,24 +45,15 @@ impl TryFrom<SettingsInput> for Settings {
     type Error = anyhow::Error;
 
     fn try_from(input: SettingsInput) -> Result<Self, Self::Error> {
-        let token_profiles: Vec<TokenProfile> = input
-            .token_profiles
-            .into_iter()
-            .map(|token| {
-                let mut profile = token.profile;
-                profile.apply_legacy_scope(&input.owners, &input.authors, &input.reviewers);
-                if let Some(owners) = token.owners {
-                    profile.owners = owners;
-                }
-                if let Some(authors) = token.authors {
-                    profile.authors = authors;
-                }
-                if let Some(reviewers) = token.reviewers {
-                    profile.reviewers = reviewers;
-                }
-                profile
-            })
-            .collect();
+        let source_connectors = input.source_connectors;
+        let mut ids = std::collections::HashSet::new();
+        for source in &source_connectors {
+            source.validate()?;
+            anyhow::ensure!(
+                ids.insert(&source.id),
+                "Source connector IDs must be unique"
+            );
+        }
         let mut flows = input.flows;
         let legacy_ids = ["new_issue", "pr_approved", "pr_review"];
         if flows.len() == legacy_ids.len()
@@ -104,11 +70,8 @@ impl TryFrom<SettingsInput> for Settings {
             );
         }
         let settings = Self {
-            notification_connectors: decode_notification_connectors(
-                input.notification_connectors,
-                &token_profiles,
-            )?,
-            token_profiles,
+            notification_connectors: decode_notification_connectors(input.notification_connectors)?,
+            source_connectors,
             codex_bindings: input.codex_bindings,
             projects: input.projects,
             commands: input.commands,
@@ -128,7 +91,6 @@ impl TryFrom<SettingsInput> for Settings {
 // Only missing legacy Telegram fields inherit defaults, never explicit empty lists.
 fn decode_notification_connectors(
     mut connectors: Vec<serde_json::Value>,
-    profiles: &[TokenProfile],
 ) -> anyhow::Result<Vec<crate::NotificationConnector>> {
     use crate::context::factory::domain::entities::notification_connector::NOTIFICATION_TRIGGER_IDS;
     for connector in &mut connectors {
@@ -146,10 +108,7 @@ fn decode_notification_connectors(
                 );
             }
             if !config.contains_key("token_profile_ids") {
-                config.insert(
-                    "token_profile_ids".into(),
-                    serde_json::json!(profiles.iter().map(|p| &p.id).collect::<Vec<_>>()),
-                );
+                config.insert("token_profile_ids".into(), serde_json::json!([]));
             }
         }
     }

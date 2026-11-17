@@ -1,4 +1,4 @@
-import type { GitHubNotificationFilters, NotificationConnector, NotificationEvent, TelegramNotificationConnector, GoogleChatNotificationConnector, TokenProfile, Trigger } from "./types";
+import type { GitHubNotificationFilters, NotificationConnector, NotificationEvent, TelegramNotificationConnector, GoogleChatNotificationConnector, SourceConnector, Trigger } from "./types";
 import { TRIGGERS } from "./types";
 export const notificationEvents: {id: NotificationEvent; label: string}[] = [
   {id: "run_started", label: "Run started"},
@@ -38,16 +38,16 @@ export function validWebhookUrl(raw: string): boolean {
     return /^https:\/\//i.test(value) && url.protocol === "https:" && !!url.hostname && !url.username && !url.password && !value.includes("#") && !value.slice(value.indexOf("://") + 3).split(/[/?]/)[0].includes("@");
   } catch { return false; }
 }
-function validateFilters(c: TelegramNotificationConnector | GoogleChatNotificationConnector, profiles: TokenProfile[], prefix: string, errors: string[]): void {
+function validateFilters(c: TelegramNotificationConnector | GoogleChatNotificationConnector, sources: SourceConnector[], prefix: string, errors: string[]): void {
   if (new Set(c.config.triggers).size !== c.config.triggers.length || c.config.triggers.some(t => !Object.prototype.hasOwnProperty.call(TRIGGERS, t))) errors.push(prefix + "Invalid GitHub triggers.");
-  if (new Set(c.config.token_profile_ids).size !== c.config.token_profile_ids.length || c.config.token_profile_ids.some(id => !/^[a-zA-Z0-9_.-]{1,128}$/.test(id) || id === "." || id === "..")) errors.push(prefix + "Invalid GitHub profiles.");
+  if (new Set(c.config.token_profile_ids).size !== c.config.token_profile_ids.length || c.config.token_profile_ids.some(id => !/^[a-zA-Z0-9_.-]{1,128}$/.test(id) || id === "." || id === "..")) errors.push(prefix + "Invalid GitHub sources.");
   if (c.enabled) {
     if (!c.events.length) errors.push(prefix + "Select at least one run event.");
     if (!c.config.triggers.length) errors.push(prefix + "Select at least one GitHub trigger.");
-    if (!c.config.token_profile_ids.length || c.config.token_profile_ids.some(id => !profiles.some(p => p.id === id))) errors.push(prefix + "Select available GitHub profiles.");
+    if (!c.config.token_profile_ids.length || c.config.token_profile_ids.some(id => !sources.some(p => p.id === id))) errors.push(prefix + "Select available GitHub sources.");
   }
 }
-export function validateNotificationConnectors(connectors: NotificationConnector[], profiles: TokenProfile[] = []): string[] {
+export function validateNotificationConnectors(connectors: NotificationConnector[], sources: SourceConnector[] = []): string[] {
   const errors: string[] = [];
   const ids = new Set<string>();
   connectors.forEach((c, index) => {
@@ -60,7 +60,7 @@ export function validateNotificationConnectors(connectors: NotificationConnector
       if (!isGoogleChatConnector(c)) { errors.push(prefix + "Invalid Google Chat configuration."); return; }
       const url = c.config.webhook_url?.trim();
       if (url && !validWebhookUrl(c.config.webhook_url ?? "")) errors.push(prefix + "Enter a valid HTTPS webhook URL without credentials or a fragment.");
-      validateFilters(c, profiles, prefix, errors);
+      validateFilters(c, sources, prefix, errors);
       if (c.enabled && !url && !c.config.has_webhook_url) errors.push(prefix + "Webhook URL is required.");
     }
     if (c.type === "telegram") {
@@ -69,7 +69,7 @@ export function validateNotificationConnectors(connectors: NotificationConnector
         if (!c.config.chat_id.trim()) errors.push(prefix + "Chat ID is required.");
         if (!c.config.has_token && !c.config.bot_token?.trim()) errors.push(prefix + "Bot token is required.");
       }
-      validateFilters(c, profiles, prefix, errors);
+      validateFilters(c, sources, prefix, errors);
     }
   });
   return errors;

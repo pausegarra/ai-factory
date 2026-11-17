@@ -8,20 +8,21 @@ impl Github {
         let settings = factory.store.public_settings()?;
         let origins = factory.store.tracked_prs()?;
         let mut failures = vec![];
-        for profile in &settings.token_profiles {
+        for profile in &settings.source_connectors {
             let actor = &profile.account;
             let issue = profile.allows_actor("new_issue")
-                && factory.workflow_enabled_for("new_issue", actor)?;
+                && factory.workflow_enabled_for("new_issue", &profile.id)?;
             let release = profile.allows_actor("release")
-                && factory.workflow_enabled_for("release", actor)?;
+                && factory.workflow_enabled_for("release", &profile.id)?;
             let approval = profile.allows_actor("pr_approved")
-                && factory.workflow_enabled_for("pr_approved", actor)?;
+                && factory.workflow_enabled_for("pr_approved", &profile.id)?;
             let review = profile.allows_actor("pr_review")
-                && factory.workflow_enabled_for("pr_review", actor)?;
+                && factory.workflow_enabled_for("pr_review", &profile.id)?;
             let tracked: Vec<_> = origins
                 .iter()
                 .filter(|origin| {
-                    origin.actor.eq_ignore_ascii_case(actor)
+                    origin.source_connector_id.as_deref() == Some(profile.id.as_str())
+                        && origin.actor.eq_ignore_ascii_case(actor)
                         && profile.allows_owner(origin.repository.split('/').next().unwrap_or(""))
                 })
                 .collect();
@@ -32,7 +33,7 @@ impl Github {
             }
             let api = match async {
                 let api = factory
-                    .github(&factory.store.token_for(actor).await?)?
+                    .github(&factory.store.token_for_source(&profile.id).await?)?
                     .for_polling();
                 api.verify_poll_actor(actor).await?;
                 Ok::<_, anyhow::Error>(api)
@@ -70,7 +71,7 @@ impl Github {
 
     // Legacy search accepts at most five Boolean operators. Keep large owner
     // configurations bounded without broadening any token's authorized scope.
-    async fn scoped_search(&self, profile: &TokenProfile, query: &str) -> Result<Vec<Value>> {
+    async fn scoped_search(&self, profile: &SourceConnector, query: &str) -> Result<Vec<Value>> {
         let mut rows = vec![];
         let mut seen = HashSet::new();
         let mut owners = profile.owners.clone();
@@ -104,12 +105,12 @@ impl Github {
         Ok(rows)
     }
 
-    async fn poll_issues(&self, factory: &Factory, profile: &TokenProfile) -> Result<()> {
+    async fn poll_issues(&self, factory: &Factory, profile: &SourceConnector) -> Result<()> {
         let actor = &profile.account;
         let active: Vec<&str> = ["new_issue", "release"]
             .into_iter()
             .filter(|id| profile.allows_actor(id))
-            .map(|id| Ok((id, factory.workflow_enabled_for(id, actor)?)))
+            .map(|id| Ok((id, factory.workflow_enabled_for(id, &profile.id)?)))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .filter_map(|(id, enabled)| enabled.then_some(id))
@@ -144,7 +145,7 @@ impl Github {
                     TriggerEvent::issue(&repo, n, "", actor, "")
                 };
                 if !factory.store.event_consumed(&event.event_id)?
-                    && factory.workflow_enabled_for(trigger, actor)?
+                    && factory.workflow_enabled_for(trigger, &profile.id)?
                 {
                     pending.push(trigger);
                 }
@@ -190,7 +191,7 @@ impl Github {
     async fn poll_approvals(
         &self,
         factory: &Factory,
-        profile: &TokenProfile,
+        profile: &SourceConnector,
         tracked: &[&TrackedPrOrigin],
     ) -> Result<()> {
         let actor = &profile.account;
@@ -224,9 +225,9 @@ impl Github {
         &self,
         factory: &Factory,
         origin: &TrackedPrOrigin,
-        profile: &TokenProfile,
+        profile: &SourceConnector,
     ) -> Result<()> {
-        if !factory.workflow_enabled_for("pr_approved", &origin.actor)? {
+        if !factory.workflow_enabled_for("pr_approved", &profile.id)? {
             return Ok(());
         }
         let repo = &origin.repository;
@@ -306,7 +307,7 @@ impl Github {
         Ok(())
     }
 
-    async fn poll_reviews(&self, factory: &Factory, profile: &TokenProfile) -> Result<()> {
+    async fn poll_reviews(&self, factory: &Factory, profile: &SourceConnector) -> Result<()> {
         let reviewer = &profile.account;
         let rows = self
             .scoped_search(
@@ -316,7 +317,7 @@ impl Github {
             .await?;
         let mut candidates = vec![];
         for row in rows {
-            if !factory.workflow_enabled_for("pr_review", reviewer)? {
+            if !factory.workflow_enabled_for("pr_review", &profile.id)? {
                 return Ok(());
             }
             let repo = repository(&row)?;
@@ -361,7 +362,7 @@ impl Github {
                 })
                 .cloned()
                 .collect();
-            factory.enqueue_review_scan(owner, reviewer, &scoped)?;
+            factory.enqueue_review_scan(&profile.id, owner, reviewer, &scoped)?;
         }
         Ok(())
     }

@@ -30,7 +30,7 @@ export function OverviewPage({
   onRun: (id: string) => void;
 }) {
   const configured =
-    settings.token_profiles.some((t) => t.has_token && t.owners.length > 0);
+    settings.source_connectors.some((t) => t.has_token && t.owners.length > 0);
   const { metrics } = snapshot;
   const active = snapshot.runs.filter((r) =>
     ["running", "queued"].includes(r.status),
@@ -106,15 +106,15 @@ export function OverviewPage({
           <div>
             <span className="eyebrow">START WITH THE ESSENTIALS</span>
             <h2>Set up your first production line</h2>
-            <p>Connect GitHub, configure permissions and put your agents to work.</p>
+            <p>Add a GitHub Issues connector in Sources and configure its owners and permissions.</p>
             <div className="setup-checklist">
               <span
                 className={
-                  settings.token_profiles.some((t) => t.has_token) ? "done" : ""
+                  settings.source_connectors.some((t) => t.has_token) ? "done" : ""
                 }
               >
                 <CheckCircle size={16} />
-                GitHub account
+                GitHub source connector
               </span>
               <span className={configured ? "done" : ""}>
                 <CheckCircle size={16} />
@@ -124,7 +124,7 @@ export function OverviewPage({
           </div>
           <button
             className="button button-primary"
-            onClick={() => onPage("settings")}
+            onClick={() => onPage("sources")}
           >
             Set up Factory
             <ArrowRight size={17} />

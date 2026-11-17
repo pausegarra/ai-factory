@@ -106,8 +106,8 @@ fn google_chat_input_url_is_never_serialized() {
 fn google_chat_filters_are_structural_and_referential() {
     let base = json!({"id":"gchat","label":"Team","enabled":true,"events":["run_started"],"type":"google_chat","config":{"has_webhook_url":true,"triggers":["new_issue"],"token_profile_ids":["work"]}});
     let mut valid = serde_json::to_value(Settings::default()).unwrap();
-    valid["token_profiles"] = json!([{
-        "id":"work", "label":"Work", "account":"alice", "has_token":false,
+    valid["source_connectors"] = json!([{
+        "id":"work", "label":"Work", "type":"github_issues","account":"alice", "has_token":false,
         "owners":[], "authors":[], "reviewers":[]
     }]);
     valid["notification_connectors"] = json!([base]);
@@ -152,7 +152,7 @@ fn google_chat_filters_are_structural_and_referential() {
     ] {
         let mut value = valid.clone();
         if case == "missing_profile" {
-            value["token_profiles"] = json!([]);
+            value["source_connectors"] = json!([]);
         }
         let c = &mut value["notification_connectors"][0];
         match case {
@@ -166,11 +166,15 @@ fn google_chat_filters_are_structural_and_referential() {
             _ => {}
         }
         let s: Settings = serde_json::from_value(value).unwrap();
+        if ["missing_profile", "no_profiles"].contains(&case) {
+            s.validate().unwrap();
+            continue;
+        }
         let error = s.validate().expect_err(case);
         assert_eq!(error.to_string(), expected_error, "{case}");
     }
     let mut value = valid;
-    value["token_profiles"] = json!([]);
+    value["source_connectors"] = json!([]);
     value["notification_connectors"][0]["enabled"] = json!(false);
     serde_json::from_value::<Settings>(value.clone())
         .unwrap()
@@ -185,14 +189,15 @@ fn notification_validation_does_not_change_execution_capacity_queries() {
     let mut value = serde_json::to_value(Settings::default()).unwrap();
     value["notification_connectors"] = json!([{"id":"chat","label":"Chat","enabled":true,"events":["run_started"],"type":"google_chat","config":{"triggers":["new_issue"],"token_profile_ids":["deleted"]}}]);
     let s: Settings = serde_json::from_value(value).unwrap();
-    assert!(s.validate().is_err());
+    assert!(s.validate().is_ok());
     assert_eq!(s.concurrency_for("new_issue").unwrap(), s.max_concurrent);
 }
 
 #[test]
 fn notification_telegram_legacy_filters_are_canonical_and_do_not_expand_after_save() {
     let mut wire = serde_json::to_value(Settings::default()).unwrap();
-    wire["token_profiles"] = json!([{"id":"work","label":"Work","account":"alice"}]);
+    wire["source_connectors"] =
+        json!([{"id":"work","label":"Work","type":"github_issues","account":"alice"}]);
     wire["notification_connectors"] = json!([{
         "id":"tg","label":"Telegram","enabled":true,"events":["run_failed"],
         "type":"telegram","config":{"chat_id":"fixture","has_token":true}
@@ -204,27 +209,28 @@ fn notification_telegram_legacy_filters_are_canonical_and_do_not_expand_after_sa
         config["triggers"],
         json!(["new_issue", "pr_approved", "pr_review", "release"])
     );
-    assert_eq!(config["token_profile_ids"], json!(["work"]));
+    assert_eq!(config["token_profile_ids"], json!([]));
     assert_eq!(canonical["notification_connectors"][0]["enabled"], true);
-    canonical["token_profiles"]
+    canonical["source_connectors"]
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "id":"other","label":"Other","account":"bob","has_token":false,
+            "id":"other","label":"Other","type":"github_issues","account":"bob","has_token":false,
             "owners":[],"authors":[],"reviewers":[]
         }));
     let reloaded: Settings = serde_json::from_value(canonical.clone()).unwrap();
     assert_eq!(serde_json::to_value(reloaded).unwrap(), canonical);
     assert_eq!(
         canonical["notification_connectors"][0]["config"]["token_profile_ids"],
-        json!(["work"])
+        json!([])
     );
 }
 
 #[test]
 fn notification_telegram_rejects_unknown_trigger_without_echoing_input() {
     let mut wire = serde_json::to_value(Settings::default()).unwrap();
-    wire["token_profiles"] = json!([{"id":"work","label":"Work","account":"alice"}]);
+    wire["source_connectors"] =
+        json!([{"id":"work","label":"Work","type":"github_issues","account":"alice"}]);
     wire["notification_connectors"] = json!([{
         "id":"tg","label":"Telegram","enabled":true,"events":["run_started"],
         "type":"telegram","config":{"chat_id":"fixture","has_token":true,
@@ -240,7 +246,8 @@ fn notification_telegram_rejects_unknown_trigger_without_echoing_input() {
 
 fn filter_settings(kind: &str) -> serde_json::Value {
     let mut wire = serde_json::to_value(Settings::default()).unwrap();
-    wire["token_profiles"] = json!([{"id":"work","label":"Work","account":"alice"}]);
+    wire["source_connectors"] =
+        json!([{"id":"work","label":"Work","type":"github_issues","account":"alice"}]);
     wire["notification_connectors"] = json!([{
         "id":"team","label":"Team","enabled":true,"events":["run_started"],"type":kind,
         "config":{"chat_id":"fixture","has_token":true,"has_webhook_url":true,
@@ -306,6 +313,10 @@ fn notification_filter_validation_is_symmetric_and_safe() {
                     c["config"][field] = value.clone();
                 }
                 let s: Settings = serde_json::from_value(wire).unwrap();
+                if field == "token_profile_ids" && !structural {
+                    s.validate().unwrap();
+                    continue;
+                }
                 if enabled || structural {
                     let error = s.validate().expect_err(field).to_string();
                     assert!(error.contains(suffix), "{kind} {field}: {error}");
@@ -332,10 +343,9 @@ fn notification_telegram_migration_only_fills_missing_fields_and_is_idempotent()
             (Some(json!([])), Some(json!([]))),
         ] {
             let mut wire = filter_settings("telegram");
-            wire["token_profiles"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"id":"personal","label":"Personal","account":"bob"}));
+            wire["source_connectors"].as_array_mut().unwrap().push(
+                json!({"id":"personal","label":"Personal","type":"github_issues","account":"bob"}),
+            );
             let c = &mut wire["notification_connectors"][0];
             c["enabled"] = json!(enabled);
             let cfg = c["config"].as_object_mut().unwrap();
@@ -360,7 +370,7 @@ fn notification_telegram_migration_only_fills_missing_fields_and_is_idempotent()
             );
             assert_eq!(
                 c["config"]["token_profile_ids"],
-                profiles.unwrap_or(json!(["work", "personal"]))
+                profiles.unwrap_or(json!([]))
             );
             for _ in 0..2 {
                 assert_eq!(
@@ -374,7 +384,7 @@ fn notification_telegram_migration_only_fills_missing_fields_and_is_idempotent()
         }
     }
     let mut wire = filter_settings("telegram");
-    wire["token_profiles"] = json!([]);
+    wire["source_connectors"] = json!([]);
     wire["notification_connectors"][0]["config"]
         .as_object_mut()
         .unwrap()
@@ -386,11 +396,7 @@ fn notification_telegram_migration_only_fills_missing_fields_and_is_idempotent()
             ["token_profile_ids"],
         json!([])
     );
-    assert!(s
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("GitHub profile"));
+    s.validate().unwrap();
     s.notification_connectors[0].enabled = false;
     s.validate().unwrap();
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::common;
 
 const ACCOUNT_A: &str = "2bb656dd-79c9-4eec-bd40-1f309d04ce91";
 const ACCOUNT_B: &str = "23068e61-63ce-4da1-8df6-ed4353fe2d99";
@@ -12,12 +13,9 @@ async fn unassigned_codex_node_blocks_before_cli_launch() {
         .save_settings(serde_json::from_value(settings.clone()).unwrap())
         .unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            300,
-            "[AI] unassigned",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 300, "[AI] unassigned", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -49,12 +47,9 @@ fn admission_freezes_codex_account_per_github_profile() {
         .save_settings(serde_json::from_value(settings.clone()).unwrap())
         .unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            301,
-            "[AI] frozen account",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 301, "[AI] frozen account", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -72,12 +67,9 @@ async fn unavailable_frozen_codex_account_blocks_without_launching_cli() {
     let settings = factory.settings().unwrap();
     let account = &settings.codex_bindings["alice"];
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            305,
-            "[AI] unavailable account",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 305, "[AI] unavailable account", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -127,12 +119,9 @@ else:
         .insert("alice".into(), ACCOUNT_A.into());
     factory.save_settings(settings.clone()).unwrap();
     let first = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            302,
-            "[AI] account A",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 302, "[AI] account A", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -141,12 +130,9 @@ else:
         .insert("alice".into(), ACCOUNT_B.into());
     factory.save_settings(settings).unwrap();
     let second = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            303,
-            "[AI] account B",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 303, "[AI] account B", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -174,12 +160,9 @@ async fn opencode_remains_default_cli_without_codex_assignment() {
     settings.flows[0].nodes[0].agent = "opencode".into();
     factory.save_settings(settings).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            304,
-            "[AI] OpenCode default",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 304, "[AI] OpenCode default", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();

@@ -63,9 +63,10 @@ fn legacy_config_resets_profile_activation() {
     let tmp = tempfile::tempdir().unwrap();
     config(tmp.path());
     let mut current = Settings {
-        token_profiles: ["alice", "bob"]
+        source_connectors: ["alice", "bob"]
             .into_iter()
-            .map(|account| TokenProfile {
+            .map(|account| SourceConnector {
+                kind: factory_core::SourceKind::GithubIssues,
                 id: account.into(),
                 label: account.into(),
                 account: account.into(),
@@ -90,27 +91,15 @@ fn legacy_config_resets_profile_activation() {
         .flows
         .iter()
         .all(|f| f.profile_activation.is_empty()));
-    for profile in &imported.token_profiles {
-        assert_eq!(profile.owners, vec!["acme"]);
-        assert_eq!(
-            profile.authors,
-            if profile.account == "alice" {
-                vec!["alice"]
-            } else {
-                vec![]
-            }
-        );
-        assert_eq!(
-            profile.reviewers,
-            if profile.account == "bob" {
-                vec!["bob"]
-            } else {
-                vec![]
-            }
-        );
-        assert!(!profile.has_token);
-        assert!(profile.token.is_none());
+    for source in &imported.source_connectors {
+        assert!(source.owners.is_empty());
+        assert!(source.authors.is_empty());
+        assert!(source.reviewers.is_empty());
     }
+    assert!(batch
+        .warnings
+        .iter()
+        .any(|w| w.contains("Legacy GitHub sources were ignored")));
 }
 
 #[test]
@@ -130,7 +119,7 @@ fn imports_mapping_nodes_yaml_anchors_and_relative_files_without_tokens() {
         assert!(canonical.get(field).is_none());
     }
     assert_eq!(settings.max_concurrent, 4);
-    assert!(settings.token_profiles.is_empty());
+    assert!(settings.source_connectors.is_empty());
     let issue = settings.flows.iter().find(|f| f.id == "new_issue").unwrap();
     assert_eq!(issue.nodes.len(), 2);
     assert_eq!(issue.max_parallel, 3);
@@ -244,14 +233,17 @@ fn imports_sessions_and_copies_accessible_logs_into_application_directory() {
     assert!(log.exists());
     let factory = common::open(app).unwrap();
     let mut settings = factory.settings().unwrap();
-    settings.token_profiles.push(factory_core::TokenProfile {
-        id: "secret".into(),
-        label: "Secret".into(),
-        account: "alice".into(),
-        token: Some("legacy-secret".into()),
-        has_token: false,
-        ..Default::default()
-    });
+    settings
+        .source_connectors
+        .push(factory_core::SourceConnector {
+            kind: factory_core::SourceKind::GithubIssues,
+            id: "secret".into(),
+            label: "Secret".into(),
+            account: "alice".into(),
+            token: Some("legacy-secret".into()),
+            has_token: false,
+            ..Default::default()
+        });
     factory.save_settings(settings).unwrap();
     factory.import_legacy(None, Some(path)).unwrap();
     let id = &factory.snapshot().unwrap().runs[0].id;
@@ -382,18 +374,15 @@ fn factory_ingests_legacy_history_idempotently_and_keeps_secrets_private() {
     drop(c);
     let root = tempfile::tempdir().unwrap();
     let f = common::open(root.path().into()).unwrap();
-    let mut settings = f.settings().unwrap();
+    let mut settings = common::configured_settings();
     settings.flows[0]
         .profile_activation
         .insert("orphan".into(), false);
     f.save_settings(settings).unwrap();
     let local = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            99,
-            "[AI] local",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 99, "[AI] local", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -429,12 +418,9 @@ fn factory_ingests_legacy_history_idempotently_and_keeps_secrets_private() {
     assert_eq!(again.runs_imported, 0);
     assert_eq!(f.snapshot().unwrap().metrics.total, 2);
     assert!(f
-        .enqueue(factory_core::TriggerEvent::issue(
-            "acme/repo",
-            8,
-            "[AI] old",
-            "alice",
-            ""
+        .enqueue(common::from_source(
+            factory_core::TriggerEvent::issue("acme/repo", 8, "[AI] old", "alice", ""),
+            "alice"
         ))
         .unwrap()
         .is_none());

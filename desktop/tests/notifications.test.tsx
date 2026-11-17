@@ -7,7 +7,7 @@ import { newTelegramConnector } from "../src/context/factory/domain/notification
 import { noticeSettings, deferred } from "./fixtures/notices";
 import type { Settings } from "../src/context/factory/domain/types";
 afterEach(cleanup);
-const withWork = (): Settings => ({...noticeSettings(),token_profiles:[{id:"work",label:"Work",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}]});
+const withWork = (): Settings => ({...noticeSettings(),source_connectors:[{id:"work",label:"Work",type: "github_issues" as const, account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}]});
 
 it("adds a disabled Telegram connector and discards the token draft", async () => {
   const user = userEvent.setup(); const onSave = vi.fn();

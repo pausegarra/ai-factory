@@ -7,12 +7,23 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
     let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(version <= 1, "Unsupported database schema");
     if version == 1 {
+        let exists: bool = db
+            .prepare("PRAGMA table_info(tracked_pr_origins)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|c| c == "source_connector_id");
+        if !exists {
+            db.execute_batch(
+                "ALTER TABLE tracked_pr_origins ADD COLUMN source_connector_id TEXT;",
+            )?;
+        }
         return Ok(());
     }
     let tx = db.transaction()?;
     tx.execute_batch("CREATE TABLE run_deletions (run_id TEXT PRIMARY KEY,repository TEXT NOT NULL,number INTEGER NOT NULL,title TEXT NOT NULL,attempt INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','failed')),last_error TEXT);
         CREATE TABLE run_deletion_targets (run_id TEXT NOT NULL,target TEXT NOT NULL CHECK(target IN ('sessions','memory','workspace','legacy')),done INTEGER NOT NULL DEFAULT 0 CHECK(done IN (0,1)),PRIMARY KEY(run_id,target),FOREIGN KEY(run_id) REFERENCES run_deletions(run_id) ON DELETE CASCADE);
-        CREATE TABLE tracked_pr_origins (repository TEXT NOT NULL,number INTEGER NOT NULL,origin_key TEXT NOT NULL,event_id TEXT,issue_repository TEXT,issue_number INTEGER,actor TEXT,trigger_id TEXT,trusted INTEGER NOT NULL CHECK(trusted IN (0,1)),PRIMARY KEY(repository,number,origin_key));")?;
+        CREATE TABLE tracked_pr_origins (repository TEXT NOT NULL,number INTEGER NOT NULL,origin_key TEXT NOT NULL,event_id TEXT,issue_repository TEXT,issue_number INTEGER,actor TEXT,trigger_id TEXT,source_connector_id TEXT,trusted INTEGER NOT NULL CHECK(trusted IN (0,1)),PRIMARY KEY(repository,number,origin_key));")?;
     super::pr_origins::backfill(&tx)?;
     tx.execute_batch("PRAGMA user_version=1;")?;
     tx.commit()?;

@@ -5,14 +5,18 @@ use std::sync::{Arc, Barrier};
 fn setup() -> (tempfile::TempDir, Arc<Factory>, Arc<RecordingNotifications>) {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     let sink = Arc::new(RecordingNotifications::default());
     f.set_run_notification_sink(sink.clone());
     (dir, f, sink)
 }
 fn queued(f: &Factory, number: u64, title: &str) -> String {
-    f.enqueue(TriggerEvent::issue("acme/repo", number, title, "alice", ""))
-        .unwrap()
-        .unwrap()
+    f.enqueue(common::from_source(
+        TriggerEvent::issue("acme/repo", number, title, "alice", ""),
+        "alice",
+    ))
+    .unwrap()
+    .unwrap()
 }
 #[test]
 fn notification_lifecycle_uses_persisted_status_once() -> Result<()> {
@@ -241,7 +245,8 @@ fn notification_simultaneous_runs_keep_their_metadata() -> Result<()> {
 fn notification_cached_credentials_are_redacted_without_keychain_io() -> Result<()> {
     let (dir, f, sink) = setup();
     let mut settings = f.settings()?;
-    settings.token_profiles = vec![TokenProfile {
+    settings.source_connectors = vec![SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Test".into(),
         account: "alice".into(),

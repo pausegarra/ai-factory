@@ -44,8 +44,14 @@ fn three_flow_settings_gain_only_the_disabled_release_default() {
 
 #[test]
 fn release_identity_does_not_collide_with_issue_identity() {
-    let release = TriggerEvent::release_issue("Acme/Repo", 80, "[Release]", "alice", "body");
-    let issue = TriggerEvent::issue("Acme/Repo", 80, "[AI]", "alice", "body");
+    let release = common::from_source(
+        TriggerEvent::release_issue("Acme/Repo", 80, "[Release]", "alice", "body"),
+        "alice",
+    );
+    let issue = common::from_source(
+        TriggerEvent::issue("Acme/Repo", 80, "[AI]", "alice", "body"),
+        "alice",
+    );
     assert_eq!(release.event_id, "release:acme/repo#80");
     assert_eq!(release.repository, "acme/repo");
     assert_eq!(release.trigger_id, "release");
@@ -103,7 +109,12 @@ fn migration_preserves_reversed_legacy_and_custom_release_without_repairing_inva
 
 #[test]
 fn release_authorization_and_capacity_follow_issue_rules() {
-    let mut profile = factory_core::TokenProfile {
+    let mut profile = factory_core::SourceConnector {
+        label: "Fixture source".into(),
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         account: "alice".into(),
         authors: vec!["ALICE".into()],
         ..Default::default()

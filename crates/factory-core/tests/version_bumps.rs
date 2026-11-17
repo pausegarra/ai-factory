@@ -8,7 +8,10 @@ async fn version_preparation_rejects_non_approval_before_network() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
     let api = Github::with_base("fixture-token", "http://127.0.0.1:1").unwrap();
-    let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK");
+    let mut event = common::from_source(
+        TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK"),
+        "alice",
+    );
     event.trigger_id = "pr_review".into();
     let error = api
         .prepare_version_workspace(&factory, &event, "run", Path::new("/nonexistent"))
@@ -320,7 +323,9 @@ exec '{actual}' "${{args[@]}}"
             bump.agent = "opencode".into();
             bump.depends_on = vec!["merge".into()];
             settings.flows[1].nodes = vec![merge, bump];
-            settings.token_profiles = vec![TokenProfile {
+            settings.source_connectors = vec![SourceConnector {
+                reviewers: vec!["alice".into()],
+                kind: factory_core::SourceKind::GithubIssues,
                 id: "alice".into(),
                 account: "alice".into(),
                 label: "Alice".into(),
@@ -337,7 +342,10 @@ exec '{actual}' "${{args[@]}}"
                 common::bind_fixture_codex(&factory, &mut settings);
             }
             factory.save_settings(settings).unwrap();
-            let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "release");
+            let mut event = common::from_source(
+                TriggerEvent::issue("acme/repo", 5, "PR", "alice", "release"),
+                "alice",
+            );
             event.trigger_id = "pr_approved".into();
             event.head_sha = head_sha;
             event.url = "https://github.com/acme/repo/pull/5".into();

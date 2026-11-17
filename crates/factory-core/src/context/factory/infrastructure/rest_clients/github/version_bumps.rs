@@ -136,9 +136,7 @@ impl Github {
             "Version run event identity mismatch"
         );
         let settings = factory.store.public_settings()?;
-        let profile = settings
-            .profile_for(&event.actor)
-            .context("Version actor no longer authorized")?;
+        let profile = settings.source_for_event(event)?;
         ensure!(
             profile.allows_actor("pr_approved")
                 && profile.allows_owner(event.repository.split('/').next().unwrap()),
@@ -368,7 +366,7 @@ impl Github {
                 &remote,
                 &format!("+refs/heads/{base_ref}:{tracking}"),
             ],
-            Some(&event.actor),
+            Some(&factory.store.public_settings()?.source_for_event(event)?.id),
         )
         .await?;
         ensure!(
@@ -527,7 +525,7 @@ impl Github {
                     intent.target_sha, intent.context.base_ref
                 ),
             ],
-            Some(&event.actor),
+            Some(&factory.store.public_settings()?.source_for_event(event)?.id),
         )
         .await;
         match self.version_push_state(&intent).await {

@@ -5,12 +5,9 @@ use std::fs;
 
 fn stopped(f: &Factory) -> Result<String> {
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            4,
-            "[AI] deletion",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
             "alice",
-            "body",
         ))?
         .unwrap();
     f.cancel(&id)?;
@@ -21,6 +18,7 @@ fn stopped(f: &Factory) -> Result<String> {
 fn failed_prepare_changes_neither_history_nor_files() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = stopped(&f)?;
     let path = dir.path().join("sessions").join(&id);
     fs::create_dir_all(&path)?;
@@ -38,6 +36,7 @@ fn failed_prepare_changes_neither_history_nor_files() -> Result<()> {
 fn failed_final_commit_keeps_event_until_recovery_finishes_deletion() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = stopped(&f)?;
     let db = Connection::open(dir.path().join("factory.sqlite3"))?;
     db.execute_batch("CREATE TRIGGER fail_final BEFORE DELETE ON runs BEGIN SELECT RAISE(ABORT,'fixture final failure'); END;")?;
@@ -45,27 +44,22 @@ fn failed_final_commit_keeps_event_until_recovery_finishes_deletion() -> Result<
     assert!(f.run_detail(&id).is_err());
     assert_eq!(f.snapshot()?.deletions.len(), 1);
     assert!(f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            4,
-            "[AI] deletion",
-            "alice",
-            "body"
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
+            "alice"
         ))?
         .is_none());
     db.execute_batch("DROP TRIGGER fail_final;")?;
     drop(db);
     drop(f);
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     assert!(matches!(f.run_view(&id)?, RunView::Missing));
     assert!(f.snapshot()?.deletions.is_empty());
     assert!(f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            4,
-            "[AI] deletion",
-            "alice",
-            "body"
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
+            "alice"
         ))?
         .is_some());
     f.delete_run(&id)?;
@@ -77,6 +71,7 @@ fn crash_after_each_remove_before_progress_commit_is_recoverable() -> Result<()>
     for target in ["sessions", "memory", "workspace"] {
         let dir = tempfile::tempdir()?;
         let f = common::open(dir.path().into())?;
+        f.save_settings(common::configured_settings())?;
         let id = stopped(&f)?;
         let paths = [
             dir.path().join("sessions").join(&id),
@@ -102,6 +97,7 @@ fn crash_after_each_remove_before_progress_commit_is_recoverable() -> Result<()>
         drop(db);
         drop(f);
         let f = common::open(dir.path().into())?;
+        f.save_settings(common::configured_settings())?;
         assert!(matches!(f.run_view(&id)?, RunView::Missing));
         for path in paths {
             assert!(!path.exists());
@@ -114,6 +110,7 @@ fn crash_after_each_remove_before_progress_commit_is_recoverable() -> Result<()>
 fn crash_after_intent_before_first_remove_keeps_owner_and_content() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = stopped(&f)?;
     let session = dir.path().join("sessions").join(&id);
     fs::create_dir_all(&session)?;
@@ -127,6 +124,7 @@ fn crash_after_intent_before_first_remove_keeps_owner_and_content() -> Result<()
     drop(db);
     drop(f);
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     assert!(matches!(f.run_view(&id)?, RunView::Missing));
     assert!(!session.exists());
     Ok(())
@@ -139,6 +137,7 @@ fn partial_cleanup_is_visible_sanitized_and_recovers_only_known_targets() -> Res
     let dir = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = stopped(&f)?;
     fs::create_dir_all(dir.path().join("sessions").join(&id))?;
     fs::write(outside.path().join("secret-path-token"), b"keep")?;
@@ -158,16 +157,14 @@ fn partial_cleanup_is_visible_sanitized_and_recovers_only_known_targets() -> Res
     // The rest of the service remains usable; no global GitHub failure.
     assert!(f.snapshot()?.service.last_error.is_none());
     assert!(f
-        .enqueue(TriggerEvent::issue(
-            "other/repo",
-            7,
-            "[AI] independent",
-            "alice",
-            ""
+        .enqueue(common::from_source(
+            TriggerEvent::issue("other/repo", 7, "[AI] independent", "alice", ""),
+            "alice"
         ))?
         .is_some());
     drop(f);
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     assert_eq!(f.snapshot()?.deletions[0].state, "failed");
     fs::remove_file(dir.path().join("memory/acme/repo"))?;
     assert!(matches!(
@@ -184,6 +181,7 @@ fn deletion_is_offline_even_when_all_credential_operations_fail() -> Result<()> 
     let dir = tempfile::tempdir()?;
     let credentials = common::backend(dir.path());
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = stopped(&f)?;
     credentials.fail_get.store(true, Ordering::SeqCst);
     credentials.fail_set.store(true, Ordering::SeqCst);
@@ -199,6 +197,7 @@ fn deletion_is_offline_even_when_all_credential_operations_fail() -> Result<()> 
 fn simultaneous_delete_requests_serialize_and_keep_independent_retry() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = stopped(&f)?;
     let retry = f.retry(&id)?;
     let barrier = std::sync::Barrier::new(3);

@@ -18,12 +18,9 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{"merg
     settings.flows[0].nodes[0].result_schema = json!({"type":"object"});
     f.save_settings(settings).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            91,
-            "[AI] readonly",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 91, "[AI] readonly", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -125,12 +122,9 @@ async fn plan_review_report_cannot_be_dispatched_as_github_review() {
         settings.flows[0].nodes = vec![gate];
         factory.save_settings(settings).unwrap();
         let id = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                420,
-                "[AI] plan report",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 420, "[AI] plan report", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -191,12 +185,9 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' >
         f.save_settings(serde_json::from_value(value).unwrap())
             .unwrap();
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                172,
-                "[AI] long task",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 172, "[AI] long task", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -228,20 +219,26 @@ async fn durable_queue_dedup_redaction_and_immediate_events() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open(dir.path().into()).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "one".into(),
         label: "Primary".into(),
         account: "alice".into(),
         token: Some("secret-example".into()),
         has_token: false,
-        ..Default::default()
     });
     f.save_settings(s).unwrap();
     assert!(!serde_json::to_string(&f.settings().unwrap())
         .unwrap()
         .contains("secret-example"));
     let mut rx = f.subscribe();
-    let event = TriggerEvent::issue("acme/repo", 1, "[AI] test", "alice", "");
+    let event = common::from_source(
+        TriggerEvent::issue("acme/repo", 1, "[AI] test", "alice", ""),
+        "one",
+    );
     let id = f.enqueue(event.clone()).unwrap().unwrap();
     assert_eq!(rx.recv().await.unwrap().kind, "run_created");
     assert!(f.enqueue(event).unwrap().is_none());
@@ -249,25 +246,24 @@ async fn durable_queue_dedup_redaction_and_immediate_events() {
     drop(f);
     let f = common::open(dir.path().into()).unwrap();
     assert_eq!(f.run_detail(&id).unwrap().run.status, "queued");
-    assert!(f.settings().unwrap().token_profiles[0].has_token);
+    assert!(f.settings().unwrap().source_connectors[0].has_token);
 }
 #[test]
 fn restart_interrupts_running_but_retains_history() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open(dir.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            2,
-            "[AI] test",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 2, "[AI] test", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
     f.set_run_status(&id, "running", None).unwrap();
     drop(f);
     let f = common::open(dir.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     assert_eq!(f.run_detail(&id).unwrap().run.status, "interrupted");
     assert_ne!(f.retry(&id).unwrap(), id);
 }
@@ -483,7 +479,9 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
         .to_string_lossy()
         .into();
     s.max_concurrent = limit;
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),
         account: "alice".into(),
@@ -491,7 +489,6 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
         has_token: false,
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
-        ..Default::default()
     });
     s.flows[1].enabled = false;
     s.flows[2].enabled = false;
@@ -577,12 +574,9 @@ async fn per_token_agent_override_drives_cli_without_changing_other_nodes() {
         .save_settings(serde_json::from_value(value).unwrap())
         .unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            190,
-            "[AI] config",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 190, "[AI] config", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -611,12 +605,9 @@ async fn cli_result_logs_and_workspace_are_real_and_private() {
     let (_dir,f)=fixture("cat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"session-1\"}'\necho log-line >&2\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"",4);
     let mut rx = f.subscribe();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            10,
-            "[AI] work",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 10, "[AI] work", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -649,12 +640,9 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' >
     settings.projects.clear();
     f.save_settings(settings).unwrap();
     let first = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            101,
-            "[AI] work",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 101, "[AI] work", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -726,12 +714,9 @@ printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"dat
             .collect();
         f.save_settings(settings).unwrap();
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                40,
-                "[AI] unattended",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 40, "[AI] unattended", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -817,12 +802,9 @@ async fn concurrency_limit_and_cancellation_stop_processes() {
     let mut ids = vec![];
     for n in 1..=3 {
         ids.push(
-            f.enqueue(TriggerEvent::issue(
-                "acme/repo",
-                n,
-                "[AI] work",
+            f.enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", n, "[AI] work", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap(),
@@ -853,12 +835,9 @@ async fn blocked_result_skips_descendants() {
     s.flows[0].nodes.push(child);
     f.save_settings(s).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] work",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] work", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -872,13 +851,11 @@ async fn blocked_result_skips_descendants() {
 fn terminal_cancellation_cannot_be_overwritten_by_late_worker_status() {
     let root = tempfile::tempdir().unwrap();
     let f = common::open(root.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            11,
-            "[AI] work",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 11, "[AI] work", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -915,12 +892,9 @@ with open(result_path, "w") as output:
             let node_id = node.id.clone();
             f.save_settings(settings).unwrap();
             let id = f
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    41,
-                    "[AI] workspace directory",
+                .enqueue(common::from_source(
+                    TriggerEvent::issue("acme/repo", 41, "[AI] workspace directory", "alice", ""),
                     "alice",
-                    "",
                 ))
                 .unwrap()
                 .unwrap();
@@ -965,12 +939,9 @@ async fn opencode_uses_private_server_and_path_scoped_memory_permissions() {
     s.flows[0].nodes[0].agent = "opencode".into();
     f.save_settings(s).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            19,
-            "[AI] OpenCode",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 19, "[AI] OpenCode", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -987,12 +958,9 @@ async fn codex_strict_transport_decodes_custom_data_before_validation() {
     s.flows[0].nodes[0].result_schema = serde_json::json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}});
     f.save_settings(s).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            20,
-            "[AI] schema",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 20, "[AI] schema", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1012,12 +980,9 @@ async fn jobs_isolate_mutable_memory_and_git_identity_matches_actor() {
     let mut ids = vec![];
     for n in 30..32 {
         ids.push(
-            f.enqueue(TriggerEvent::issue(
-                "acme/repo",
-                n,
-                "[AI] memory",
+            f.enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", n, "[AI] memory", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap(),
@@ -1057,7 +1022,8 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
     let root = tempfile::tempdir().unwrap();
     let f = common::open(root.path().into()).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "actor".into(),
         label: "Alice".into(),
         account: "Alice".into(),
@@ -1068,13 +1034,13 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
         reviewers: vec!["Alice".into()],
     });
     let s = f.save_settings(s).unwrap();
-    assert_eq!(s.token_profiles[0].owners, vec!["acme"]);
-    assert_eq!(s.token_profiles[0].authors, vec!["alice"]);
-    assert_eq!(s.token_profiles[0].reviewers, vec!["alice"]);
-    assert_eq!(s.token_profiles[0].account, "alice");
+    assert_eq!(s.source_connectors[0].owners, vec!["acme"]);
+    assert_eq!(s.source_connectors[0].authors, vec!["alice"]);
+    assert_eq!(s.source_connectors[0].reviewers, vec!["alice"]);
+    assert_eq!(s.source_connectors[0].account, "alice");
     let mut s = s;
-    s.token_profiles[0].token = Some(String::new());
-    assert!(f.save_settings(s).unwrap().token_profiles[0].has_token);
+    s.source_connectors[0].token = Some(String::new());
+    assert!(f.save_settings(s).unwrap().source_connectors[0].has_token);
 }
 
 #[tokio::test]
@@ -1082,12 +1048,9 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
 async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
     let (_dir, f) = fixture("cat >/dev/null\nsleep 30 &\necho CHILD:$!\nwhile [ ! -f .finish-cli ]; do sleep 0.01; done\nprintf '%s' '{\"status\":\"succeeded\",\"summary\":\"done\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"", 4);
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            90,
-            "[AI] work",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 90, "[AI] work", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1150,13 +1113,11 @@ async fn exited_cli_cannot_leave_descendant_holding_log_pipes() {
 fn queued_snapshot_is_immutable_and_retry_uses_current_workflow() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open(dir.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            101,
-            "[AI] snapshot",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 101, "[AI] snapshot", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1183,12 +1144,9 @@ async fn independent_writer_nodes_never_overlap_in_one_workspace() {
     settings.flows[0].nodes.push(second);
     f.save_settings(settings).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            102,
-            "[AI] writers",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 102, "[AI] writers", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1225,12 +1183,9 @@ async fn real_cli_artifact_contract_checks_contents_and_authorized_paths() {
         );
         let (_dir, f) = fixture(&script, 4);
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                103,
-                "[AI] artifacts",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 103, "[AI] artifacts", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -1256,12 +1211,9 @@ async fn failed_and_blocked_runs_remove_the_clone() {
         let script = format!("cat >/dev/null\nprintf '%s' '{{\"status\":\"{status}\",\"summary\":\"fixture\",\"artifacts\":[],\"data\":{{}}}}' > \"$AI_FACTORY_RESULT_PATH\"");
         let (dir, f) = fixture(&script, 4);
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                170,
-                "[AI] cleanup",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 170, "[AI] cleanup", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -1286,12 +1238,9 @@ async fn partially_failed_clone_is_removed() {
     settings.commands.git = git.to_string_lossy().into();
     f.save_settings(settings).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            171,
-            "[AI] cleanup",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 171, "[AI] cleanup", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1312,12 +1261,9 @@ async fn archived_artifacts_remain_in_failed_node_results_after_action_rejection
     let script = format!("cat >/dev/null\nprintf evidence > report.txt\nprintf '%s' '{value}' > \"$AI_FACTORY_RESULT_PATH\"");
     let (dir, f) = fixture(&script, 4);
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            173,
-            "[AI] evidence",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 173, "[AI] evidence", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1359,12 +1305,9 @@ async fn cancellation_during_clone_kills_git_children_before_cleanup() {
     settings.commands.git = git.to_string_lossy().into();
     f.save_settings(settings).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            172,
-            "[AI] cleanup",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 172, "[AI] cleanup", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1406,23 +1349,18 @@ async fn cancellation_during_clone_kills_git_children_before_cleanup() {
 fn restart_removes_only_known_finished_workspaces_and_preserves_history() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open(dir.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     let interrupted = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            180,
-            "[AI] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 180, "[AI] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
     let queued = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            181,
-            "[AI] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 181, "[AI] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -1435,6 +1373,7 @@ fn restart_removes_only_known_finished_workspaces_and_preserves_history() {
     std::fs::write(session.join("spec.log"), "history").unwrap();
     drop(f);
     let f = common::open(dir.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     assert_eq!(
         f.run_detail(&interrupted).unwrap().run.status,
         "interrupted"
@@ -1455,13 +1394,11 @@ fn workspace_recovery_removes_links_without_touching_external_content() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("keep"), "untouched").unwrap();
     let f = common::open(dir.path().into()).unwrap();
+    f.save_settings(common::configured_settings()).unwrap();
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            182,
-            "[AI] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 182, "[AI] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
