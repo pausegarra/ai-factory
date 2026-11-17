@@ -30,11 +30,11 @@ it("adds Google Chat disabled with only URL credentials and saves filters while 
   const card=screen.getByRole("dialog",{name:"Configure new connector"});expect(document.activeElement).toBe(within(card).getByRole("button",{name:"Close connector editor"}));
   const input=screen.getByLabelText("Webhook URL") as HTMLInputElement;expect(input.type).toBe("password");
   expect(screen.queryByLabelText("Bot token")).toBeNull();expect((screen.getByRole("checkbox",{name:"Enabled"}) as HTMLInputElement).checked).toBe(false);
-  expect(within(screen.getByRole("group",{name:"GitHub triggers"})).getAllByRole("checkbox").map(c=>c.getAttribute("aria-label") ?? c.closest("label")?.textContent)).toHaveLength(3);
+  expect(within(screen.getByRole("group",{name:"GitHub triggers"})).getAllByRole("checkbox").map(c=>c.getAttribute("aria-label") ?? c.closest("label")?.textContent)).toHaveLength(4);
   for (const t of Object.values(TRIGGERS)) expect(screen.getByRole("checkbox",{name:t.label})).toBeTruthy();
   await user.type(input,url);await user.click(screen.getByRole("checkbox",{name:"Work (@alice)"}));await user.click(screen.getByRole("checkbox",{name:"Enabled"}));
   await user.click(screen.getByRole("checkbox",{name:"PR approved"}));applyConnector();save();await screen.findByText("Notification settings saved.");
-  expect(onSave.mock.calls[0][0].notification_connectors?.[0].config).toEqual({has_webhook_url:false,webhook_url:url,triggers:["new_issue","pr_review"],token_profile_ids:["work"]});
+  expect(onSave.mock.calls[0][0].notification_connectors?.[0].config).toEqual({has_webhook_url:false,webhook_url:url,triggers:["new_issue","pr_review","release"],token_profile_ids:["work"]});
   openConnector("Google Chat"); expect((screen.getByLabelText("Webhook URL") as HTMLInputElement).value).toBe("");expect(screen.getByText("Webhook configured")).toBeTruthy();
 });
 it("preserves a configured webhook with blank input and replaces it only on explicit submission",async()=>{

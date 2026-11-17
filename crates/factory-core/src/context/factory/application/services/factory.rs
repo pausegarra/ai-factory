@@ -352,7 +352,7 @@ impl Factory {
         let settings = self.store.public_settings()?;
         let capacity = {
             let active = self.active.lock().unwrap();
-            let by_trigger = ["new_issue", "pr_review", "pr_approved"]
+            let by_trigger = crate::context::factory::domain::entities::models::TRIGGER_IDS
                 .into_iter()
                 .map(|id| {
                     Ok((

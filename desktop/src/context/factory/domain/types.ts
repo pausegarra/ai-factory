@@ -1,4 +1,4 @@
-export type Trigger = "new_issue" | "pr_approved" | "pr_review";
+export type Trigger = "new_issue" | "pr_approved" | "pr_review" | "release";
 export type Agent = "codex" | "opencode";
 export interface AgentAccount {
   id: string;
@@ -102,6 +102,11 @@ export const TRIGGERS: Record<
     label: "Review requested",
     short: "PR review",
     description: "Review requests sent to your configured reviewers.",
+  },
+  release: {
+    label: "Release",
+    short: "Release",
+    description: "Open issues whose title starts with [Release], created by allowed authors. Disabled by default.",
   },
 };
 export interface Run {

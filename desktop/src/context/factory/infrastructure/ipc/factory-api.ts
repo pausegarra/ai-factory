@@ -31,6 +31,7 @@ const previewSettings: Settings = {
     { id: "new_issue", name: "New task", enabled: true, nodes: [] },
     { id: "pr_approved", name: "PR approved", enabled: true, nodes: [] },
     { id: "pr_review", name: "Review requested", enabled: true, nodes: [] },
+    { id: "release", name: "Release", enabled: false, nodes: [] },
   ],
 };
 const previewSnapshot: Snapshot = {
@@ -40,6 +41,7 @@ const previewSnapshot: Snapshot = {
       new_issue: { active: 0, limit: 4 },
       pr_review: { active: 0, limit: 4 },
       pr_approved: { active: 0, limit: 4 },
+      release: { active: 0, limit: 4 },
     },
   },
   runs: [],

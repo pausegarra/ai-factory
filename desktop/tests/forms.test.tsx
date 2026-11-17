@@ -699,7 +699,7 @@ it("persists independent trigger ceilings and restores inheritance on discard", 
   expect((screen.getByRole("checkbox", { name: "Use global capacity for PR approved" }) as HTMLInputElement).checked).toBe(false);
 });
 
-for (const [label, inherit] of [["Concurrent tasks", undefined], ["New issue concurrent tasks", "new issue"], ["PR review concurrent tasks", "PR review"], ["PR approved concurrent tasks", "PR approved"]] as const) {
+for (const [label, inherit] of [["Concurrent tasks", undefined], ["New issue concurrent tasks", "new issue"], ["PR review concurrent tasks", "PR review"], ["PR approved concurrent tasks", "PR approved"], ["Release concurrent tasks", "release"]] as const) {
   it.each(["0", "-1", "1.5", "65", "", "text"])(`rejects invalid ${label} input %s without saving`, invalid => {
     const save = vi.fn();
     render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
@@ -749,4 +749,20 @@ it("keeps trigger edits across import refresh and preserves fresh workflow and c
   expect(save.mock.calls[0][0].trigger_max_concurrent).toEqual({ pr_review: 2 });
   expect(save.mock.calls[0][0].flows[0].max_parallel).toBe(3);
   expect(save.mock.calls[0][0].notification_connectors).toEqual(refreshed.notification_connectors);
+});
+
+it("saves an explicit Release ceiling and then restores global inheritance", async () => {
+  const save = vi.fn(async (value: Settings) => value);
+  const view = render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for release" }));
+  fireEvent.change(screen.getByLabelText("Release concurrent tasks"), { target: { value: "2" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const stored = save.mock.calls[0][0];
+  expect(stored.trigger_max_concurrent).toEqual({ release: 2 });
+  view.rerender(<SettingsPage settings={stored} onSave={save} appDir="/fixture" />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for release" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1][0].trigger_max_concurrent).toEqual({});
 });

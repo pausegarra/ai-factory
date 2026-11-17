@@ -15,8 +15,8 @@ it("renders identical filter choices for both providers", () => {
   for(const name of ["Telegram","Google Chat"]) {
     const card = within(openConnector(name));
     expect(within(card.getByRole("group",{name:"Run events"})).getAllByRole("checkbox").map(c=>c.closest("label")?.textContent)).toEqual(["Run started","Run succeeded","Run failed","Run blocked"]);
-    expect(within(card.getByRole("group",{name:"GitHub triggers"})).getAllByRole("checkbox").map(c=>c.closest("label")?.textContent)).toEqual(["New task","PR approved","Review requested"]);
-    for(const label of ["New task","PR approved","Review requested"]) expect(checked(card.getByRole("checkbox",{name:label}))).toBe(true);
+    expect(within(card.getByRole("group",{name:"GitHub triggers"})).getAllByRole("checkbox").map(c=>c.closest("label")?.textContent)).toEqual(["New task","PR approved","Review requested","Release"]);
+    for(const label of ["New task","PR approved","Review requested","Release"]) expect(checked(card.getByRole("checkbox",{name:label}))).toBe(true);
     expect(checked(card.getByRole("checkbox",{name:"Work (@alice)"}))).toBe(false); cancelConnector();
   }
 });
@@ -38,7 +38,7 @@ it("isolates all three groups across two Telegram connectors and Google Chat", a
   await screen.findByText("Notification settings saved.");
   const saved = onSave.mock.calls[0][0].notification_connectors!;
   expect(saved[0].events).toEqual(["run_succeeded","run_failed","run_blocked"]);
-  expect(saved[0].config).toEqual({chat_id:"",has_token:false,triggers:["pr_approved","pr_review"],token_profile_ids:["work"]});
+  expect(saved[0].config).toEqual({chat_id:"",has_token:false,triggers:["pr_approved","pr_review","release"],token_profile_ids:["work"]});
   expect(saved.slice(1)).toEqual(connectors.slice(1));
 });
 
@@ -145,7 +145,7 @@ for(const create of [newTelegramConnector,newGoogleChatConnector]) {
     render(<NotificationsPage settings={settings()} onSave={vi.fn()} />);
     openConnector(create("a").label);
     screen.getByRole("checkbox",{name:"Run blocked"}).focus();
-    for(const name of ["New task","PR approved","Review requested","Work (@alice)"]) {
+    for(const name of ["New task","PR approved","Review requested","Release","Work (@alice)"]) {
       await user.tab();expect(document.activeElement).toBe(screen.getByRole("checkbox",{name}));
     }
     await user.keyboard(" ");
@@ -162,3 +162,31 @@ for(const create of [newTelegramConnector,newGoogleChatConnector]) {
     expect(checked(screen.getByRole("checkbox",{name:"Work (@alice) (other)"}))).toBe(true);
   });
 }
+
+it("persists only the edited Release filter and leaves explicit older selections intact", async () => {
+  const telegram = newTelegramConnector("tg");
+  telegram.config.triggers = ["new_issue"];
+  const chat = newGoogleChatConnector("chat");
+  const original = {...noticeSettings(), token_profiles:[profile], notification_connectors:[telegram, chat]};
+  const save = vi.fn(async (s: Settings) => s);
+  const view = render(<NotificationsPage settings={original} onSave={save} />);
+  openConnector("Telegram");
+  expect(checked(screen.getByRole("checkbox", {name:"Release"}))).toBe(false);
+  fireEvent.change(screen.getByLabelText("Name"), {target:{value:"Older selection"}});
+  applyConnector();
+  fireEvent.click(screen.getByRole("button", {name:"Save changes"}));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].notification_connectors![0].config.triggers).toEqual(["new_issue"]);
+  openConnector("Older selection");
+  fireEvent.click(screen.getByRole("checkbox", {name:"Release"}));
+  applyConnector();
+  fireEvent.click(screen.getByRole("button", {name:"Save changes"}));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  const stored = save.mock.calls[1][0];
+  expect(stored.notification_connectors![0].config.triggers).toEqual(["new_issue", "release"]);
+  expect(stored.notification_connectors![1]).toEqual(chat);
+  view.unmount();
+  render(<NotificationsPage settings={stored} onSave={save} />);
+  openConnector("Older selection");
+  expect(checked(screen.getByRole("checkbox", {name:"Release"}))).toBe(true);
+});

@@ -157,6 +157,9 @@ fn imports_mapping_nodes_yaml_anchors_and_relative_files_without_tokens() {
             .result_schema["required"][0],
         "approved"
     );
+    let release = settings.flows.iter().find(|f| f.id == "release").unwrap();
+    assert!(!release.enabled);
+    assert_eq!(release.nodes[0].id, "publish_app");
     settings.validate().unwrap();
 }
 

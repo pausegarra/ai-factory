@@ -419,7 +419,7 @@ export function FlowsPage({
           <h1 ref={heading} tabIndex={-1}>
             Workflows
           </h1>
-          <p>Three entry points. Your way of building.</p>
+          <p>Four entry points. Your way of building.</p>
         </div>
         <div className="flex gap-3">
           {dirty && (

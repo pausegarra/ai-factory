@@ -267,7 +267,7 @@ fn notification_legacy_filters_persist_on_save_without_read_mutation_or_secret_l
     let canonical = serde_json::to_value(&loaded).unwrap();
     assert_eq!(
         canonical["notification_connectors"][0]["config"]["triggers"],
-        json!(["new_issue", "pr_approved", "pr_review"])
+        json!(["new_issue", "pr_approved", "pr_review", "release"])
     );
     assert_eq!(
         canonical["notification_connectors"][0]["config"]["token_profile_ids"],

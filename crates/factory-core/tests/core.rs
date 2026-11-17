@@ -39,13 +39,13 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{"merg
 }
 
 #[test]
-fn defaults_cover_three_triggers_and_concurrency() {
+fn defaults_cover_four_triggers_and_concurrency() {
     let s = Settings::default();
     assert_eq!(s.max_concurrent, 4);
-    for trigger in ["new_issue", "pr_review", "pr_approved"] {
+    for trigger in ["new_issue", "pr_review", "pr_approved", "release"] {
         assert_eq!(s.concurrency_for(trigger).unwrap(), 4);
     }
-    assert_eq!(s.flows.len(), 3);
+    assert_eq!(s.flows.len(), 4);
     s.validate().unwrap();
 }
 
@@ -274,6 +274,7 @@ fn restart_interrupts_running_but_retains_history() {
 
 #[cfg(unix)]
 struct FixtureDir {
+    issue: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
     dir: tempfile::TempDir,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     server: Option<std::thread::JoinHandle<()>>,
@@ -338,6 +339,10 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
         comment_status.clone(),
         dir.path().join("data"),
     );
+    let issue = std::sync::Arc::new(std::sync::Mutex::new(
+        json!({"state":"open","title":"[AI] work","user":{"login":"alice"}}),
+    ));
+    let issue_response = issue.clone();
     let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
         let mut comments = Vec::new();
@@ -435,6 +440,8 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
                     comments.push(row.clone());
                     row
                 }
+            } else if path.starts_with("/repos/acme/repo/issues/") {
+                issue_response.lock().unwrap().clone()
             } else {
                 json!({"state":"open","title":"[AI] work","user":{"login":"alice"}})
             };
@@ -473,6 +480,7 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
     f.save_settings(s).unwrap();
     (
         FixtureDir {
+            issue,
             dir,
             stop,
             server: Some(server),

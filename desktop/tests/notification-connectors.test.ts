@@ -48,8 +48,8 @@ it("requires every Google Chat filter and a real configured or new webhook", () 
 it("uses independent Google Chat defaults and explicitly selected stable profiles", async () => {
   const {newGoogleChatConnector}=await import("../src/context/factory/domain/notification-connectors");
   const a=newGoogleChatConnector("a"),b=newGoogleChatConnector("b");
-  expect(a.enabled).toBe(false);expect(a.config.token_profile_ids).toEqual([]);expect(a.config.triggers).toEqual(["new_issue","pr_approved","pr_review"]);
-  a.config.triggers.pop();expect(b.config.triggers).toHaveLength(3);
+  expect(a.enabled).toBe(false);expect(a.config.token_profile_ids).toEqual([]);expect(a.config.triggers).toEqual(["new_issue","pr_approved","pr_review","release"]);
+  a.config.triggers.pop();expect(b.config.triggers).toHaveLength(4);
   a.config.webhook_url="PRIVATE_DRAFT";expect(cleanNotificationConnectors([a])[0].config.webhook_url).toBeUndefined();
 });
 it("rejects parser-normalized unsafe webhooks and validates filter IDs",async()=>{
@@ -74,10 +74,10 @@ it("rejects malformed Google Chat configuration without throwing or reflecting v
 it("gives Telegram the common filters without sharing selections", () => {
   const a = newTelegramConnector("a"), b = newTelegramConnector("b");
   expect(a.enabled).toBe(false);
-  expect(a.config.triggers).toEqual(["new_issue", "pr_approved", "pr_review"]);
+  expect(a.config.triggers).toEqual(["new_issue", "pr_approved", "pr_review", "release"]);
   expect(a.config.token_profile_ids).toEqual([]);
   a.config.triggers.pop(); a.config.token_profile_ids.push("work");
-  expect(b.config.triggers).toEqual(["new_issue", "pr_approved", "pr_review"]);
+  expect(b.config.triggers).toEqual(["new_issue", "pr_approved", "pr_review", "release"]);
   expect(b.config.token_profile_ids).toEqual([]);
 });
 
@@ -116,7 +116,7 @@ for (const create of [newTelegramConnector, newGoogleChatConnector]) {
     expect(validateNotificationConnectors([c],[{...filterProfiles[0],label:"Renamed"}])).toEqual([]);
     expect(c.config.token_profile_ids).toEqual(["work"]);
     const clean = cleanNotificationConnectors([{...c,config:{...c.config, bot_token:"PRIVATE_DRAFT",webhook_url:"PRIVATE_DRAFT"}}]);
-    expect(clean[0].config.triggers).toEqual(["new_issue","pr_approved","pr_review"]);
+    expect(clean[0].config.triggers).toEqual(["new_issue","pr_approved","pr_review","release"]);
     expect(clean[0].config.token_profile_ids).toEqual(["work"]);
   });
   it(`rejects malformed filter shapes for ${create("fixture").type} safely`, () => {
@@ -130,3 +130,9 @@ for (const create of [newTelegramConnector, newGoogleChatConnector]) {
     }
   });
 }
+
+it.each([newTelegramConnector,newGoogleChatConnector])("includes Release in new defaults and preserves explicit selections",create=>{
+  const c=create("release-default");expect(c.config.triggers).toEqual(["new_issue","pr_approved","pr_review","release"]);
+  const existing={...c,config:{...c.config,triggers:["new_issue"]}};
+  expect(cleanNotificationConnectors([existing])[0].config.triggers).toEqual(["new_issue"]);
+});

@@ -26,7 +26,7 @@ it("accepts independent ceilings whose sum exceeds global and preserves other se
   expect(changed.commands).toEqual(base.commands);
   expect(base.trigger_max_concurrent.pr_review).toBe(4);
 });
-for (const field of ["global", "new_issue", "pr_review", "pr_approved"]) {
+for (const field of ["global", "new_issue", "pr_review", "pr_approved", "release"]) {
   it.each([0, -1, 1.5, 65, NaN, Infinity, "4", null])(`rejects invalid ${field} capacity %s`, invalid => {
     const value = noticeSettings();
     if (field === "global") value.max_concurrent = invalid as number;
@@ -41,4 +41,11 @@ for (const field of ["global", "new_issue", "pr_review", "pr_approved"]) {
 }
 it.each([null, [], "4", { unknown: 4 }, { toString: 4 }].map(overrides => ({ overrides })))("rejects malformed trigger maps $overrides", ({ overrides }) => {
   expect(validateSettings({ ...noticeSettings(), trigger_max_concurrent: overrides } as unknown as Settings).length).toBeGreaterThan(0);
+});
+
+it("keeps an explicit Release ceiling while other triggers inherit",()=>{
+  const base={...noticeSettings(),max_concurrent:8};
+  const changed={...withTriggerLimit(base,"release",2),max_concurrent:4};
+  expect(effectiveTriggerLimit(changed,"release")).toBe(2);expect(effectiveTriggerLimit(changed,"new_issue")).toBe(4);
+  expect(effectiveTriggerLimit(withTriggerLimit(changed,"release",undefined),"release")).toBe(4);
 });

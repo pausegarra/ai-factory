@@ -189,6 +189,7 @@ export function OverviewPage({
               ["new_issue", "New issue"],
               ["pr_review", "PR review"],
               ["pr_approved", "PR approved"],
+              ["release", "Release"],
             ] as const).map(([trigger, label]) => (
               <div key={trigger}>
                 <dt>{label}</dt>
@@ -216,7 +217,7 @@ export function OverviewPage({
       <div className="section-label">
         <div>
           <span className="eyebrow">AUTOMATIONS</span>
-          <h2>Three entry points. One team.</h2>
+          <h2>Four entry points. One team.</h2>
         </div>
         <button className="text-button" onClick={() => onPage("flows")}>
           Edit workflows

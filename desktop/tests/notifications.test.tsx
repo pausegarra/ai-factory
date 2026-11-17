@@ -146,7 +146,7 @@ it("uses refreshed token metadata while retaining a dirty connector draft", asyn
   const incoming={...original,notification_connectors:[{...newTelegramConnector("a"),config:{...newTelegramConnector("a").config,chat_id:"@remote_destination",has_token:true,token_profile_ids:["work"]}}]};
   view.rerender(<NotificationsPage settings={incoming} onSave={onSave} />);
   fireEvent.click(screen.getByRole("button",{name:"Save changes"})); await waitFor(()=>expect(onSave).toHaveBeenCalledTimes(1));
-  expect(onSave.mock.calls[0][0].notification_connectors?.[0].config).toEqual({chat_id:"@local_destination",has_token:true,triggers:["new_issue","pr_approved","pr_review"],token_profile_ids:["work"]});
+  expect(onSave.mock.calls[0][0].notification_connectors?.[0].config).toEqual({chat_id:"@local_destination",has_token:true,triggers:["new_issue","pr_approved","pr_review","release"],token_profile_ids:["work"]});
 });
 it("keeps connector and global action groups scoped to their own settings", () => {
   render(<NotificationsPage settings={{...noticeSettings(),notification_connectors:[newTelegramConnector("a"),{...newTelegramConnector("b"),label:"Second"}]}} onSave={vi.fn()} />);
@@ -187,7 +187,7 @@ it("preserves keyboard order across connector fields and local actions", async (
   render(<NotificationsPage settings={{...noticeSettings(),notification_connectors:[newTelegramConnector("a")]}} onSave={vi.fn()} />);
   openConnector("Telegram"); fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Edited"}});
   const targets=[screen.getByLabelText("Name"),screen.getByRole("checkbox",{name:"Enabled"}),screen.getByLabelText("Chat ID"),screen.getByLabelText("Bot token"),
-    ...["Run started","Run succeeded","Run failed","Run blocked","New task","PR approved","Review requested"].map(name=>screen.getByRole("checkbox",{name})),
+    ...["Run started","Run succeeded","Run failed","Run blocked","New task","PR approved","Review requested","Release"].map(name=>screen.getByRole("checkbox",{name})),
     screen.getByRole("button",{name:"Remove connector Edited"}),screen.getByRole("button",{name:"Cancel"}),screen.getByRole("button",{name:"Apply changes"}),screen.getByRole("button",{name:"Close connector editor"})];
   expect(screen.getByRole("combobox",{name:"Connector type"}).matches(":disabled")).toBe(true);
   for(const target of targets) { await user.tab(); expect(document.activeElement).toBe(target); }
@@ -236,7 +236,7 @@ it.each([["Telegram","telegram"],["Google Chat","google_chat"]] as const)("adds 
   fireEvent.click(screen.getByRole("button",{name:"Save changes"})); await screen.findByText("Notification settings saved.");
   const saved=onSave.mock.calls[0][0].notification_connectors![0]; expect(saved.id).toBeTruthy();
   expect(saved).toEqual({id:saved.id,label,enabled:false,events:["run_started","run_succeeded","run_failed","run_blocked"],type:kind,
-    config:kind === "telegram" ? {chat_id:"",has_token:false,triggers:["new_issue","pr_approved","pr_review"],token_profile_ids:[]} : {has_webhook_url:false,triggers:["new_issue","pr_approved","pr_review"],token_profile_ids:[]}});
+    config:kind === "telegram" ? {chat_id:"",has_token:false,triggers:["new_issue","pr_approved","pr_review","release"],token_profile_ids:[]} : {has_webhook_url:false,triggers:["new_issue","pr_approved","pr_review","release"],token_profile_ids:[]}});
   expect(onSave).toHaveBeenCalledTimes(1);
 });
 it.each(["escape","close"])("preserves dirty fields when cancelling selector via %s", async method => {

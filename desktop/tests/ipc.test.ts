@@ -74,7 +74,7 @@ it("transports independent ceilings and reserved capacity through existing IPC",
   expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
   const snapshot = noticeSnapshot();
   snapshot.capacity = { global: { active: 1, limit: 8 }, by_trigger: {
-    new_issue: { active: 0, limit: 4 }, pr_review: { active: 0, limit: 4 }, pr_approved: { active: 1, limit: 2 },
+    new_issue: { active: 0, limit: 4 }, pr_review: { active: 0, limit: 4 }, pr_approved: { active: 1, limit: 2 }, release: { active: 0, limit: 4 },
   } };
   vi.mocked(invoke).mockResolvedValueOnce(snapshot);
   expect((await factoryApi.snapshot()).capacity).toEqual(snapshot.capacity);
