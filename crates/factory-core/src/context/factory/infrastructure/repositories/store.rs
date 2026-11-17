@@ -503,6 +503,7 @@ impl Store {
             .or_else(|| key.strip_prefix("pr-release:"))
             .or_else(|| key.strip_prefix("version-workspace:"))
             .or_else(|| key.strip_prefix("pr-version:"))
+            .or_else(|| key.strip_prefix("release-issue-close:"))
             .or_else(|| {
                 key.strip_prefix("review-feedback:")
                     .and_then(|s| s.split(':').next())

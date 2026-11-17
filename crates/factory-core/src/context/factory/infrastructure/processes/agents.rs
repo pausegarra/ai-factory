@@ -2,6 +2,7 @@ use crate::context::factory::domain::entities::models::issue_trigger_for_title;
 mod artifact_repair;
 mod invocation;
 mod output;
+mod release_completion;
 mod release_publication;
 mod repair;
 mod results;
@@ -299,7 +300,21 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
         });
     }
     if let Some(status) = result? {
-        let event = factory.store.detail(id)?.event;
+        let detail = factory.store.detail(id)?;
+        let event = &detail.event;
+        if status == "succeeded" && release_completion::is_publication(&detail) {
+            if !release_completion::confirmed(&detail) {
+                factory.set_run_status(id, "blocked", Some("Release publication was not confirmed; issue left open. Return data.distribution_result.published=true only after verified publication.".into()))?;
+                return Ok(());
+            }
+            release_completion::record_pending(factory, &detail)?;
+            let api = factory.github(&factory.store.token_for(&event.actor).await?)?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => bail!("Run cancelled before release issue closure"),
+                result = api.close_release_issue(factory, event, id) => result.context("Publication succeeded, but closing release issue failed")?,
+            }
+        }
         let merge_confirmed = factory
             .store
             .observation(&format!("pr-merge:{id}"))?
@@ -365,6 +380,9 @@ async fn execute_in_workspace(
     tasks: &mut JoinSet<Result<(String, String)>>,
 ) -> Result<Option<&'static str>> {
     let detail = factory.store.detail(id)?;
+    if release_completion::reuse_completed(factory, &detail)? {
+        return Ok(Some("succeeded"));
+    }
     let workspace = tokio::select! {_=cancel.cancelled()=>{return Ok(None)},r=prepare(factory,id,&detail.event,&cancel)=>r}?;
     {
         let run = factory.store.detail(id)?.run;
