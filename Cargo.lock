@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "ai-factory-desktop"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "factory-core",
  "serde",
