@@ -468,7 +468,7 @@ async fn release_selected_skill_reaches_both_agents_in_one_editable_step() {
         assert!(!prompt.contains("factory-unselected/SKILL.md"));
         assert!(prompt.contains("Adapt or omit pipeline phases"));
         assert!(prompt.contains("return blocked"));
-        assert!(prompt.contains("Never create tags or GitHub Releases"));
+        assert!(prompt.contains("Release publication authorization"));
         assert!(root
             .requests
             .lock()
@@ -570,5 +570,116 @@ async fn release_missing_prerequisites_block_and_reserved_release_action_fails()
             .unwrap()
             .iter()
             .all(|(method, _, _)| method == "GET"));
+    }
+}
+
+const PUBLICATION_PROBE: &str = r#"
+base="${AI_FACTORY_RESULT_PATH%.result.json}"
+actor=false
+if [ "${GH_TOKEN:-}" = dummy-token ] && [ "${GH_REPO:-}" = acme/repo ] && [ "${GH_HOST:-}" = github.com ]; then actor=true; fi
+git_auth=false
+if [ "$actor" = true ]; then
+  credentials=$(printf 'protocol=https\nhost=github.com\npath=acme/repo\n\n' | git credential fill)
+  case "$credentials" in *"username=x-access-token"*"password=$GH_TOKEN") git_auth=true ;; esac
+  printf 'publication-token:%s\n' "$GH_TOKEN"
+fi
+printf '{"actor":%s,"git_auth":%s}' "$actor" "$git_auth" > "$base.auth.json"
+"#;
+
+#[tokio::test]
+async fn release_publication_allows_tag_pipeline_with_actor_auth_for_both_agents() {
+    for agent in ["codex", "opencode"] {
+        let script = format!("{AGENT}\n{PUBLICATION_PROBE}");
+        let (root, factory) = fixture(&script, 4);
+        configure_release(&root, &factory, agent, None);
+        let detail = run_release(&factory).await;
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{agent}: {:?}",
+            detail.nodes
+        );
+        let session = root.path().join("data/sessions").join(&detail.run.id);
+        let prompt = std::fs::read_to_string(session.join("publish_app.stdin.txt")).unwrap();
+        assert!(
+            prompt.contains("Release publication authorization"),
+            "{agent}: missing permission"
+        );
+        assert!(!prompt.contains("Never use gh CLI."));
+        assert!(!prompt.contains("Never create tags or GitHub Releases"));
+        assert!(prompt.contains("GitHub Actions secrets"));
+        assert!(prompt.contains("Never force-push"));
+        let auth: Value =
+            serde_json::from_slice(&std::fs::read(session.join("publish_app.auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(auth, json!({"actor":true,"git_auth":true}), "{agent}");
+        let args = std::fs::read_to_string(session.join("publish_app.args.txt")).unwrap();
+        assert!(!args.contains("dummy-token"));
+        assert!(!prompt.contains("dummy-token"));
+        if agent == "codex" {
+            assert!(args.contains("sandbox_workspace_write.network_access=true"));
+            assert!(args.contains("shell_environment_policy.ignore_default_excludes=true"));
+            assert!(args.contains("shell_environment_policy.include_only="));
+        } else {
+            let config = std::fs::read_to_string(session.join("publish_app.config.json")).unwrap();
+            assert!(config.contains("Release publication authorization"));
+            assert!(!config.contains("Never use gh CLI."));
+            assert!(!config.contains("dummy-token"));
+        }
+        let log = factory.logs(&detail.run.id, "publish_app", 0).unwrap().text;
+        assert!(log.contains("publication-token:[REDACTED]"), "{log}");
+        assert!(!log.contains("dummy-token"));
+    }
+}
+
+#[tokio::test]
+async fn release_publication_permissions_do_not_reach_readonly_or_other_roles() {
+    for (trigger, node_id, access) in [
+        ("release", "publish_app", "read"),
+        ("release", "inspect", "write"),
+        ("new_issue", "publish_app", "write"),
+    ] {
+        for agent in ["codex", "opencode"] {
+            let script = format!("{AGENT}\n{PUBLICATION_PROBE}");
+            let (root, factory) = fixture(&script, 4);
+            configure_release(&root, &factory, agent, None);
+            let mut settings = factory.settings().unwrap();
+            for flow in &mut settings.flows {
+                flow.enabled = flow.id == trigger;
+            }
+            let flow = settings.flows.iter_mut().find(|f| f.id == trigger).unwrap();
+            flow.nodes[0].id = node_id.into();
+            flow.nodes[0].access = access.into();
+            flow.nodes[0].agent = agent.into();
+            factory.save_settings(settings).unwrap();
+            let event = if trigger == "release" {
+                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", "")
+            } else {
+                *root.issue.lock().unwrap() =
+                    json!({"state":"open","title":"[AI] work","user":{"login":"alice"}});
+                TriggerEvent::issue("acme/repo", 811, "[AI] work", "alice", "")
+            };
+            let id = factory.enqueue(event).unwrap().unwrap();
+            factory.start();
+            let detail = terminal(&factory, &id).await;
+            factory.shutdown().await;
+            assert_eq!(
+                detail.run.status, "succeeded",
+                "{trigger}/{node_id}/{access}/{agent}: {:?}",
+                detail.nodes
+            );
+            let session = root.path().join("data/sessions").join(id);
+            let prompt =
+                std::fs::read_to_string(session.join(format!("{node_id}.stdin.txt"))).unwrap();
+            assert!(prompt.contains("Never use gh CLI."));
+            assert!(!prompt.contains("Release publication authorization"));
+            let auth: Value = serde_json::from_slice(
+                &std::fs::read(session.join(format!("{node_id}.auth.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(auth, json!({"actor":false,"git_auth":false}));
+            let args =
+                std::fs::read_to_string(session.join(format!("{node_id}.args.txt"))).unwrap();
+            assert!(!args.contains("sandbox_workspace_write.network_access=true"));
+        }
     }
 }
