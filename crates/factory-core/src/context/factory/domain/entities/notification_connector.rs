@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub(crate) const NOTIFICATION_TRIGGER_IDS: [&str; 3] = ["new_issue", "pr_approved", "pr_review"];
+pub(crate) const NOTIFICATION_TRIGGER_IDS: [&str; 4] = super::models::TRIGGER_IDS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

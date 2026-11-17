@@ -50,6 +50,7 @@ fn trigger_label(trigger_id: &str, redact: &impl Fn(&str) -> String) -> String {
         "new_issue" => "New task".into(),
         "pr_approved" => "PR approved".into(),
         "pr_review" => "Review requested".into(),
+        "release" => "Release".into(),
         _ => {
             let redacted = visible_text(&redact(trigger_id), usize::MAX);
             if contains_credential_marker(&redacted) {
@@ -349,6 +350,7 @@ mod tests {
             ("new_issue", "New task"),
             ("pr_approved", "PR approved"),
             ("pr_review", "Review requested"),
+            ("release", "Release"),
         ] {
             for (previous, status, heading) in [
                 ("queued", "running", "started"),
@@ -474,6 +476,7 @@ mod tests {
             ("new_issue", "New task"),
             ("pr_approved", "PR approved"),
             ("pr_review", "Review requested"),
+            ("release", "Release"),
         ] {
             edge.run.trigger_id = trigger.into();
             let message = notification_for(&edge, str::to_owned).unwrap();

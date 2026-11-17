@@ -88,6 +88,21 @@ impl TryFrom<SettingsInput> for Settings {
                 profile
             })
             .collect();
+        let mut flows = input.flows;
+        let legacy_ids = ["new_issue", "pr_approved", "pr_review"];
+        if flows.len() == legacy_ids.len()
+            && legacy_ids
+                .iter()
+                .all(|id| flows.iter().filter(|f| f.id == *id).count() == 1)
+        {
+            flows.push(
+                Settings::default()
+                    .flows
+                    .into_iter()
+                    .find(|f| f.id == "release")
+                    .unwrap(),
+            );
+        }
         let settings = Self {
             notification_connectors: decode_notification_connectors(
                 input.notification_connectors,
@@ -103,7 +118,7 @@ impl TryFrom<SettingsInput> for Settings {
             max_concurrent: input.max_concurrent,
             trigger_max_concurrent: input.trigger_max_concurrent,
             start_at_login: input.start_at_login,
-            flows: input.flows,
+            flows,
         };
         settings.validate_concurrency()?;
         Ok(settings)

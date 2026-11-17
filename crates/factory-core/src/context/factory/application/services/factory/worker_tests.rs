@@ -32,7 +32,7 @@ fn event(trigger: &str, repository: &str, actor: &str, number: u64) -> TriggerEv
     let mut event = TriggerEvent::issue(repository, number, "[AI] fixture", actor, "");
     event.trigger_id = trigger.into();
     event.event_id = format!("{trigger}:{repository}#{number}");
-    if trigger != "new_issue" {
+    if !matches!(trigger, "new_issue" | "release") {
         event.head_sha = "a".repeat(40);
         event.url = format!("https://github.com/{repository}/pull/{number}");
     }
@@ -727,7 +727,7 @@ fn snapshot_capacity_counts_reserved_queued_but_not_unreserved_queue() {
     assert_eq!(value.capacity.global.limit, 4);
     assert_eq!(value.capacity.by_trigger["pr_review"].active, 1);
     assert_eq!(value.capacity.by_trigger["new_issue"].active, 0);
-    assert_eq!(value.capacity.by_trigger.len(), 3);
+    assert_eq!(value.capacity.by_trigger.len(), 4);
     assert_eq!(f.run_detail(&waiting).unwrap().run.status, "queued");
     release_for_test(&f, &reserved);
     assert_eq!(f.snapshot().unwrap().capacity.global.active, 0);
@@ -1046,4 +1046,41 @@ fn cancelled_worker_blocks_same_event_retry_until_cleanup_with_spare_capacity() 
     assert!(factory.register_queued_worker(&other).unwrap().is_some());
     release_for_test(&factory, &active);
     assert!(factory.register_queued_worker(&retry).unwrap().is_some());
+}
+
+#[test]
+fn release_ceiling_shares_global_capacity_and_reports_reserved_slots() {
+    let (_dir, factory) = setup();
+    let mut s = factory.settings().unwrap();
+    s.max_concurrent = 2;
+    s.trigger_max_concurrent.insert("release".into(), 1);
+    s.flows
+        .iter_mut()
+        .find(|f| f.id == "release")
+        .unwrap()
+        .enabled = true;
+    factory.save_settings(s).unwrap();
+    let first = queued(&factory, "release", 81);
+    let second = queued(&factory, "release", 82);
+    let ai = queued(&factory, "new_issue", 83);
+    assert!(factory.register_queued_worker(&first).unwrap().is_some());
+    assert!(factory.register_queued_worker(&second).unwrap().is_none());
+    assert!(factory.register_queued_worker(&ai).unwrap().is_some());
+    let snapshot = factory.snapshot().unwrap();
+    assert_eq!(snapshot.capacity.global.active, 2);
+    assert_eq!(snapshot.capacity.by_trigger["release"].active, 1);
+    assert_eq!(snapshot.capacity.by_trigger["release"].limit, 1);
+    assert_eq!(factory.run_detail(&second).unwrap().run.status, "queued");
+    release_for_test(&factory, &ai);
+    let mut s = factory.settings().unwrap();
+    s.trigger_max_concurrent.insert("release".into(), 2);
+    factory.save_settings(s).unwrap();
+    assert!(factory.register_queued_worker(&second).unwrap().is_some());
+    let mut s = factory.settings().unwrap();
+    s.trigger_max_concurrent.insert("release".into(), 1);
+    factory.save_settings(s).unwrap();
+    assert_eq!(
+        factory.snapshot().unwrap().capacity.by_trigger["release"].active,
+        2
+    );
 }

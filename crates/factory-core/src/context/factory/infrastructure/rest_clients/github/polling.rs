@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::factory::domain::entities::models::issue_trigger_for_title;
 use crate::context::factory::infrastructure::repositories::pr_origins::TrackedPrOrigin;
 use std::collections::{HashMap, HashSet};
 
@@ -11,6 +12,8 @@ impl Github {
             let actor = &profile.account;
             let issue = profile.allows_actor("new_issue")
                 && factory.workflow_enabled_for("new_issue", actor)?;
+            let release = profile.allows_actor("release")
+                && factory.workflow_enabled_for("release", actor)?;
             let approval = profile.allows_actor("pr_approved")
                 && factory.workflow_enabled_for("pr_approved", actor)?;
             let review = profile.allows_actor("pr_review")
@@ -22,7 +25,8 @@ impl Github {
                         && profile.allows_owner(origin.repository.split('/').next().unwrap_or(""))
                 })
                 .collect();
-            if profile.owners.is_empty() || !(issue || (approval && !tracked.is_empty()) || review)
+            if profile.owners.is_empty()
+                || !(issue || release || (approval && !tracked.is_empty()) || review)
             {
                 continue;
             }
@@ -41,7 +45,7 @@ impl Github {
                     continue;
                 }
             };
-            if issue {
+            if issue || release {
                 if let Err(error) = api.poll_issues(factory, profile).await {
                     failures.push(format!("Issues @{actor}: {error}"));
                 }
@@ -102,47 +106,76 @@ impl Github {
 
     async fn poll_issues(&self, factory: &Factory, profile: &TokenProfile) -> Result<()> {
         let actor = &profile.account;
+        let active: Vec<&str> = ["new_issue", "release"]
+            .into_iter()
+            .filter(|id| profile.allows_actor(id))
+            .map(|id| Ok((id, factory.workflow_enabled_for(id, actor)?)))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|(id, enabled)| enabled.then_some(id))
+            .collect();
+        if active.is_empty() {
+            return Ok(());
+        }
         let rows = self
             .scoped_search(profile, &format!("is:issue is:open author:{actor}"))
             .await?;
         for row in rows {
-            if row.get("pull_request").is_some() {
+            if row.get("pull_request").is_some()
+                || row["state"].as_str().is_some_and(|s| s != "open")
+                || row["user"]["login"]
+                    .as_str()
+                    .is_some_and(|a| !a.eq_ignore_ascii_case(actor))
+            {
                 continue;
             }
             let repo = repository(&row)?;
             let n = row["number"].as_u64().context("Invalid issue number")?;
-            if factory.store.event_consumed(&format!("issue:{repo}#{n}"))?
-                || row["title"]
-                    .as_str()
-                    .is_some_and(|title| !title.starts_with("[AI]"))
-                || row["user"]["login"]
-                    .as_str()
-                    .is_some_and(|author| !author.eq_ignore_ascii_case(actor))
-            {
-                continue;
+            let candidates = match row["title"].as_str().map(issue_trigger_for_title) {
+                Some(Some(id)) if active.contains(&id) => vec![id],
+                Some(_) => continue,
+                None => active.clone(),
+            };
+            let mut pending = vec![];
+            for trigger in candidates {
+                let event = if trigger == "release" {
+                    TriggerEvent::release_issue(&repo, n, "", actor, "")
+                } else {
+                    TriggerEvent::issue(&repo, n, "", actor, "")
+                };
+                if !factory.store.event_consumed(&event.event_id)?
+                    && factory.workflow_enabled_for(trigger, actor)?
+                {
+                    pending.push(trigger);
+                }
             }
-            if !factory.workflow_enabled_for("new_issue", actor)? {
-                return Ok(());
+            if pending.is_empty() {
+                continue;
             }
             let fresh = self
                 .request(Method::GET, &format!("/repos/{repo}/issues/{n}"), None)
                 .await?;
             if fresh.get("pull_request").is_some()
                 || fresh["state"] != "open"
-                || !fresh["title"].as_str().unwrap_or("").starts_with("[AI]")
                 || !fresh["user"]["login"]
                     .as_str()
-                    .is_some_and(|author| author.eq_ignore_ascii_case(actor))
+                    .is_some_and(|a| a.eq_ignore_ascii_case(actor))
             {
                 continue;
             }
-            let mut event = TriggerEvent::issue(
-                &repo,
-                n,
-                fresh["title"].as_str().unwrap(),
-                actor,
-                fresh["body"].as_str().unwrap_or(""),
-            );
+            let Some(trigger) = fresh["title"].as_str().and_then(issue_trigger_for_title) else {
+                continue;
+            };
+            if !pending.contains(&trigger) {
+                continue;
+            }
+            let title = fresh["title"].as_str().unwrap();
+            let body = fresh["body"].as_str().unwrap_or("");
+            let mut event = if trigger == "release" {
+                TriggerEvent::release_issue(&repo, n, title, actor, body)
+            } else {
+                TriggerEvent::issue(&repo, n, title, actor, body)
+            };
             ensure!(
                 fresh["html_url"] == event.url,
                 "Issue URL identity mismatch"

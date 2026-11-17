@@ -38,7 +38,7 @@ it("exposes empty capacity and inherited trigger limits in preview", async () =>
   expect(snapshot.capacity.by_trigger).toEqual({
     new_issue: { active: 0, limit: 4 },
     pr_review: { active: 0, limit: 4 },
-    pr_approved: { active: 0, limit: 4 },
+    pr_approved: { active: 0, limit: 4 }, release: { active: 0, limit: 4 },
   });
   snapshot.capacity.by_trigger.new_issue.active = 30;
   settings.trigger_max_concurrent!.pr_review = 1;
@@ -52,4 +52,11 @@ it("defaults automatic issue comments to enabled in isolated preview settings", 
   expect(first.issue_node_comments_enabled).toBe(true);
   first.issue_node_comments_enabled = false;
   expect((await factoryApi.settings()).issue_node_comments_enabled).toBe(true);
+});
+
+it("provides an isolated disabled Release flow in preview",async()=>{
+ const s=await factoryApi.settings();expect(s.flows).toHaveLength(4);
+ const release=s.flows.find(f=>f.id==="release")!;expect(release.enabled).toBe(false);release.enabled=true;
+ expect((await factoryApi.settings()).flows.find(f=>f.id==="release")!.enabled).toBe(false);
+ expect((await factoryApi.snapshot()).capacity.by_trigger.release).toEqual({active:0,limit:4});
 });

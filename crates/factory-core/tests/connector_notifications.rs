@@ -916,16 +916,22 @@ async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() 
         true,
         json!(["run_started", "run_succeeded", "run_failed", "run_blocked"]),
     );
-    telegram["config"]["triggers"] = json!(["new_issue", "pr_approved", "pr_review"]);
+    telegram["config"]["triggers"] = json!(["new_issue", "pr_approved", "pr_review", "release"]);
     settings.notification_connectors = serde_json::from_value(json!([
         telegram,
         {"id":"gc","label":"Chat","enabled":true,
          "events":["run_started","run_succeeded","run_failed","run_blocked"],
          "type":"google_chat","config":{
              "webhook_url":"https://fixture.example/messages?token=fixture_only",
-             "triggers":["new_issue","pr_approved","pr_review"],"token_profile_ids":["work"]}}
+             "triggers":["new_issue","pr_approved","pr_review","release"],"token_profile_ids":["work"]}}
     ]))
     .unwrap();
+    settings
+        .flows
+        .iter_mut()
+        .find(|f| f.id == "release")
+        .unwrap()
+        .enabled = true;
     f.save_settings(settings).unwrap();
     let native = Arc::new(common::notifications::RecordingNotifications::default());
     f.set_run_notification_sink(native.clone());
@@ -936,6 +942,7 @@ async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() 
         ("new_issue", "New task"),
         ("pr_approved", "PR approved"),
         ("pr_review", "Review requested"),
+        ("release", "Release"),
     ] {
         for status in ["running", "succeeded", "failed", "blocked"] {
             number += 1;
@@ -958,14 +965,14 @@ async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() 
             ));
         }
     }
-    transport.wait_for_calls(24).await;
+    transport.wait_for_calls(32).await;
     f.shutdown().await;
     let native_messages = native.drain();
     let messages = transport.messages();
     let chats = transport.chats();
-    assert_eq!(native_messages.len(), 12);
-    assert_eq!(messages.len(), 24);
-    assert_eq!(chats.len(), 24);
+    assert_eq!(native_messages.len(), 16);
+    assert_eq!(messages.len(), 32);
+    assert_eq!(chats.len(), 32);
     for (id, status, body) in expected {
         let native = native_messages.iter().find(|m| m.run_id == id).unwrap();
         assert_eq!(native.status, status);
@@ -981,5 +988,78 @@ async fn connector_trigger_label_is_shared_by_native_telegram_and_google_chat() 
             assert_eq!(delivered.len(), 1);
             assert_eq!(delivered[0], native);
         }
+    }
+}
+
+#[tokio::test]
+async fn release_routes_each_edge_only_to_matching_trigger_and_profile() {
+    for kind in ["telegram", "google_chat"] {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Arc::new(common::notifications::RecordingTransport::default());
+        let f = open(dir.path(), t.clone());
+        let mut settings = f.settings().unwrap();
+        settings.token_profiles = vec![
+            TokenProfile {
+                id: "work".into(),
+                account: "alice".into(),
+                label: "Work".into(),
+                ..Default::default()
+            },
+            TokenProfile {
+                id: "other".into(),
+                account: "bob".into(),
+                label: "Other".into(),
+                ..Default::default()
+            },
+        ];
+        settings
+            .flows
+            .iter_mut()
+            .find(|f| f.id == "release")
+            .unwrap()
+            .enabled = true;
+        let mut connectors = vec![];
+        for (id, trigger, profile, enabled) in [
+            ("selected", "release", "work", true),
+            ("other_trigger", "new_issue", "work", true),
+            ("other_profile", "release", "other", true),
+            ("disabled", "release", "work", false),
+        ] {
+            connectors.push(json!({"id":id,"label":id,"enabled":enabled,"events":["run_started","run_succeeded","run_failed","run_blocked"],"type":kind,"config":{"chat_id":id,"bot_token":"123456:fixture_token_abcdefghijklmnopqrstuvwxyz","webhook_url":"https://fixture.example/messages?token=fixture","triggers":[trigger],"token_profile_ids":[profile]}}));
+        }
+        settings.notification_connectors = serde_json::from_value(json!(connectors)).unwrap();
+        f.save_settings(settings).unwrap();
+        f.start_notification_delivery();
+        for (n, terminal) in [(91, "succeeded"), (92, "failed"), (93, "blocked")] {
+            let mut event =
+                TriggerEvent::release_issue("acme/repo", n, "[Release] routing", "alice", "");
+            event.origin_token_profile_id = Some("work".into());
+            let id = f.enqueue(event).unwrap().unwrap();
+            assert_eq!(
+                f.run_detail(&id)
+                    .unwrap()
+                    .run
+                    .origin_token_profile_id
+                    .as_deref(),
+                Some("work")
+            );
+            for state in ["running", "running", terminal, terminal] {
+                f.set_run_status(&id, state, Some("timeout PRIVATE_ERROR".into()))
+                    .unwrap();
+            }
+        }
+        t.wait_for_calls(6).await;
+        f.shutdown().await;
+        assert_eq!(t.messages().len(), 6);
+        assert!(t
+            .messages()
+            .iter()
+            .all(|m| m.body.starts_with("Trigger: Release") && !m.body.contains("PRIVATE_ERROR")));
+        assert!(t.chats().iter().all(|c| c
+            == if kind == "telegram" {
+                "selected"
+            } else {
+                "google_chat"
+            }));
     }
 }

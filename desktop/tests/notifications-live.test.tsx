@@ -47,7 +47,7 @@ it("ignores a live Settings read started before save and accepts a later refresh
   openConnector("Saved label"); expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Saved label");
   expect((screen.getByRole("checkbox",{name:"New task"}) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByRole("checkbox",{name:"Work (@alice)"}) as HTMLInputElement).checked).toBe(true);
-  expect(vi.mocked(factoryApi.saveSettings).mock.calls[0][0].notification_connectors![0].config).toMatchObject({triggers:["pr_approved","pr_review"],token_profile_ids:["work"]});
+  expect(vi.mocked(factoryApi.saveSettings).mock.calls[0][0].notification_connectors![0].config).toMatchObject({triggers:["pr_approved","pr_review","release"],token_profile_ids:["work"]});
   cancelConnector(); const latest={...noticeSettings(),token_profiles:profiles,notification_connectors:[{...newTelegramConnector("a"),label:"Later refresh"}]};
   vi.mocked(factoryApi.settings).mockResolvedValue(latest);
   act(()=>mock.listener?.({kind:"settings_changed",timestamp:"later"}));

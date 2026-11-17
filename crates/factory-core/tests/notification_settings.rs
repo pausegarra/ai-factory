@@ -202,7 +202,7 @@ fn notification_telegram_legacy_filters_are_canonical_and_do_not_expand_after_sa
     let config = &canonical["notification_connectors"][0]["config"];
     assert_eq!(
         config["triggers"],
-        json!(["new_issue", "pr_approved", "pr_review"])
+        json!(["new_issue", "pr_approved", "pr_review", "release"])
     );
     assert_eq!(config["token_profile_ids"], json!(["work"]));
     assert_eq!(canonical["notification_connectors"][0]["enabled"], true);
@@ -356,7 +356,7 @@ fn notification_telegram_migration_only_fills_missing_fields_and_is_idempotent()
             assert_eq!(c["events"], json!(["run_started"]));
             assert_eq!(
                 c["config"]["triggers"],
-                triggers.unwrap_or(json!(["new_issue", "pr_approved", "pr_review"]))
+                triggers.unwrap_or(json!(["new_issue", "pr_approved", "pr_review", "release"]))
             );
             assert_eq!(
                 c["config"]["token_profile_ids"],
@@ -439,4 +439,51 @@ fn notification_migration_does_not_invent_filters_for_other_providers() {
         serde_json::to_value(s).unwrap()["notification_connectors"],
         wire["notification_connectors"]
     );
+}
+
+#[test]
+fn release_filters_distinguish_legacy_telegram_from_explicit_selection() {
+    for explicit in [false, true] {
+        let mut wire = serde_json::to_value(Settings::default()).unwrap();
+        wire["notification_connectors"] = json!([{
+            "id":"team","label":"Team","enabled":false,"events":["run_failed"],
+            "type":"telegram","config":{"chat_id":"-1001","has_token":false}
+        }]);
+        if explicit {
+            wire["notification_connectors"][0]["config"]["triggers"] = json!(["new_issue"]);
+        }
+        let s: Settings = serde_json::from_value(wire).unwrap();
+        s.validate().unwrap();
+        let stored = serde_json::to_value(s).unwrap();
+        let triggers = stored["notification_connectors"][0]["config"]["triggers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(triggers.contains(&json!("release")), !explicit);
+        if explicit {
+            assert_eq!(triggers, &vec![json!("new_issue")]);
+        }
+    }
+}
+
+#[test]
+fn release_notification_filters_validate_both_providers_without_expanding_explicit_lists() {
+    for kind in ["telegram", "google_chat"] {
+        for (triggers, valid) in [
+            (json!(["release"]), true),
+            (json!(["release", "release"]), false),
+            (json!(["unknown"]), false),
+            (json!([]), true),
+        ] {
+            let mut wire = filter_settings(kind);
+            wire["notification_connectors"][0]["enabled"] = json!(false);
+            wire["notification_connectors"][0]["config"]["triggers"] = triggers.clone();
+            let s: Settings = serde_json::from_value(wire).unwrap();
+            assert_eq!(s.validate().is_ok(), valid, "{kind}: {triggers}");
+            assert_eq!(
+                serde_json::to_value(s).unwrap()["notification_connectors"][0]["config"]
+                    ["triggers"],
+                triggers
+            );
+        }
+    }
 }

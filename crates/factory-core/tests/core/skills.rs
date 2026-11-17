@@ -397,3 +397,178 @@ touch "$(dirname "$0")/unexpected-execution"
     assert_eq!(factory.run_detail(&id).unwrap().run.status, "cancelled");
     assert!(!root.path().join("unexpected-execution").exists());
 }
+
+async fn run_release(factory: &std::sync::Arc<Factory>) -> RunDetail {
+    let id = factory
+        .enqueue(TriggerEvent::release_issue(
+            "acme/repo",
+            811,
+            "[Release] fixture",
+            "alice",
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+    factory.start();
+    let detail = terminal(factory, &id).await;
+    factory.shutdown().await;
+    detail
+}
+fn configure_release(
+    root: &super::FixtureDir,
+    factory: &Factory,
+    agent: &str,
+    skills: Option<Vec<String>>,
+) {
+    *root.issue.lock().unwrap() =
+        json!({"state":"open","title":"[Release] fixture","user":{"login":"alice"}});
+    let mut settings = factory.settings().unwrap();
+    settings.issue_node_comments_enabled = false;
+    for flow in &mut settings.flows {
+        flow.enabled = flow.id == "release";
+    }
+    let node = &mut settings
+        .flows
+        .iter_mut()
+        .find(|f| f.id == "release")
+        .unwrap()
+        .nodes[0];
+    node.agent = agent.into();
+    node.skills = skills;
+    factory.save_settings(settings).unwrap();
+}
+
+#[tokio::test]
+async fn release_selected_skill_reaches_both_agents_in_one_editable_step() {
+    for agent in ["codex", "opencode"] {
+        let (root, factory) = fixture(AGENT, 4);
+        install_project_skills(root.path());
+        configure_release(
+            &root,
+            &factory,
+            agent,
+            Some(vec!["factory-selected".into()]),
+        );
+        let detail = run_release(&factory).await;
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{agent}: {:?}",
+            detail.run.error
+        );
+        assert_eq!(detail.nodes.len(), 1);
+        assert_eq!(detail.nodes[0].id, "publish_app");
+        let prompt = std::fs::read_to_string(
+            root.path()
+                .join("data/sessions")
+                .join(&detail.run.id)
+                .join("publish_app.stdin.txt"),
+        )
+        .unwrap();
+        assert!(prompt.contains("factory-selected/SKILL.md"));
+        assert!(!prompt.contains("factory-unselected/SKILL.md"));
+        assert!(prompt.contains("Adapt or omit pipeline phases"));
+        assert!(prompt.contains("return blocked"));
+        assert!(prompt.contains("Never create tags or GitHub Releases"));
+        assert!(root
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, _, _)| method == "GET"));
+    }
+}
+
+#[tokio::test]
+async fn release_revalidates_fresh_issue_before_any_agent_execution() {
+    for change in ["closed", "title", "author", "pr"] {
+        let (root, factory) = fixture(AGENT, 4);
+        configure_release(&root, &factory, "codex", None);
+        let id = factory
+            .enqueue(TriggerEvent::release_issue(
+                "acme/repo",
+                811,
+                "[Release] fixture",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        {
+            let mut issue = root.issue.lock().unwrap();
+            match change {
+                "closed" => issue["state"] = json!("closed"),
+                "title" => issue["title"] = json!("[AI] changed"),
+                "author" => issue["user"]["login"] = json!("bob"),
+                _ => issue["pull_request"] = json!({}),
+            }
+        }
+        factory.start();
+        let detail = terminal(&factory, &id).await;
+        factory.shutdown().await;
+        assert_eq!(detail.run.status, "failed", "{change}");
+        assert!(detail
+            .run
+            .error
+            .unwrap()
+            .contains("Issue no longer eligible"));
+        assert!(!root.path().join("skill-execution.calls").exists());
+    }
+}
+
+#[tokio::test]
+async fn release_missing_selected_skill_fails_without_running_agent() {
+    let (root, factory) = fixture(AGENT, 4);
+    configure_release(
+        &root,
+        &factory,
+        "codex",
+        Some(vec!["factory-skill-no-longer-installed".into()]),
+    );
+    let detail = run_release(&factory).await;
+    assert_eq!(detail.run.status, "failed");
+    assert!(detail.nodes[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Selected skill is not installed"));
+    assert!(!root.path().join("skill-execution.calls").exists());
+}
+
+#[tokio::test]
+async fn release_missing_prerequisites_block_and_reserved_release_action_fails() {
+    for (status, data, want) in [
+        (
+            "blocked",
+            json!({"verification":{"reason":"fixture prerequisite absent"}}),
+            "blocked",
+        ),
+        ("succeeded", json!({"release":{}}), "failed"),
+    ] {
+        let script = format!(
+            "cat >/dev/null\nprintf '%s' '{}' > \"$AI_FACTORY_RESULT_PATH\"",
+            json!({"status":status,"summary":"Missing distribution credentials","artifacts":[],"data":data})
+        );
+        let (root, factory) = fixture(&script, 4);
+        configure_release(&root, &factory, "codex", None);
+        let detail = run_release(&factory).await;
+        assert_eq!(detail.run.status, want, "{:?}", detail.nodes);
+        if status == "blocked" {
+            assert_eq!(
+                detail.nodes[0].result.as_ref().unwrap()["summary"],
+                "Missing distribution credentials"
+            );
+        } else {
+            assert!(detail.nodes[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Release actions are no longer supported"));
+        }
+        assert!(root
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, _, _)| method == "GET"));
+    }
+}

@@ -2,7 +2,7 @@ mod common;
 use factory_core::*;
 use serde_json::json;
 
-const TRIGGERS: [&str; 3] = ["new_issue", "pr_review", "pr_approved"];
+const TRIGGERS: [&str; 4] = ["new_issue", "pr_review", "pr_approved", "release"];
 
 #[test]
 fn legacy_capacity_inherits_and_explicit_override_stays_independent() {
@@ -56,7 +56,7 @@ fn capacity_rejects_invalid_input_instead_of_normalizing_it() {
         assert!(serde_json::from_value::<Settings>(raw).is_err());
     }
     for limit in [1, 64] {
-        let raw = json!({"max_concurrent":limit,"trigger_max_concurrent": {"new_issue":limit,"pr_review":limit,"pr_approved":limit}});
+        let raw = json!({"max_concurrent":limit,"trigger_max_concurrent": {"new_issue":limit,"pr_review":limit,"pr_approved":limit,"release":limit}});
         let s: Settings = serde_json::from_value(raw).unwrap();
         s.validate().unwrap();
         for trigger in TRIGGERS {

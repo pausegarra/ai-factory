@@ -44,7 +44,7 @@ export function attentionSnapshot(runs: Run[], deletions: Snapshot["deletions"] 
       default: metrics.failed++;
     }
   }
-  const active = { new_issue: 0, pr_review: 0, pr_approved: 0 };
+  const active = { new_issue: 0, pr_review: 0, pr_approved: 0, release: 0 };
   for (const run of runs) if (run.status === "running") active[run.trigger_id]++;
   return { runs, deletions, metrics, capacity: capacityFixture(active), service: {
     running: true, polling: false, last_poll_at: null,

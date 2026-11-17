@@ -1,3 +1,4 @@
+use crate::context::factory::domain::entities::models::issue_trigger_for_title;
 mod artifact_repair;
 mod invocation;
 mod output;
@@ -191,7 +192,7 @@ async fn prepare(
         factory
             .store
             .observe(&format!("identity:{id}"), &identity)?;
-        if event.trigger_id == "new_issue" {
+        if matches!(event.trigger_id.as_str(), "new_issue" | "release") {
             let issue = api
                 .request(
                     reqwest::Method::GET,
@@ -201,10 +202,12 @@ async fn prepare(
                 .await?;
             ensure!(
                 issue["state"] == "open"
-                    && issue["title"].as_str().unwrap_or("").starts_with("[AI]")
+                    && issue["title"].as_str().and_then(issue_trigger_for_title)
+                        == Some(event.trigger_id.as_str())
                     && issue["user"]["login"]
                         .as_str()
-                        .is_some_and(|v| v.eq_ignore_ascii_case(&event.actor)),
+                        .is_some_and(|v| v.eq_ignore_ascii_case(&event.actor))
+                    && issue.get("pull_request").is_none(),
                 "Issue no longer eligible"
             );
         }

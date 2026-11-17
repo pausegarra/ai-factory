@@ -549,6 +549,7 @@ export function SettingsPage({
               ["new_issue", "New issue", "new issue"],
               ["pr_review", "PR review", "PR review"],
               ["pr_approved", "PR approved", "PR approved"],
+              ["release", "Release", "release"],
             ] as const).map(([trigger, label, inheritLabel]) => (
               <div key={trigger}>
                 <Field label={`${label} concurrent tasks`} hint="From 1 to 64. Uses the global limit unless you set a value.">

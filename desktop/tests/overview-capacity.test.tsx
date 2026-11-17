@@ -1,3 +1,4 @@
+import { capacityFixture } from "./fixtures/capacity";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, it, expect, vi } from "vitest";
@@ -8,7 +9,7 @@ afterEach(cleanup);
 it("uses reserved capacity independently of historical run states", () => {
   const value = attentionSnapshot(attentionHistory(["queued", "queued", "queued"]));
   value.capacity = { global: { active: 3, limit: 8 }, by_trigger: {
-    new_issue: { active: 1, limit: 4 }, pr_review: { active: 0, limit: 3 }, pr_approved: { active: 2, limit: 2 },
+    new_issue: { active: 1, limit: 4 }, pr_review: { active: 0, limit: 3 }, pr_approved: { active: 2, limit: 2 }, release: { active: 0, limit: 4 },
   } };
   render(<OverviewPage snapshot={value} settings={attentionSettings} onPage={() => {}} onRun={() => {}} />);
   const panel = screen.getByRole("region", { name: "Capacity" });
@@ -21,7 +22,7 @@ it("uses reserved capacity independently of historical run states", () => {
 it("shows real occupancy above a reduced limit until workers drain", () => {
   const value = attentionSnapshot([]);
   value.capacity = { global: { active: 2, limit: 1 }, by_trigger: {
-    new_issue: { active: 2, limit: 1 }, pr_review: { active: 0, limit: 1 }, pr_approved: { active: 0, limit: 1 },
+    new_issue: { active: 2, limit: 1 }, pr_review: { active: 0, limit: 1 }, pr_approved: { active: 0, limit: 1 }, release: { active: 0, limit: 4 },
   } };
   const props = { settings: attentionSettings, onPage: () => {}, onRun: () => {} };
   const view = render(<OverviewPage snapshot={value} {...props} />);
@@ -71,7 +72,7 @@ it("aligns trigger metrics with readable neutral secondary styling", () => {
       by_trigger: {
         new_issue: { active: 2, limit: 1 },
         pr_review: { active: 10, limit: 32 },
-        pr_approved: { active: 11, limit: 64 },
+        pr_approved: { active: 11, limit: 64 }, release: { active: 0, limit: 4 },
       },
     };
     render(
@@ -82,7 +83,7 @@ it("aligns trigger metrics with readable neutral secondary styling", () => {
     const list = panel.querySelector("dl");
     expect(list).not.toBeNull();
     const rows = Array.from(list!.children);
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     const panelStyle = getComputedStyle(panel);
     const globalNumber = panel.querySelector(".capacity-value strong")!;
     const globalSize = parseFloat(getComputedStyle(globalNumber).fontSize);
@@ -138,7 +139,7 @@ it("preserves trigger order and refreshes every reading without changing Setting
     by_trigger: {
       new_issue: { active: 2, limit: 1 },
       pr_review: { active: 10, limit: 32 },
-      pr_approved: { active: 11, limit: 64 },
+      pr_approved: { active: 11, limit: 64 }, release: { active: 0, limit: 4 },
     },
   };
   const props = { settings: attentionSettings, onPage, onRun: () => {} };
@@ -146,7 +147,7 @@ it("preserves trigger order and refreshes every reading without changing Setting
   expect(screen.getAllByRole("region", { name: "Capacity" })).toHaveLength(1);
   const panel = screen.getByRole("region", { name: "Capacity" });
   expect(Array.from(panel.querySelectorAll("dt"), (node) => node.textContent))
-    .toEqual(["New issue", "PR review", "PR approved"]);
+    .toEqual(["New issue", "PR review", "PR approved", "Release"]);
   expect(within(panel).getByLabelText("Global capacity").textContent).toBe("23 / 64");
   expect(within(panel).getByText("41 slots available for new tasks.")).toBeTruthy();
   expect(panel.querySelectorAll(".capacity-slots > span")).toHaveLength(16);
@@ -161,7 +162,7 @@ it("preserves trigger order and refreshes every reading without changing Setting
     by_trigger: {
       new_issue: { active: 0, limit: 4 },
       pr_review: { active: 1, limit: 3 },
-      pr_approved: { active: 0, limit: 2 },
+      pr_approved: { active: 0, limit: 2 }, release: { active: 0, limit: 4 },
     },
   };
   view.rerender(<OverviewPage snapshot={next} {...props} />);
@@ -173,8 +174,19 @@ it("preserves trigger order and refreshes every reading without changing Setting
 
   view.rerender(<OverviewPage snapshot={attentionSnapshot([])} {...props} />);
   expect(within(panel).getByLabelText("Global capacity").textContent).toBe("0 / 4");
-  for (const label of ["New issue", "PR review", "PR approved"]) {
+  for (const label of ["New issue", "PR review", "PR approved", "Release"]) {
     expect(within(panel).getByLabelText(label + " capacity").textContent).toBe("0 / 4");
   }
   expect(within(panel).getByText("All execution slots are available.")).toBeTruthy();
+});
+
+it("counts Release occupancy in global and per trigger capacity", () => {
+  const value = attentionSnapshot([]);
+  value.capacity = capacityFixture({ release: 1 }, 4, { release: 2 });
+  render(<OverviewPage snapshot={value} settings={attentionSettings} onPage={vi.fn()} onRun={vi.fn()} />);
+  expect(screen.getByLabelText("Global capacity").textContent).toBe("1 / 4");
+  expect(screen.getByLabelText("Release capacity").textContent).toBe("1 / 2");
+  for (const label of ["New issue", "PR review", "PR approved"]) {
+    expect(screen.getByLabelText(label + " capacity").textContent).toBe("0 / 4");
+  }
 });

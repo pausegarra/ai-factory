@@ -6,6 +6,18 @@ use std::collections::{BTreeMap, HashSet};
 mod default_prompts;
 mod settings_input;
 
+pub(crate) const TRIGGER_IDS: [&str; 4] = ["new_issue", "pr_approved", "pr_review", "release"];
+
+pub(crate) fn issue_trigger_for_title(title: &str) -> Option<&'static str> {
+    if title.starts_with("[AI]") {
+        Some("new_issue")
+    } else if title.starts_with("[Release]") {
+        Some("release")
+    } else {
+        None
+    }
+}
+
 pub(crate) const VERSION_BUMP_NODE_ID: &str = "version_bump";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,7 +63,7 @@ impl TokenProfile {
 
     pub fn allows_actor(&self, trigger: &str) -> bool {
         let actors = match trigger {
-            "new_issue" | "pr_approved" => &self.authors,
+            "new_issue" | "pr_approved" | "release" => &self.authors,
             "pr_review" => &self.reviewers,
             _ => return false,
         };
@@ -157,11 +169,14 @@ fn empty_schema() -> Value {
 }
 impl Default for Settings {
     fn default() -> Self {
-        let mk = |id: &str, name: &str, steps: Vec<(&str, &str, &str, Vec<&str>)>| {
+        let mk = |id: &str,
+                  name: &str,
+                  enabled: bool,
+                  steps: Vec<(&str, &str, &str, Vec<&str>)>| {
             Flow {
             id: id.into(),
             name: name.into(),
-            enabled: true,
+            enabled,
             profile_activation: BTreeMap::new(),
             max_parallel: 3,
             nodes: steps
@@ -208,6 +223,7 @@ impl Default for Settings {
                 mk(
                     "new_issue",
                     "New issue",
+                    true,
                     vec![
                         ("spec", default_prompts::SPEC, "write", vec![]),
                         (
@@ -257,6 +273,7 @@ impl Default for Settings {
                 mk(
                     "pr_approved",
                     "Approved PR",
+                    true,
                     vec![
                         ("publish", default_prompts::APPROVED_PR, "write", vec![]),
                         (
@@ -270,7 +287,14 @@ impl Default for Settings {
                 mk(
                     "pr_review",
                     "Review requested",
+                    true,
                     vec![("review", default_prompts::REVIEW_PR, "write", vec![])],
+                ),
+                mk(
+                    "release",
+                    "Release",
+                    false,
+                    vec![("publish_app", default_prompts::RELEASE, "write", vec![])],
                 ),
             ],
         }
@@ -284,7 +308,7 @@ impl Settings {
         );
         for (id, limit) in &self.trigger_max_concurrent {
             ensure!(
-                ["new_issue", "pr_review", "pr_approved"].contains(&id.as_str()),
+                TRIGGER_IDS.contains(&id.as_str()),
                 "Unknown concurrency trigger: {id}"
             );
             ensure!(
@@ -298,7 +322,7 @@ impl Settings {
     pub fn concurrency_for(&self, trigger_id: &str) -> Result<usize> {
         self.validate_concurrency()?;
         ensure!(
-            ["new_issue", "pr_review", "pr_approved"].contains(&trigger_id),
+            TRIGGER_IDS.contains(&trigger_id),
             "Unknown concurrency trigger: {trigger_id}"
         );
         Ok(self
@@ -388,10 +412,10 @@ impl Settings {
             ensure!(valid_repository(&p.repository), "Invalid repository");
         }
         ensure!(
-            self.flows.len() == 3,
-            "Exactly three trigger flows required"
+            self.flows.len() == TRIGGER_IDS.len(),
+            "Exactly four trigger flows required"
         );
-        for id in ["new_issue", "pr_approved", "pr_review"] {
+        for id in TRIGGER_IDS {
             ensure!(
                 self.flows.iter().filter(|f| f.id == id).count() == 1,
                 "Missing or duplicate trigger flow"
@@ -576,6 +600,13 @@ pub struct TriggerEvent {
     pub payload: Value,
 }
 impl TriggerEvent {
+    pub fn release_issue(repo: &str, number: u64, title: &str, actor: &str, body: &str) -> Self {
+        let mut event = Self::issue(repo, number, title, actor, body);
+        event.trigger_id = "release".into();
+        event.event_id = format!("release:{}#{number}", event.repository);
+        event
+    }
+
     pub fn issue(repo: &str, number: u64, title: &str, actor: &str, body: &str) -> Self {
         Self {
             event_id: format!("issue:{repo}#{number}"),

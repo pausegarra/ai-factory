@@ -12,6 +12,7 @@ export function capacityFixture(
     new_issue: usage("new_issue"),
     pr_review: usage("pr_review"),
     pr_approved: usage("pr_approved"),
+    release: usage("release"),
   };
   return {
     global: { active: Object.values(by_trigger).reduce((sum, v) => sum + v.active, 0), limit },
