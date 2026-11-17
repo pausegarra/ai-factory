@@ -9,6 +9,7 @@ mod merge_cleanup;
 mod node_comments;
 mod polling;
 mod pr_updates;
+mod release_issues;
 mod version_bumps;
 
 pub struct Github {

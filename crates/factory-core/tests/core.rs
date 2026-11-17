@@ -280,6 +280,8 @@ struct FixtureDir {
     server: Option<std::thread::JoinHandle<()>>,
     requests: std::sync::Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
     comment_status: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    issue_close_status: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    issue_confirmation_failures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 #[cfg(unix)]
 impl std::ops::Deref for FixtureDir {
@@ -333,6 +335,10 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let comment_status = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(200));
+    let issue_close_status = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(200));
+    let close_status = issue_close_status.clone();
+    let issue_confirmation_failures = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let confirmation_failures = issue_confirmation_failures.clone();
     let (halt, calls, status, root) = (
         stop.clone(),
         requests.clone(),
@@ -441,7 +447,27 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
                     row
                 }
             } else if path.starts_with("/repos/acme/repo/issues/") {
-                issue_response.lock().unwrap().clone()
+                let mut issue = issue_response.lock().unwrap();
+                if method == "PATCH" && input["state"] == "closed" {
+                    code = close_status.load(std::sync::atomic::Ordering::SeqCst);
+                    if code == 200 || code == 500 {
+                        issue["state"] = json!("closed");
+                        issue["state_reason"] = input["state_reason"].clone();
+                    }
+                }
+                if method == "GET"
+                    && issue["state"] == "closed"
+                    && confirmation_failures
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |remaining| remaining.checked_sub(1),
+                        )
+                        .is_ok()
+                {
+                    code = 500;
+                }
+                issue.clone()
             } else {
                 json!({"state":"open","title":"[AI] work","user":{"login":"alice"}})
             };
@@ -486,6 +512,8 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
             server: Some(server),
             requests,
             comment_status,
+            issue_close_status,
+            issue_confirmation_failures,
         },
         f,
     )

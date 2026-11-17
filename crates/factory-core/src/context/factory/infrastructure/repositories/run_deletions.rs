@@ -181,7 +181,7 @@ impl Store {
         tx.execute("UPDATE dedup SET run_id='consumed' WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM issue_node_comments WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
-        tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6,?9,?10) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:"),format!("version-workspace:{id}"),format!("pr-version:{id}")])?;
+        tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6,?9,?10,?11) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:"),format!("version-workspace:{id}"),format!("pr-version:{id}"),format!("release-issue-close:{id}")])?;
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;
         // Keep the event consumed while any attempt still owns it, including
         // attempts whose cleanup is pending. Release it with the last deletion.
@@ -355,6 +355,7 @@ mod tests {
             "pr-release",
             "version-workspace",
             "pr-version",
+            "release-issue-close",
         ] {
             assert!(store
                 .observe(
@@ -401,6 +402,7 @@ mod tests {
             format!("pr-release:{id}-neighbor"),
             format!("version-workspace:{id}-neighbor"),
             format!("pr-version:{id}-neighbor"),
+            format!("release-issue-close:{id}-neighbor"),
             format!("review-feedback:{id}-neighbor:n"),
             format!("review-history:{id}-neighbor:n"),
             "approval-comment:acme/repo#1:7".into(),
@@ -596,6 +598,7 @@ mod tests {
             format!("pr-release:{id}"),
             format!("version-workspace:{id}"),
             format!("pr-version:{id}"),
+            format!("release-issue-close:{id}"),
             format!("review-feedback:{id}:builder"),
             format!("review-history:{id}:round1"),
         ];

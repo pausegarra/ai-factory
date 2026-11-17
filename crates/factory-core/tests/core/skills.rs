@@ -22,6 +22,9 @@ cat > "${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt"
 printf '%s\n' "$@" > "${AI_FACTORY_RESULT_PATH%.result.json}.args.txt"
 printf '%s' "$OPENCODE_CONFIG_CONTENT" > "${AI_FACTORY_RESULT_PATH%.result.json}.config.json"
 printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
+if [ "$AI_FACTORY_NODE_ID" = publish_app ]; then
+  printf '%s' '{"status":"succeeded","summary":"published","artifacts":[],"data":{"distribution_result":{"published":true}}}' > "$AI_FACTORY_RESULT_PATH"
+fi
 "#;
 
 fn install_project_skills(root: &Path) {
@@ -420,8 +423,7 @@ fn configure_release(
     agent: &str,
     skills: Option<Vec<String>>,
 ) {
-    *root.issue.lock().unwrap() =
-        json!({"state":"open","title":"[Release] fixture","user":{"login":"alice"}});
+    *root.issue.lock().unwrap() = json!({"number":811,"html_url":"https://github.com/acme/repo/issues/811","state":"open","title":"[Release] fixture","user":{"login":"alice"}});
     let mut settings = factory.settings().unwrap();
     settings.issue_node_comments_enabled = false;
     for flow in &mut settings.flows {
@@ -469,12 +471,29 @@ async fn release_selected_skill_reaches_both_agents_in_one_editable_step() {
         assert!(prompt.contains("Adapt or omit pipeline phases"));
         assert!(prompt.contains("return blocked"));
         assert!(prompt.contains("Release publication authorization"));
-        assert!(root
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(method, _, _)| method == "GET"));
+        assert_eq!(root.issue.lock().unwrap()["state"], "closed");
+        let db = rusqlite::Connection::open(root.path().join("data/factory.sqlite3")).unwrap();
+        let receipt: String = db
+            .query_row(
+                "SELECT json FROM observations WHERE key=?1",
+                [format!("release-issue-close:{}", detail.run.id)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let receipt: Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(receipt["state_reason"], "completed");
+        assert_eq!(receipt["number"], 811);
+        assert_eq!(
+            root.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, path, body)| method == "PATCH"
+                    && path == "/repos/acme/repo/issues/811"
+                    && body == &json!({"state":"closed","state_reason":"completed"}))
+                .count(),
+            1
+        );
     }
 }
 
@@ -681,5 +700,261 @@ async fn release_publication_permissions_do_not_reach_readonly_or_other_roles() 
                 std::fs::read_to_string(session.join(format!("{node_id}.args.txt"))).unwrap();
             assert!(!args.contains("sandbox_workspace_write.network_access=true"));
         }
+    }
+}
+
+#[tokio::test]
+async fn release_issue_closure_failure_preserves_publication_and_reports_error() {
+    let (root, factory) = fixture(AGENT, 4);
+    configure_release(&root, &factory, "codex", None);
+    root.issue_close_status
+        .store(403, std::sync::atomic::Ordering::SeqCst);
+    let detail = run_release(&factory).await;
+    assert_eq!(detail.run.status, "failed");
+    assert!(detail
+        .run
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Publication succeeded, but closing release issue failed"));
+    assert_eq!(detail.nodes[0].status, "succeeded");
+    assert!(detail.nodes[0].result.is_some());
+    assert_eq!(root.issue.lock().unwrap()["state"], "open");
+}
+
+#[tokio::test]
+async fn release_issue_closure_reconciles_uncertain_response_without_second_write() {
+    let (root, factory) = fixture(AGENT, 4);
+    configure_release(&root, &factory, "codex", None);
+    root.issue_close_status
+        .store(500, std::sync::atomic::Ordering::SeqCst);
+    let detail = run_release(&factory).await;
+    assert_eq!(detail.run.status, "succeeded", "{:?}", detail.run.error);
+    assert_eq!(root.issue.lock().unwrap()["state"], "closed");
+    assert_eq!(
+        root.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _, _)| method == "PATCH")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn release_issue_closure_waits_for_all_workflow_steps() {
+    let script = AGENT.replace("cat > \"${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt\"", "cat > \"${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt\"\nif [ \"$AI_FACTORY_NODE_ID\" = verify ]; then\n printf '%s' '{\"status\":\"blocked\",\"summary\":\"verification blocked\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"\n exit 0\nfi");
+    let (root, factory) = fixture(&script, 4);
+    configure_release(&root, &factory, "codex", None);
+    let mut settings = factory.settings().unwrap();
+    let flow = settings
+        .flows
+        .iter_mut()
+        .find(|f| f.id == "release")
+        .unwrap();
+    let mut verify = flow.nodes[0].clone();
+    verify.id = "verify".into();
+    verify.depends_on = vec!["publish_app".into()];
+    flow.nodes.push(verify);
+    factory.save_settings(settings).unwrap();
+    let detail = run_release(&factory).await;
+    assert_eq!(detail.run.status, "blocked");
+    assert_eq!(
+        detail
+            .nodes
+            .iter()
+            .find(|n| n.id == "publish_app")
+            .unwrap()
+            .status,
+        "succeeded"
+    );
+    assert_eq!(root.issue.lock().unwrap()["state"], "open");
+    assert!(root
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(method, _, _)| method == "GET"));
+}
+
+#[tokio::test]
+async fn release_issue_closure_rechecks_identity_and_accepts_already_closed() {
+    for change in ["author", "title", "pr", "url", "closed", "cancel"] {
+        let script = format!("{AGENT}\ntouch \"$(dirname \"$0\")/publication-ready\"\nwhile [ ! -f \"$(dirname \"$0\")/publication-finish\" ]; do sleep 0.01; done\n");
+        let (root, factory) = fixture(&script, 4);
+        configure_release(&root, &factory, "codex", None);
+        let id = factory
+            .enqueue(TriggerEvent::release_issue(
+                "acme/repo",
+                811,
+                "[Release] fixture",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        for _ in 0..200 {
+            if root.path().join("publication-ready").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(root.path().join("publication-ready").exists());
+        {
+            let mut issue = root.issue.lock().unwrap();
+            match change {
+                "author" => issue["user"]["login"] = json!("bob"),
+                "title" => issue["title"] = json!("[AI] changed"),
+                "pr" => issue["pull_request"] = json!({}),
+                "url" => issue["html_url"] = json!("https://github.com/other/repo/issues/811"),
+                "closed" => issue["state"] = json!("closed"),
+                _ => (),
+            }
+        }
+        if change == "cancel" {
+            factory.cancel(&id).unwrap();
+        }
+        std::fs::write(root.path().join("publication-finish"), "done").unwrap();
+        let detail = terminal(&factory, &id).await;
+        factory.shutdown().await;
+        let expected = if change == "closed" {
+            "succeeded"
+        } else if change == "cancel" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        assert_eq!(
+            detail.run.status, expected,
+            "{change}: {:?}",
+            detail.run.error
+        );
+        assert!(
+            root.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(method, _, _)| method == "GET"),
+            "{change}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn release_issue_closure_requires_explicit_publication_confirmation() {
+    for (status, data, expected) in [
+        ("succeeded", json!({}), "blocked"),
+        (
+            "succeeded",
+            json!({"distribution_result":{"published":false}}),
+            "blocked",
+        ),
+        (
+            "blocked",
+            json!({"distribution_result":{"published":true}}),
+            "blocked",
+        ),
+        (
+            "failed",
+            json!({"distribution_result":{"published":true}}),
+            "failed",
+        ),
+    ] {
+        let script = format!(
+            "cat >/dev/null\nprintf '%s' '{}' > \"$AI_FACTORY_RESULT_PATH\"",
+            json!({"status":status,"summary":"inspection only","artifacts":[],"data":data})
+        );
+        let (root, factory) = fixture(&script, 4);
+        configure_release(&root, &factory, "codex", None);
+        let detail = run_release(&factory).await;
+        assert_eq!(detail.run.status, expected);
+        if status == "succeeded" {
+            assert!(detail
+                .run
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("publication was not confirmed"));
+        }
+        assert_eq!(root.issue.lock().unwrap()["state"], "open");
+        assert!(root
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, _, _)| method == "GET"));
+    }
+}
+
+#[tokio::test]
+async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmation_error() {
+    for failure in ["permission", "confirmation"] {
+        let (root, factory) = fixture(AGENT, 4);
+        configure_release(&root, &factory, "codex", None);
+        if failure == "permission" {
+            root.issue_close_status
+                .store(403, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            root.issue_confirmation_failures
+                .store(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let id = factory
+            .enqueue(TriggerEvent::release_issue(
+                "acme/repo",
+                811,
+                "[Release] fixture",
+                "alice",
+                "",
+            ))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        let first = terminal(&factory, &id).await;
+        assert_eq!(
+            first.run.status, "failed",
+            "{failure}: {:?}",
+            first.run.error
+        );
+        assert_eq!(first.nodes[0].status, "succeeded");
+        root.issue_close_status
+            .store(200, std::sync::atomic::Ordering::SeqCst);
+        let mut retry = None;
+        for _ in 0..100 {
+            if let Ok(id) = factory.retry(&id) {
+                retry = Some(id);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let retry = retry.expect("Retry admission after worker cleanup");
+        let detail = terminal(&factory, &retry).await;
+        factory.shutdown().await;
+        assert_eq!(
+            detail.run.status, "succeeded",
+            "{failure}: {:?}",
+            detail.run.error
+        );
+        assert_eq!(root.issue.lock().unwrap()["state"], "closed");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("skill-execution.calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "{failure}: publication repeated"
+        );
+        let expected_writes = if failure == "permission" { 2 } else { 1 };
+        assert_eq!(
+            root.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, _, _)| method == "PATCH")
+                .count(),
+            expected_writes,
+            "{failure}"
+        );
     }
 }
