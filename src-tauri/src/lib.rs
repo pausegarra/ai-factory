@@ -1,6 +1,9 @@
 mod context {
     pub(crate) mod factory {
         pub(crate) mod infrastructure {
+            pub(crate) mod presentations {
+                pub(crate) mod run_status;
+            }
             pub(crate) mod notifications {
                 pub(crate) mod run_notifications;
             }
@@ -10,6 +13,7 @@ mod context {
 mod lifecycle;
 mod startup;
 
+use context::factory::infrastructure::presentations::run_status;
 use factory_core::{Factory, FactoryEvent, LogChunk, Settings, Snapshot};
 use std::sync::Arc;
 use tauri::{
@@ -287,9 +291,24 @@ pub fn run() {
                 exit_gate: lifecycle::ExitGate::default(),
             });
 
+            let initial = run_status::RunStatusLabels::unknown();
+            let running = MenuItem::with_id(
+                app,
+                "run-status-running",
+                &initial.running,
+                false,
+                None::<&str>,
+            )?;
+            let queued = MenuItem::with_id(
+                app,
+                "run-status-queued",
+                &initial.queued,
+                false,
+                None::<&str>,
+            )?;
             let show = MenuItem::with_id(app, "show", "Open AI Factory", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit AI Factory", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&running, &queued, &show, &quit])?;
             let mut tray = TrayIconBuilder::new().menu(&menu).tooltip("AI Factory");
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
@@ -300,6 +319,8 @@ pub fn run() {
                 _ => {}
             })
             .build(app)?;
+
+            run_status::install(factory.clone(), running, queued);
 
             if std::env::args().any(|arg| arg == "--background") {
                 if let Some(window) = app.get_webview_window("main") {
