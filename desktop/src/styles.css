@@ -1213,13 +1213,19 @@ select {
   color: #a0b88c;
 }
 .trigger-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
   gap: 12px;
+  padding: 8px;
   margin-bottom: 24px;
 }
 .trigger-tabs button {
   display: flex;
+  flex: 1 0 auto;
+  white-space: nowrap;
   align-items: center;
   gap: 12px;
   padding: 16px;
