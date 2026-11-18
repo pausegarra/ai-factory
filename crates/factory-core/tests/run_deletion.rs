@@ -5,7 +5,11 @@ use factory_core::*;
 fn deletes_one_attempt_offline_and_keeps_retry_and_shared_data() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
-    let event = TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body");
+    f.save_settings(common::configured_settings())?;
+    let event = common::from_source(
+        TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
+        "alice",
+    );
     let id = f.enqueue(event.clone())?.unwrap();
     f.cancel(&id)?;
     let sibling = f.retry(&id)?;
@@ -57,8 +61,15 @@ fn deletes_one_attempt_offline_and_keeps_retry_and_shared_data() -> Result<()> {
 fn deleting_last_run_releases_only_its_event_across_restart() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
-    let event = TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body");
-    let other = TriggerEvent::issue("acme/repo", 5, "[AI] other", "alice", "body");
+    f.save_settings(common::configured_settings())?;
+    let event = common::from_source(
+        TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
+        "alice",
+    );
+    let other = common::from_source(
+        TriggerEvent::issue("acme/repo", 5, "[AI] other", "alice", "body"),
+        "alice",
+    );
     let keep = f.enqueue(other.clone())?.unwrap();
     let id = f.enqueue(event.clone())?.unwrap();
     f.set_run_status(&id, "failed", Some("Agent exited".into()))?;
@@ -66,6 +77,7 @@ fn deleting_last_run_releases_only_its_event_across_restart() -> Result<()> {
     drop(f);
 
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     assert!(f.enqueue(event.clone())?.is_some());
     assert!(f.enqueue(event)?.is_none());
     assert!(f.enqueue(other)?.is_none());
@@ -77,7 +89,11 @@ fn deleting_last_run_releases_only_its_event_across_restart() -> Result<()> {
 fn deleting_retry_before_original_preserves_event_until_last_attempt() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
-    let event = TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body");
+    f.save_settings(common::configured_settings())?;
+    let event = common::from_source(
+        TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
+        "alice",
+    );
     let id = f.enqueue(event.clone())?.unwrap();
     f.cancel(&id)?;
     let retry = f.retry(&id)?;
@@ -93,13 +109,11 @@ fn deleting_retry_before_original_preserves_event_until_last_attempt() -> Result
 fn rejects_queued_and_invalid_but_never_guesses_absent_ownership() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let f = common::open(dir.path().into())?;
+    f.save_settings(common::configured_settings())?;
     let id = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            4,
-            "[AI] deletion",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 4, "[AI] deletion", "alice", "body"),
             "alice",
-            "body",
         ))?
         .unwrap();
     assert!(f

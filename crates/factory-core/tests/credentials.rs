@@ -11,13 +11,16 @@ use std::{
 
 fn with_token(token: &str) -> Settings {
     let mut settings = Settings::default();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),
         account: "alice".into(),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
         token: Some(token.into()),
         has_token: false,
-        ..Default::default()
     });
     settings
 }
@@ -32,7 +35,7 @@ fn seed_plaintext(root: &Path, token: &str) {
     db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE settings (id INTEGER PRIMARY KEY,json TEXT NOT NULL);").unwrap();
     db.execute(
         "INSERT INTO settings VALUES(1,?1)",
-        [serde_json::to_string(&with_token(token)).unwrap()],
+        [serde_json::json!({"token_profiles":[{"id":"alice","account":"alice","label":"Old","token":token}],"owners":["old"]}).to_string()],
     )
     .unwrap();
 }
@@ -42,13 +45,16 @@ fn github_tokens_are_not_written_to_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
     let mut settings = factory.settings().unwrap();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),
         account: "alice".into(),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
         token: Some("fixture-token-must-not-reach-sqlite".into()),
         has_token: false,
-        ..Default::default()
     });
     factory.save_settings(settings).unwrap();
     let db = Connection::open(dir.path().join("factory.sqlite3")).unwrap();
@@ -59,20 +65,19 @@ fn github_tokens_are_not_written_to_sqlite() {
         !raw.contains("fixture-token-must-not-reach-sqlite"),
         "Token persisted in plaintext"
     );
-    assert!(factory.settings().unwrap().token_profiles[0].has_token);
+    assert!(factory.settings().unwrap().source_connectors[0].has_token);
 }
 
 #[test]
-fn legacy_tokens_migrate_and_live_database_files_are_scrubbed() {
+fn legacy_tokens_are_discarded_and_live_database_files_are_scrubbed() {
     let dir = tempfile::tempdir().unwrap();
     let token = "legacy-fixture-secret-uniquely-searchable";
     seed_plaintext(dir.path(), token);
     let credentials = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
-    assert_eq!(store.settings().unwrap().token_for("alice").unwrap(), token);
-    assert!(store.public_settings().unwrap().token_profiles[0]
-        .token
-        .is_none());
+    assert!(store.settings().unwrap().source_connectors.is_empty());
+    assert!(credentials.gets.lock().unwrap().is_empty());
+    assert!(credentials.values.lock().unwrap().is_empty());
     assert!(!raw(dir.path()).contains(token));
     for name in [
         "factory.sqlite3",
@@ -90,31 +95,28 @@ fn legacy_tokens_migrate_and_live_database_files_are_scrubbed() {
     }
     drop(store);
     let reopened = Store::open_with_credentials(dir.path(), credentials).unwrap();
-    assert_eq!(
-        reopened.settings().unwrap().token_for("alice").unwrap(),
-        token
-    );
+    assert!(reopened.settings().unwrap().source_connectors.is_empty());
 }
 
 #[test]
-fn failed_migration_preserves_legacy_row_and_can_be_retried() {
+fn failed_legacy_scrub_is_atomic_and_can_be_retried() {
     let dir = tempfile::tempdir().unwrap();
     seed_plaintext(dir.path(), "migration-fixture-secret");
-    let credentials = Arc::new(common::MemoryCredentials::default());
-    credentials.fail_get.store(true, Ordering::SeqCst);
-    let error = Store::open_with_credentials(dir.path(), credentials.clone())
-        .err()
-        .unwrap()
-        .to_string();
-    assert!(!error.contains("fixture backend"));
+    let c = Arc::new(common::MemoryCredentials::default());
+    let db = Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER deny_scrub BEFORE UPDATE ON settings BEGIN SELECT RAISE(ABORT,'fixture scrub denied'); END;").unwrap();
+    assert!(Store::open_with_credentials(dir.path(), c.clone()).is_err());
     assert!(raw(dir.path()).contains("migration-fixture-secret"));
-    assert!(credentials.values.lock().unwrap().is_empty());
-    credentials.fail_get.store(false, Ordering::SeqCst);
-    let store = Store::open_with_credentials(dir.path(), credentials).unwrap();
-    assert_eq!(
-        store.settings().unwrap().token_for("alice").unwrap(),
-        "migration-fixture-secret"
-    );
+    assert!(c.values.lock().unwrap().is_empty());
+    db.execute_batch("DROP TRIGGER deny_scrub").unwrap();
+    drop(db);
+    let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
+    assert!(store
+        .public_settings()
+        .unwrap()
+        .source_connectors
+        .is_empty());
+    assert!(c.gets.lock().unwrap().is_empty());
     assert!(!raw(dir.path()).contains("migration-fixture-secret"));
 }
 
@@ -136,7 +138,14 @@ fn rotation_and_profile_deletion_remove_obsolete_credentials() {
     drop(store);
     let reopened = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
     assert_eq!(
-        reopened.settings().unwrap().token_for("alice").unwrap(),
+        reopened
+            .settings()
+            .unwrap()
+            .source_by_id("alice")
+            .unwrap()
+            .token
+            .as_deref()
+            .unwrap(),
         "new-fixture-token"
     );
     reopened.save_settings(&Settings::default()).unwrap();
@@ -152,16 +161,26 @@ fn blank_replacement_preserves_token_but_account_change_cannot_reuse_it() {
         .save_settings(&with_token("alice-fixture-token"))
         .unwrap();
     let mut settings = store.public_settings().unwrap();
-    settings.token_profiles[0].token = Some("  ".into());
+    settings.source_connectors[0].token = Some("  ".into());
     store.save_settings(&settings).unwrap();
     assert_eq!(
-        store.settings().unwrap().token_for("alice").unwrap(),
+        store
+            .settings()
+            .unwrap()
+            .source_by_id("alice")
+            .unwrap()
+            .token
+            .as_deref()
+            .unwrap(),
         "alice-fixture-token"
     );
-    settings.token_profiles[0].account = "bob".into();
-    store.save_settings(&settings).unwrap();
-    assert!(!store.public_settings().unwrap().token_profiles[0].has_token);
-    assert!(credentials.values.lock().unwrap().is_empty());
+    settings.source_connectors[0].account = "bob".into();
+    assert!(store.save_settings(&settings).is_err());
+    assert_eq!(
+        store.public_settings().unwrap().source_connectors[0].account,
+        "alice"
+    );
+    assert_eq!(credentials.values.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -202,7 +221,14 @@ fn sqlite_failure_rolls_back_references_and_keeps_previous_token() {
         .save_settings(&with_token("replacement-fixture-token"))
         .is_err());
     assert_eq!(
-        store.settings().unwrap().token_for("alice").unwrap(),
+        store
+            .settings()
+            .unwrap()
+            .source_by_id("alice")
+            .unwrap()
+            .token
+            .as_deref()
+            .unwrap(),
         "previous-fixture-token"
     );
     assert_eq!(credentials.values.lock().unwrap().len(), 1);
@@ -244,7 +270,7 @@ fn locked_keychain_allows_metadata_edits_but_backend_secret_reads_fail_closed() 
     credentials.fail_get.store(true, Ordering::SeqCst);
     let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
     let mut settings = store.public_settings().unwrap();
-    assert!(settings.token_profiles[0].has_token);
+    assert!(settings.source_connectors[0].has_token);
     settings.poll_interval_seconds = 30;
     credentials.gets.lock().unwrap().clear();
     settings.flows[0]
@@ -273,10 +299,10 @@ fn config_import_keeps_credentials_out_of_settings_json() {
     std::fs::write(&config, "github:\n  owners: [acme]\n").unwrap();
     factory.import_legacy(Some(config), None).unwrap();
     let imported = factory.settings().unwrap();
-    assert!(imported.token_profiles[0].has_token);
-    assert_eq!(imported.token_profiles[0].owners, vec!["acme"]);
-    assert!(imported.token_profiles[0].authors.is_empty());
-    assert!(imported.token_profiles[0].reviewers.is_empty());
+    assert!(imported.source_connectors[0].has_token);
+    assert_eq!(imported.source_connectors[0].owners, vec!["acme"]);
+    assert_eq!(imported.source_connectors[0].authors, vec!["alice"]);
+    assert_eq!(imported.source_connectors[0].reviewers, vec!["alice"]);
     assert!(!raw(&dir.path().join("app")).contains("import-fixture-token"));
 }
 
@@ -293,12 +319,9 @@ async fn locked_keychain_does_not_stop_scheduler_or_block_queue_operations() {
         .store(true, Ordering::SeqCst);
     let factory = common::open(dir.path().into()).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -317,19 +340,16 @@ fn missing_secondary_credential_cannot_expose_tokens_in_historical_logs() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
     let mut settings = with_token("alpha-fixture-token");
-    let mut bob = settings.token_profiles[0].clone();
+    let mut bob = settings.source_connectors[0].clone();
     bob.id = "bob".into();
     bob.account = "bob".into();
     bob.token = Some("beta-fixture-token".into());
-    settings.token_profiles.push(bob);
+    settings.source_connectors.push(bob);
     factory.save_settings(settings).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -355,11 +375,11 @@ async fn missing_secondary_credential_does_not_block_valid_actor() {
     let credentials = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
     let mut settings = with_token("alpha-fixture-token");
-    let mut bob = settings.token_profiles[0].clone();
+    let mut bob = settings.source_connectors[0].clone();
     bob.id = "bob".into();
     bob.account = "bob".into();
     bob.token = Some("beta-fixture-token".into());
-    settings.token_profiles.push(bob);
+    settings.source_connectors.push(bob);
     store.save_settings(&settings).unwrap();
     drop(store);
     credentials
@@ -369,10 +389,10 @@ async fn missing_secondary_credential_does_not_block_valid_actor() {
         .retain(|_, value| value != "beta-fixture-token");
     let store = Store::open_with_credentials(dir.path(), credentials).unwrap();
     assert_eq!(
-        store.token_for("ALICE").await.unwrap(),
+        store.token_for_source("alice").await.unwrap(),
         "alpha-fixture-token"
     );
-    assert!(store.token_for("bob").await.is_err());
+    assert!(store.token_for_source("bob").await.is_err());
     assert_eq!(store.redact_cached("alpha-fixture-token"), "[REDACTED]");
 }
 
@@ -394,7 +414,7 @@ async fn slow_keychain_lookup_does_not_block_async_timers() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_with_credentials(dir.path(), Arc::new(Slow)).unwrap();
     let mut settings = with_token("");
-    settings.token_profiles[0].token = None;
+    settings.source_connectors[0].token = None;
     {
         let db = store.db.lock().unwrap();
         db.execute(
@@ -403,14 +423,14 @@ async fn slow_keychain_lookup_does_not_block_async_timers() {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO credential_refs VALUES('alice','alice','slow')",
+            "INSERT INTO source_credential_refs VALUES('alice','alice','slow')",
             [],
         )
         .unwrap();
     }
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(30),
-        store.token_for("alice"),
+        store.token_for_source("alice"),
     )
     .await;
     assert!(
@@ -426,12 +446,9 @@ fn historical_log_tokens_are_redacted_across_chunk_boundaries() {
     let factory = common::open(dir.path().into()).unwrap();
     factory.save_settings(with_token(token)).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] fixture",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] fixture", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();

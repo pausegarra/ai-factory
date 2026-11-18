@@ -241,7 +241,8 @@ sys.exit(code)
         );
         let factory = common::open_with_api(dir.path().join("app"), &api_base).unwrap();
         let mut s = factory.settings().unwrap();
-        s.token_profiles = vec![TokenProfile {
+        s.source_connectors = vec![SourceConnector {
+            kind: factory_core::SourceKind::GithubIssues,
             id: "alice".into(),
             account: "alice".into(),
             label: "Alice".into(),
@@ -265,7 +266,10 @@ sys.exit(code)
         merge.depends_on = vec!["repair".into()];
         flow.nodes = vec![repair, merge];
         factory.save_settings(s).unwrap();
-        let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "");
+        let mut event = common::from_source(
+            TriggerEvent::issue("acme/repo", 5, "PR", "alice", ""),
+            "alice",
+        );
         event.trigger_id = "pr_approved".into();
         event.head_sha = head_sha;
         event.event_id = format!("approval:{}", event.head_sha);

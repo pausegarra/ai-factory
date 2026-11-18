@@ -43,7 +43,7 @@ it("cleans Google Chat URL drafts without mutating the editor", () => {
 it("requires every Google Chat filter and a real configured or new webhook", () => {
   const c = {id:"gchat",label:"Team",enabled:true,events:[],type:"google_chat",config:{has_webhook_url:false,triggers:[],token_profile_ids:[]}};
   const errors=validateNotificationConnectors([c]).join(" ");
-  for (const word of ["webhook", "event", "trigger", "profile"]) expect(errors.toLowerCase()).toContain(word);
+  for (const word of ["webhook", "event", "trigger", "source"]) expect(errors.toLowerCase()).toContain(word);
 });
 it("uses independent Google Chat defaults and explicitly selected stable profiles", async () => {
   const {newGoogleChatConnector}=await import("../src/context/factory/domain/notification-connectors");
@@ -57,9 +57,9 @@ it("rejects parser-normalized unsafe webhooks and validates filter IDs",async()=
   for(const value of ["http://host/path","https:///path","https://u:p@host/path","https://@host/path","https://host/path#","https://host/a b","https://host/a\\b","https://host/a\n"]) expect(validWebhookUrl(value)).toBe(false);
   expect(validWebhookUrl("  https://alternate.example/custom?key=fixture&token=fixture&extra=keep  ")).toBe(true);
   const c=newGoogleChatConnector("chat");c.enabled=true;c.config.has_webhook_url=true;c.config.token_profile_ids=["work"];
-  const profiles=[{id:"work",label:"Renamed",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}];
+  const profiles=[{id:"work",label:"Renamed",type: "github_issues" as const, account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}];
   expect(validateNotificationConnectors([c],profiles)).toEqual([]);
-  for(const ids of [["work","work"],["../work"],["deleted"]]) {c.config.token_profile_ids=ids;expect(validateNotificationConnectors([c],profiles).join(" ").toLowerCase()).toContain("profile");}
+  for(const ids of [["work","work"],["../work"],["deleted"]]) {c.config.token_profile_ids=ids;expect(validateNotificationConnectors([c],profiles).join(" ").toLowerCase()).toContain("source");}
 });
 it("rejects malformed Google Chat configuration without throwing or reflecting values",()=>{
   for(const config of [
@@ -83,7 +83,7 @@ it("gives Telegram the common filters without sharing selections", () => {
 
 import { newGoogleChatConnector } from "../src/context/factory/domain/notification-connectors";
 import type { NotificationConnector } from "../src/context/factory/domain/types";
-const filterProfiles = [{id:"work", label:"Work", account:"alice", has_token:true, owners:[], authors:[], reviewers:[]}];
+const filterProfiles = [{id:"work", label:"Work", type: "github_issues" as const, account:"alice", has_token:true, owners:[], authors:[], reviewers:[]}];
 for (const create of [newTelegramConnector, newGoogleChatConnector]) {
   it(`validates common filters for ${create("fixture").type} independently of credentials`, () => {
     const c = create("fixture");
@@ -98,9 +98,9 @@ for (const create of [newTelegramConnector, newGoogleChatConnector]) {
       ["triggers",["new_issue","new_issue"],"Invalid GitHub triggers.",true],
       ["triggers",["toString"],"Invalid GitHub triggers.",true],
       ["triggers",["PRIVATE_SENTINEL"],"Invalid GitHub triggers.",true],
-      ["token_profile_ids",[],"Select available GitHub profiles.",false],
-      ["token_profile_ids",["deleted"],"Select available GitHub profiles.",false],
-      ...[["work","work"],["../work"],["."],[".."],["x".repeat(129)]].map(value => ["token_profile_ids",value,"Invalid GitHub profiles.",true] as const),
+      ["token_profile_ids",[],"Select available GitHub sources.",false],
+      ["token_profile_ids",["deleted"],"Select available GitHub sources.",false],
+      ...[["work","work"],["../work"],["."],[".."],["x".repeat(129)]].map(value => ["token_profile_ids",value,"Invalid GitHub sources.",true] as const),
     ] as const) {
       for (const enabled of [true,false]) {
         const edited: NotificationConnector = structuredClone(c);

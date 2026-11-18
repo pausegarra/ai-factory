@@ -4,7 +4,7 @@ use serde_json::json;
 
 #[test]
 fn approval_workflow_shows_merge_then_version_bump_before_any_event() {
-    let settings = Settings::default();
+    let settings = common::configured_settings();
     let flow = &settings.flows[1];
     assert_eq!(flow.nodes.len(), 2);
     assert_eq!(flow.nodes[0].name, "Merge");
@@ -20,7 +20,7 @@ fn approval_workflow_shows_merge_then_version_bump_before_any_event() {
 #[test]
 fn stored_approval_workflow_is_never_rewritten_on_read() {
     for version in [None, Some(0), Some(1)] {
-        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        let mut value = serde_json::to_value(common::configured_settings()).unwrap();
         value
             .as_object_mut()
             .unwrap()
@@ -51,7 +51,10 @@ fn stored_approval_workflow_is_never_rewritten_on_read() {
 fn legacy_graph_matches_editor_on_admission_retry_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
-    let mut value = serde_json::to_value(Settings::default()).unwrap();
+    factory
+        .save_settings(common::configured_settings())
+        .unwrap();
+    let mut value = serde_json::to_value(common::configured_settings()).unwrap();
     value
         .as_object_mut()
         .unwrap()
@@ -70,7 +73,10 @@ fn legacy_graph_matches_editor_on_admission_retry_and_reopen() {
     )
     .unwrap();
     drop(db);
-    let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK");
+    let mut event = common::from_source(
+        TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK"),
+        "alice",
+    );
     event.trigger_id = "pr_approved".into();
     event.head_sha = "a".repeat(40);
     let editor = factory.settings().unwrap();
@@ -106,7 +112,10 @@ fn legacy_graph_matches_editor_on_admission_retry_and_reopen() {
 fn deleting_configured_version_node_stays_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
-    let mut settings = factory.settings().unwrap();
+    factory
+        .save_settings(common::configured_settings())
+        .unwrap();
+    let mut settings = common::configured_settings();
     settings.flows[1]
         .nodes
         .retain(|node| node.id != "version_bump");
@@ -118,7 +127,10 @@ fn deleting_configured_version_node_stays_deleted() {
         serde_json::to_value(&reopened.settings().unwrap().flows[1]).unwrap(),
         expected
     );
-    let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK");
+    let mut event = common::from_source(
+        TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK"),
+        "alice",
+    );
     event.trigger_id = "pr_approved".into();
     event.head_sha = "a".repeat(40);
     let id = reopened.enqueue(event).unwrap().unwrap();
@@ -132,7 +144,13 @@ fn approvals_use_configured_graph_without_dynamic_release_node() {
     for command in ["ok", "review", "release"] {
         let dir = tempfile::tempdir().unwrap();
         let factory = common::open(dir.path().into()).unwrap();
-        let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", command);
+        factory
+            .save_settings(common::configured_settings())
+            .unwrap();
+        let mut event = common::from_source(
+            TriggerEvent::issue("acme/repo", 5, "PR", "alice", command),
+            "alice",
+        );
         event.trigger_id = "pr_approved".into();
         event.head_sha = "a".repeat(40);
         event.payload = json!({"approval":{"command":command,"actor":"alice","head_sha":event.head_sha,"comment_id":7}});
@@ -151,7 +169,13 @@ fn approvals_use_configured_graph_without_dynamic_release_node() {
 fn simultaneous_retries_cannot_run_the_same_approval_twice() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
-    let mut event = TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK");
+    factory
+        .save_settings(common::configured_settings())
+        .unwrap();
+    let mut event = common::from_source(
+        TriggerEvent::issue("acme/repo", 5, "PR", "alice", "OK"),
+        "alice",
+    );
     event.trigger_id = "pr_approved".into();
     event.head_sha = "a".repeat(40);
     let id = factory.enqueue(event).unwrap().unwrap();

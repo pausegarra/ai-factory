@@ -43,11 +43,13 @@ export interface Flow {
   id: Trigger;
   name: string;
   enabled: boolean;
+  // Wire name retained; keys are stable SourceConnector IDs.
   profile_activation?: Record<string, boolean>;
   max_parallel?: number;
   nodes: FlowNode[];
 }
-export interface TokenProfile {
+export interface SourceConnector {
+  type: "github_issues";
   id: string;
   label: string;
   account: string;
@@ -64,7 +66,8 @@ export interface Project {
 }
 export interface Settings {
   notification_connectors?: NotificationConnector[];
-  token_profiles: TokenProfile[];
+  source_connectors: SourceConnector[];
+  // Keys are SourceConnector IDs; removed sources remain inactive.
   codex_bindings?: Record<string, string>;
   projects: Project[];
   commands: { codex: string; opencode: string; git: string };

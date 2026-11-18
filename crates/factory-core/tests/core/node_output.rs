@@ -1,4 +1,5 @@
 use super::*;
+use crate::common;
 use sha2::{Digest, Sha256};
 
 fn output_fixture(
@@ -99,12 +100,9 @@ fn valid_result() -> serde_json::Value {
 
 async fn run_output_fixture(factory: &std::sync::Arc<Factory>) -> (String, RunDetail) {
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            190,
-            "[AI] format",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 190, "[AI] format", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -451,12 +449,9 @@ async fn cancellation_stops_initial_process_without_another_invocation() {
     for agent in ["codex", "opencode"] {
         let (dir, factory) = output_fixture(agent, &[json!({"sleep":30})]);
         let id = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                191,
-                "[AI] cancel initial",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 191, "[AI] cancel initial", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -691,12 +686,9 @@ async fn cancelling_a_correction_preserves_work_session_and_stops_further_attemp
             ],
         );
         let id = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                191,
-                "[AI] cancel repair",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 191, "[AI] cancel repair", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -800,12 +792,9 @@ async fn corrected_actions_still_require_authorization_before_mutations() {
 async fn unrelated_merge_receipt_does_not_claim_completed_merge_on_failure() {
     let (dir, factory) = output_fixture("codex", &[json!({"value":"{invalid"})]);
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            190,
-            "[AI] invalid",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 190, "[AI] invalid", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();

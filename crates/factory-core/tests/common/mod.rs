@@ -106,7 +106,7 @@ pub fn seed_codex_account(factory: &Factory, id: &str) {
 pub fn bind_fixture_codex(factory: &Factory, settings: &mut factory_core::Settings) {
     let id = "9ab14479-4d99-41c7-b347-e5b3acffb316";
     seed_codex_account(factory, id);
-    for profile in &settings.token_profiles {
+    for profile in &settings.source_connectors {
         settings
             .codex_bindings
             .insert(profile.id.clone(), id.into());
@@ -157,3 +157,24 @@ exec '{actual}' "$@"
 pub mod notifications;
 
 pub mod telegram_http;
+
+/// Test fixtures must name their source explicitly, including when accounts coincide.
+pub fn from_source(mut event: factory_core::TriggerEvent, id: &str) -> factory_core::TriggerEvent {
+    event.origin_token_profile_id = Some(id.into());
+    event
+}
+
+pub fn configured_settings() -> factory_core::Settings {
+    let mut s = factory_core::Settings::default();
+    s.source_connectors.push(factory_core::SourceConnector {
+        id: "alice".into(),
+        label: "Alice".into(),
+        account: "alice".into(),
+        owners: vec!["acme".into(), "other".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        token: Some("fixture-source-only".into()),
+        ..Default::default()
+    });
+    s
+}

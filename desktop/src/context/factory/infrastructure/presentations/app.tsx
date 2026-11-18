@@ -6,6 +6,7 @@ import {
   Factory,
   Gear,
   Bell,
+  Plugs,
   GitBranch,
   Lightning,
   SidebarSimple,
@@ -20,6 +21,7 @@ import { LiveResource } from "../../application/live-resource";
 import { OverviewPage } from "./overview";
 import { RunsPage, RunDetailPage } from "./runs";
 import { FlowsPage } from "./flows";
+import { SourcesPage } from "./sources";
 import { NotificationsPage } from "./notifications";
 import { SettingsPage } from "./settings";
 import { Notice } from "./ui";
@@ -34,6 +36,7 @@ const nav = [
   { id: "overview", label: "Overview", icon: ChartBar },
   { id: "runs", label: "Runs", icon: Lightning },
   { id: "flows", label: "Workflows", icon: GitBranch },
+  { id: "sources", label: "Sources", icon: Plugs },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "settings", label: "Settings", icon: Gear },
 ];
@@ -387,6 +390,8 @@ export function App() {
               onDirtyChange={setHasUnsaved}
               onBusyChange={setSavingPage}
             />
+          ) : page === "sources" ? (
+            <SourcesPage settings={settings} onSave={saveSettings} onDirtyChange={setHasUnsaved} onBusyChange={setSavingPage} />
           ) : page === "notifications" ? (
             <NotificationsPage settings={settings} onSave={saveSettings} onDirtyChange={setHasUnsaved} onBusyChange={setSavingPage} />
           ) : (

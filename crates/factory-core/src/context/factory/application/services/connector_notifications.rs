@@ -54,7 +54,7 @@ pub(crate) fn targets_for_event<'a>(
     connectors: &'a [NotificationConnector],
     event: NotificationEvent,
     run: &Run,
-    profiles: &[TokenProfile],
+    profiles: &[SourceConnector],
 ) -> Vec<&'a NotificationConnector> {
     connectors
         .iter()
@@ -362,7 +362,8 @@ mod tests {
         .unwrap();
         let mut run = selection_run();
         run.origin_token_profile_id = Some("work".into());
-        let profiles = [TokenProfile {
+        let profiles = [SourceConnector {
+            kind: SourceKind::GithubIssues,
             id: "work".into(),
             ..Default::default()
         }];
@@ -391,7 +392,8 @@ mod tests {
         ])).unwrap();
         let profiles: Vec<_> = ["work", "personal", "other", "Work"]
             .iter()
-            .map(|id| TokenProfile {
+            .map(|id| SourceConnector {
+                kind: SourceKind::GithubIssues,
                 id: (*id).into(),
                 ..Default::default()
             })

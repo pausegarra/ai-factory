@@ -3,7 +3,7 @@ import type { Settings, Snapshot } from "../../src/context/factory/domain/types"
 
 export function noticeSettings(): Settings {
   return {
-    token_profiles: [],
+    source_connectors: [],
     projects: [],
     commands: { codex: "codex", opencode: "opencode", git: "git" },
     poll_interval_seconds: 15,

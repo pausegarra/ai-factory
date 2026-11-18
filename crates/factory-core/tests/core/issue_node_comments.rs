@@ -1,4 +1,5 @@
 use super::{fixture, terminal, FixtureDir};
+use crate::common;
 use factory_core::*;
 use serde_json::json;
 use std::time::Duration;
@@ -199,12 +200,9 @@ printf '{"status":"%s","summary":"Round complete","artifacts":[],"data":%s}' "$s
 }
 
 fn enqueue(f: &Factory) -> String {
-    f.enqueue(TriggerEvent::issue(
-        "acme/repo",
-        41,
-        "[AI] results",
+    f.enqueue(common::from_source(
+        TriggerEvent::issue("acme/repo", 41, "[AI] results", "alice", ""),
         "alice",
-        "",
     ))
     .unwrap()
     .unwrap()

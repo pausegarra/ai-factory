@@ -8,8 +8,11 @@ fn notification_origin_survives_restart_and_stale_status_without_actor_inference
     let dir = tempfile::tempdir().unwrap();
     let c = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), c.clone()).unwrap();
-    let mut value =
-        serde_json::to_value(TriggerEvent::issue("acme/repo", 61, "fixture", "alice", "")).unwrap();
+    let mut value = serde_json::to_value(common::from_source(
+        TriggerEvent::issue("acme/repo", 61, "fixture", "alice", ""),
+        "alice",
+    ))
+    .unwrap();
     value["origin_token_profile_id"] = json!("work-profile");
     let event: TriggerEvent = serde_json::from_value(value).unwrap();
     let id = store
@@ -56,20 +59,33 @@ fn notification_retry_and_dedup_keep_origin_and_stale_admission_is_rejected() {
     )
     .unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         account: "alice".into(),
         label: "Work".into(),
         ..Default::default()
     });
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["bob".into()],
+        reviewers: vec!["bob".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "other".into(),
         account: "bob".into(),
         label: "Other".into(),
         ..Default::default()
     });
     f.save_settings(s).unwrap();
-    let mut e = TriggerEvent::issue("acme/repo", 1, "Fixture", "alice", "");
+    let mut e = common::from_source(
+        TriggerEvent::issue("acme/repo", 1, "Fixture", "alice", ""),
+        "alice",
+    );
     e.origin_token_profile_id = Some("work".into());
     let id = f.enqueue(e.clone()).unwrap().unwrap();
     let mut duplicate = e.clone();
@@ -85,7 +101,7 @@ fn notification_retry_and_dedup_keep_origin_and_stale_admission_is_rejected() {
     );
     f.set_run_status(&id, "failed", None).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles[0].label = "Renamed".into();
+    s.source_connectors[0].label = "Renamed".into();
     f.save_settings(s).unwrap();
     let retry = f.retry(&id).unwrap();
     let detail = f.run_detail(&retry).unwrap();
@@ -95,7 +111,7 @@ fn notification_retry_and_dedup_keep_origin_and_stale_admission_is_rejected() {
     );
     assert_eq!(detail.run.origin_token_profile_id.as_deref(), Some("work"));
     let mut s = f.settings().unwrap();
-    s.token_profiles.retain(|p| p.id != "work");
+    s.source_connectors.retain(|p| p.id != "work");
     f.save_settings(s).unwrap();
     e.number = 2;
     e.event_id = "issue:acme/repo#2".into();

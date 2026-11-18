@@ -47,9 +47,7 @@ impl Github {
                 "Release run identity mismatch"
             );
             let settings = factory.store.public_settings()?;
-            let profile = settings
-                .profile_for(&event.actor)
-                .context("Release actor no longer authorized")?;
+            let profile = settings.source_for_event(event)?;
             ensure!(
                 profile.allows_actor("release")
                     && profile.allows_owner(event.repository.split('/').next().unwrap()),

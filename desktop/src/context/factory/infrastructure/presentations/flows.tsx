@@ -63,7 +63,7 @@ function makeSkillContextKey(
     nodeId,
     settings.commands.codex,
     settings.codex_bindings ?? {},
-    settings.token_profiles.map((profile) => profile.id),
+    settings.source_connectors.map((profile) => profile.id),
     node ? {
       agent: node.agent,
       model: node.model,
@@ -150,7 +150,7 @@ export function FlowsPage({
   latestFlow.current = flow;
   const latestFlowRef = latestFlow;
   const node = flow.nodes.find((n) => n.id === selected);
-  const defaultCodexAccountId = settings.token_profiles
+  const defaultCodexAccountId = settings.source_connectors
     .map((profile) => settings.codex_bindings && Object.hasOwn(settings.codex_bindings, profile.id) ? settings.codex_bindings[profile.id] : undefined)
     .find(Boolean);
   const skillDialogNode = flow.nodes.find((n) => n.id === skillDialogNodeId);
@@ -477,7 +477,7 @@ export function FlowsPage({
           </button>
         ))}
       </div>
-      <WorkflowActivationFields flow={flow} profiles={settings.token_profiles} onChange={update} />
+      <WorkflowActivationFields flow={flow} sources={settings.source_connectors} onChange={update} />
       <section className={`panel flow-workspace ${node ? "inspecting" : ""}`}>
         <div className="flow-toolbar">
           <div>
@@ -625,7 +625,7 @@ export function FlowsPage({
                   </select>
                 </Field>
                 <AgentModelFields node={node} command={settings.commands[node.agent]} boundAccountId={defaultCodexAccountId} onChange={updateNode} />
-                <TokenAgentFields node={node} profiles={settings.token_profiles} commands={settings.commands} bindings={settings.codex_bindings} onChange={updateNode} />
+                <TokenAgentFields node={node} sources={settings.source_connectors} commands={settings.commands} bindings={settings.codex_bindings} onChange={updateNode} />
                 <Field label="Workspace access">
                   <select
                     value={node.access}

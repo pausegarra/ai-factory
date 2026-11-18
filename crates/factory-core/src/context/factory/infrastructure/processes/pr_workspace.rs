@@ -9,7 +9,12 @@ pub(crate) async fn prepare(
     event: &TriggerEvent,
     workspace: &Path,
 ) -> Result<()> {
-    let api = factory.github(&factory.store.token_for(&event.actor).await?)?;
+    let api = factory.github(
+        &factory
+            .store
+            .token_for_source(&factory.store.public_settings()?.source_for_event(event)?.id)
+            .await?,
+    )?;
     let snapshot = api.pr_workspace(event).await?;
     let remote = format!("https://github.com/{}.git", event.repository);
     for (source, target, expected) in [
@@ -28,7 +33,7 @@ pub(crate) async fn prepare(
             factory,
             workspace,
             &["fetch", "--no-tags", &remote, &format!("{source}:{target}")],
-            Some(&event.actor),
+            Some(&factory.store.public_settings()?.source_for_event(event)?.id),
         )
         .await?;
         let sha = git_output(

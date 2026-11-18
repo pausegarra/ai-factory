@@ -5,31 +5,31 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn profile(id: &str, owner: &str) -> Value {
-    json!({"id":id,"label":id,"account":id,"token":format!("{id}-token"),
+    json!({"id":id,"label":id,"type":"github_issues","account":id,"token":format!("{id}-token"),
         "owners":[owner],"authors":[id],"reviewers":[id]})
 }
 
 #[test]
-fn global_settings_migrate_to_profiles_without_resurrecting_empty_scopes() {
+fn global_settings_never_populate_explicit_sources() {
     let mut raw = serde_json::to_value(Settings::default()).unwrap();
     raw["owners"] = json!(["personal", "business"]);
     raw["authors"] = json!(["ALICE", "bob", "other"]);
     raw["reviewers"] = json!(["alice", "BOB"]);
-    raw["token_profiles"] = json!([
-        {"id":"alice","label":"Personal","account":"alice","has_token":false},
-        {"id":"bob","label":"Work","account":"bob","owners":[],"authors":[],"reviewers":["bob"],"has_token":false}
+    raw["source_connectors"] = json!([
+        {"id":"alice","label":"Personal","type":"github_issues","account":"alice","has_token":false},
+        {"id":"bob","label":"Work","type":"github_issues","account":"bob","owners":[],"authors":[],"reviewers":["bob"],"has_token":false}
     ]);
     let settings: Settings = serde_json::from_value(raw).unwrap();
     let migrated = serde_json::to_value(&settings).unwrap();
+    assert_eq!(migrated["source_connectors"][0]["owners"], json!([]));
+    assert_eq!(migrated["source_connectors"][0]["authors"], json!([]));
+    assert_eq!(migrated["source_connectors"][0]["reviewers"], json!([]));
+    assert_eq!(migrated["source_connectors"][1]["owners"], json!([]));
+    assert_eq!(migrated["source_connectors"][1]["authors"], json!([]));
     assert_eq!(
-        migrated["token_profiles"][0]["owners"],
-        json!(["personal", "business"])
+        migrated["source_connectors"][1]["reviewers"],
+        json!(["bob"])
     );
-    assert_eq!(migrated["token_profiles"][0]["authors"], json!(["ALICE"]));
-    assert_eq!(migrated["token_profiles"][0]["reviewers"], json!(["alice"]));
-    assert_eq!(migrated["token_profiles"][1]["owners"], json!([]));
-    assert_eq!(migrated["token_profiles"][1]["authors"], json!([]));
-    assert_eq!(migrated["token_profiles"][1]["reviewers"], json!(["bob"]));
     for field in ["owners", "authors", "reviewers"] {
         assert!(
             migrated.get(field).is_none(),
@@ -46,14 +46,14 @@ fn new_profiles_have_empty_scopes_without_global_fallback() {
     for field in ["owners", "authors", "reviewers"] {
         raw.as_object_mut().unwrap().remove(field);
     }
-    raw["token_profiles"] = json!([
+    raw["source_connectors"] = json!([
         profile("alice", "personal"),
-        {"id":"bob","label":"Work","account":"bob","has_token":false}
+        {"id":"bob","label":"Work","type":"github_issues","account":"bob","has_token":false}
     ]);
     let settings: Settings = serde_json::from_value(raw).unwrap();
     let value = serde_json::to_value(settings).unwrap();
     for field in ["owners", "authors", "reviewers"] {
-        assert_eq!(value["token_profiles"][1][field], json!([]), "{field}");
+        assert_eq!(value["source_connectors"][1][field], json!([]), "{field}");
     }
 }
 
@@ -62,8 +62,8 @@ fn null_scope_is_invalid_instead_of_inheriting_legacy_permissions() {
     for field in ["owners", "authors", "reviewers"] {
         let mut raw = serde_json::to_value(Settings::default()).unwrap();
         raw[field] = json!(["alice"]);
-        raw["token_profiles"] = json!([profile("alice", "personal")]);
-        raw["token_profiles"][0][field] = Value::Null;
+        raw["source_connectors"] = json!([profile("alice", "personal")]);
+        raw["source_connectors"][0][field] = Value::Null;
         assert!(serde_json::from_value::<Settings>(raw).is_err(), "{field}");
     }
 }
@@ -73,26 +73,24 @@ fn profile_scope_persists_normalized_without_changing_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open(dir.path().into()).unwrap();
     let mut raw = serde_json::to_value(f.settings().unwrap()).unwrap();
-    raw["token_profiles"] = json!([profile("alice", "Personal")]);
-    raw["token_profiles"][0]["owners"] = json!(["Personal", "personal"]);
-    raw["token_profiles"][0]["authors"] = json!(["Alice", "alice"]);
+    raw["source_connectors"] = json!([profile("alice", "Personal")]);
+    raw["source_connectors"][0]["owners"] = json!(["Personal", "personal"]);
+    raw["source_connectors"][0]["authors"] = json!(["Alice", "alice"]);
     let saved = serde_json::to_value(
         f.save_settings(serde_json::from_value(raw).unwrap())
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(saved["token_profiles"][0]["owners"], json!(["personal"]));
-    assert_eq!(saved["token_profiles"][0]["authors"], json!(["alice"]));
-    assert_eq!(saved["token_profiles"][0]["has_token"], true);
-    assert!(saved["token_profiles"][0].get("token").is_none());
+    assert_eq!(saved["source_connectors"][0]["owners"], json!(["personal"]));
+    assert_eq!(saved["source_connectors"][0]["authors"], json!(["alice"]));
+    assert_eq!(saved["source_connectors"][0]["has_token"], true);
+    assert!(saved["source_connectors"][0].get("token").is_none());
     drop(f);
     let f = common::open(dir.path().into()).unwrap();
     assert_eq!(serde_json::to_value(f.settings().unwrap()).unwrap(), saved);
     let mut invalid = saved;
-    invalid["token_profiles"][0]["owners"] = json!(["bad/owner"]);
-    assert!(f
-        .save_settings(serde_json::from_value(invalid).unwrap())
-        .is_err());
+    invalid["source_connectors"][0]["owners"] = json!(["bad/owner"]);
+    assert!(serde_json::from_value::<Settings>(invalid).is_err());
 }
 
 async fn server(fail_personal: bool, calls: Arc<Mutex<Vec<(String, String)>>>) -> String {
@@ -192,7 +190,8 @@ async fn polling_uses_only_each_tokens_owners_and_continues_after_another_tokens
         let dir = tempfile::tempdir().unwrap();
         let f = common::open_with_api(dir.path().into(), &base).unwrap();
         let mut raw = serde_json::to_value(f.settings().unwrap()).unwrap();
-        raw["token_profiles"] = json!([profile("alice", "personal"), profile("bob", "business")]);
+        raw["source_connectors"] =
+            json!([profile("alice", "personal"), profile("bob", "business")]);
         f.save_settings(serde_json::from_value(raw).unwrap())
             .unwrap();
         let result = f.poll_now().await;
@@ -225,55 +224,26 @@ async fn polling_uses_only_each_tokens_owners_and_continues_after_another_tokens
 }
 
 #[tokio::test]
-async fn execution_cannot_borrow_owner_or_actor_permissions_from_another_token() {
-    for (remove_owner, expected) in [
-        (true, "Repository owner no longer authorized"),
-        (false, "Trigger actor no longer authorized"),
-    ] {
+async fn admission_cannot_borrow_owner_or_actor_permissions_from_another_token() {
+    for remove_owner in [false, true] {
         let calls = Arc::new(Mutex::new(vec![]));
         let base = server(false, calls.clone()).await;
         let dir = tempfile::tempdir().unwrap();
         let f = common::open_with_api(dir.path().into(), &base).unwrap();
         let mut raw = serde_json::to_value(f.settings().unwrap()).unwrap();
-        let mut actor = profile("alice", "personal");
-        actor["reviewers"] = json!([]);
-        if remove_owner {
-            actor["owners"] = json!([]);
-        } else {
-            actor["authors"] = json!([]);
-        }
-        let mut unrelated = profile("bob", "personal");
-        unrelated["authors"] = json!(["alice"]);
-        unrelated["reviewers"] = json!([]);
-        raw["token_profiles"] = json!([actor, unrelated]);
+        let mut source = profile("alice", "personal");
+        source[if remove_owner { "owners" } else { "authors" }] = json!([]);
+        let mut other = profile("bob", "personal");
+        other["authors"] = json!(["alice"]);
+        raw["source_connectors"] = json!([source, other]);
         f.save_settings(serde_json::from_value(raw).unwrap())
             .unwrap();
-        let id = f
-            .enqueue(TriggerEvent::issue(
-                "personal/repo",
-                1,
-                "[AI] scope",
-                "alice",
-                "",
-            ))
-            .unwrap()
-            .unwrap();
-        f.start();
-        let mut detail = f.run_detail(&id).unwrap();
-        for _ in 0..200 {
-            if !["queued", "running"].contains(&detail.run.status.as_str()) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            detail = f.run_detail(&id).unwrap();
-        }
-        f.shutdown().await;
-        assert_eq!(detail.run.status, "failed");
-        assert!(
-            detail.run.error.as_deref().unwrap().contains(expected),
-            "{:?}",
-            detail.run.error
+        let event = common::from_source(
+            TriggerEvent::issue("personal/repo", 1, "[AI] scope", "alice", ""),
+            "alice",
         );
+        assert!(f.enqueue(event).unwrap().is_none());
         assert!(calls.lock().unwrap().is_empty());
+        assert!(f.snapshot().unwrap().runs.is_empty());
     }
 }

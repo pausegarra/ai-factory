@@ -136,13 +136,9 @@ impl Factory {
 
     pub(crate) fn validate_codex_bindings(&self, settings: &Settings) -> Result<()> {
         for (profile_id, account_id) in &settings.codex_bindings {
-            ensure!(
-                settings
-                    .token_profiles
-                    .iter()
-                    .any(|profile| &profile.id == profile_id),
-                "Codex binding references an unknown GitHub profile"
-            );
+            if settings.source_by_id(profile_id).is_none() {
+                continue;
+            }
             self.codex_home(account_id)?;
         }
         Ok(())

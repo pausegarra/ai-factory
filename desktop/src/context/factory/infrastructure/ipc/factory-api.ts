@@ -18,7 +18,7 @@ import type {
 export const native = isTauri();
 const previewSettings: Settings = {
   notification_connectors: [],
-  token_profiles: [],
+  source_connectors: [],
   projects: [],
   commands: { codex: "codex", opencode: "opencode", git: "git" },
   issue_node_comments_enabled: true,

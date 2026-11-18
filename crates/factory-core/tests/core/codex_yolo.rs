@@ -1,4 +1,5 @@
 use super::*;
+use crate::common;
 
 #[test]
 fn codex_yolo_defaults_off_for_existing_settings_and_round_trips_explicit_values() {
@@ -34,12 +35,15 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' >
                 .save_settings(serde_json::from_value(settings).unwrap())
                 .unwrap();
             let id = factory
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    410,
-                    "[AI] execution permissions",
+                .enqueue(common::from_source(
+                    TriggerEvent::issue(
+                        "acme/repo",
+                        410,
+                        "[AI] execution permissions",
+                        "alice",
+                        "",
+                    ),
                     "alice",
-                    "",
                 ))
                 .unwrap()
                 .unwrap();
@@ -106,12 +110,9 @@ printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' >
         .save_settings(serde_json::from_value(settings).unwrap())
         .unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            411,
-            "[AI] OpenCode unchanged",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 411, "[AI] OpenCode unchanged", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();

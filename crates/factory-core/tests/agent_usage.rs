@@ -79,14 +79,15 @@ done"#,
         db.execute("UPDATE agent_accounts SET json=?2 WHERE id=?1",rusqlite::params![id,json!({"id":id,"agent":"codex","label":status,"email":null,"status":status,"error":"fixture-secret"}).to_string()]).unwrap();
     }
     let mut settings = factory.settings().unwrap();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "fixture-profile".into(),
         label: "Fixture profile".into(),
         account: "fixture-user".into(),
         owners: vec![],
         authors: vec![],
         reviewers: vec![],
-        token: None,
+        token: Some("usage-fixture-source".into()),
         has_token: false,
     });
     settings

@@ -165,6 +165,7 @@ fn connector(id: &str, url: &str, trigger: &str) -> NotificationConnector {
 }
 fn emit(f: &Factory, n: u64, trigger: &str) -> String {
     let mut e = TriggerEvent::issue("acme/repo", n, "Fixture", "alice", "");
+    e.origin_token_profile_id = Some("work".into());
     e.trigger_id = trigger.into();
     e.event_id = format!("{trigger}:acme/repo#{n}");
     e.origin_token_profile_id = Some("work".into());
@@ -197,8 +198,13 @@ async fn scenario(mode: &str, shutdown_held: bool) {
     let native = Arc::new(Native::default());
     f.set_run_notification_sink(native.clone());
     let mut s = f.settings().unwrap();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        kind: SourceKind::GithubIssues,
         id: "work".into(),
+        token: Some("fixture-source".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
         account: "alice".into(),
         label: "Work".into(),
         ..Default::default()

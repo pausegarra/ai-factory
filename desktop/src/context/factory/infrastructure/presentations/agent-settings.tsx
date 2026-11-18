@@ -1,12 +1,13 @@
+import { sourceLabel } from "../../domain/source-connectors";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowSquareOut, ArrowsClockwise, Plus, Robot, Terminal, Trash } from "@phosphor-icons/react";
-import type { AgentAccount, TokenProfile } from "../../domain/types";
+import type { AgentAccount, SourceConnector } from "../../domain/types";
 import { factoryApi, native } from "../ipc/factory-api";
 import { Field, Notice } from "./ui";
 import { noticeText } from "./notice-content";
 
 interface AgentsSettingsProps {
-  profiles: TokenProfile[];
+  sources: SourceConnector[];
   bindings: Record<string, string>;
   disabled: boolean;
   onBindingChange: (profileId: string, accountId: string) => void;
@@ -33,7 +34,7 @@ export function AgentsSettings(props: AgentsSettingsProps) {
   );
 }
 
-function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccountRemoved, onBusyChange }: AgentsSettingsProps) {
+function CodexAccounts({ sources, bindings, disabled, onBindingChange, onAccountRemoved, onBusyChange }: AgentsSettingsProps) {
   const [accounts, setAccounts] = useState<AgentAccount[]>([]);
   const [label, setLabel] = useState("");
   const [loading, setLoading] = useState(true);
@@ -156,7 +157,7 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
           <h2 id="codex-settings-heading" ref={heading} tabIndex={-1}>
             Codex
           </h2>
-          <p>Connect Codex accounts with OAuth. Assign an account to each GitHub profile.</p>
+          <p>Connect Codex accounts with OAuth. Assign an account to each Source connector.</p>
         </div>
         <button type="button" className="button button-secondary" disabled={loading || locked || !native} onClick={() => void reload()}>
           <ArrowsClockwise size={16} />Reload accounts
@@ -203,16 +204,16 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
         )}
       </div>
       <div className="agent-profile-bindings">
-        <h3>GitHub profile assignments</h3>
-        <p className="section-note">Unassigned GitHub profiles block Codex steps. Assignments apply after Save changes.</p>
-        {profiles.length ? (
+        <h3>Source connector assignments</h3>
+        <p className="section-note">Unassigned source connectors block Codex steps. Assignments apply after Save changes.</p>
+        {sources.length ? (
           <div className="form-grid">
-            {profiles.map((profile) => {
-              const accountId = Object.hasOwn(bindings, profile.id) ? bindings[profile.id] : "";
+            {sources.map((source) => {
+              const accountId = Object.hasOwn(bindings, source.id) ? bindings[source.id] : "";
               const unavailable = accountId && !readyAccounts.some((account) => account.id === accountId);
               return (
-                <Field key={profile.id} label={`Codex account for ${profile.label || "Unnamed profile"}${profile.account ? ` (@${profile.account})` : ""}`} hint={unavailable ? "Selected account is not ready. Codex steps are blocked." : undefined}>
-                  <select value={accountId} disabled={locked || loading || !native} onChange={(event) => onBindingChange(profile.id, event.target.value)}>
+                <Field key={source.id} label={`Codex account for ${sourceLabel(source, sources)}`} hint={unavailable ? "Selected account is not ready. Codex steps are blocked." : undefined}>
+                  <select value={accountId} disabled={locked || loading || !native} onChange={(event) => onBindingChange(source.id, event.target.value)}>
                     <option value="">Unassigned · blocks Codex</option>
                     {unavailable && <option value={accountId} disabled>Unavailable account</option>}
                     {readyAccounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.email ? ` (${account.email})` : ""}</option>)}
@@ -221,7 +222,11 @@ function CodexAccounts({ profiles, bindings, disabled, onBindingChange, onAccoun
               );
             })}
           </div>
-        ) : <p className="section-note">Add profiles in GitHub accounts to assign Codex accounts.</p>}
+        ) : <p className="section-note">Add a GitHub Issues connector in Sources to assign Codex accounts.</p>}
+        {Object.keys(bindings).filter(id => !sources.some(source => source.id === id)).map(id => <div key={id}>
+          <span>Unavailable source: {id}</span>
+          <button type="button" className="button button-secondary" disabled={locked} aria-label={`Remove binding for ${id}`} onClick={() => onBindingChange(id, "")}>Remove assignment</button>
+        </div>)}
       </div>
       <p className="section-note">Account connections and removals take effect immediately. Credentials stay on this device and never appear here.</p>
     </section>

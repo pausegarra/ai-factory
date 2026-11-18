@@ -2,53 +2,101 @@ use super::store::Store;
 use crate::*;
 use anyhow::{ensure, Context};
 use rusqlite::{params, OptionalExtension, Transaction};
-use serde_json::json;
 use std::collections::HashSet;
 
-fn origin_is_current(settings: &Settings, event: &TriggerEvent) -> bool {
-    event
-        .origin_token_profile_id
-        .as_ref()
-        .is_none_or(|id| safe_id(id) && settings.token_profiles.iter().any(|p| &p.id == id))
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ReviewObservation {
+    requested: bool,
+    generation: u64,
 }
-
+fn review_generation(
+    global: Option<&ReviewObservation>,
+    local: Option<&ReviewObservation>,
+) -> Result<(u64, bool)> {
+    let generation = global.map_or(0, |v| v.generation);
+    ensure!(
+        local.is_none_or(|v| v.generation <= generation),
+        "Invalid review generation state"
+    );
+    let advance = generation == 0
+        || global.is_some_and(|v| !v.requested)
+        || local.is_some_and(|v| !v.requested && v.generation == generation);
+    Ok((
+        if advance {
+            generation
+                .checked_add(1)
+                .context("Review generation limit reached")?
+        } else {
+            generation
+        },
+        advance,
+    ))
+}
+fn origin_is_current(settings: &Settings, event: &TriggerEvent) -> bool {
+    settings.source_for_event(event).is_ok()
+}
 impl Store {
     pub(crate) fn admit_review_scan(
         &self,
+        source_id: &str,
         owner: &str,
         reviewer: &str,
         candidates: &[TriggerEvent],
     ) -> Result<Vec<String>> {
         self.with_admission(|tx, settings| {
-            let flow = settings.flows.iter().find(|f| f.id == "pr_review").context("Review flow missing")?;
-            if flow.activation_for(reviewer, &settings.token_profiles) != ActivationState::Enabled {
-                return Ok(Vec::new());
+            ensure!(safe_id(source_id) && valid_login(owner) && valid_login(reviewer), "Invalid review scan identity");
+            let Some(source) = settings.source_by_id(source_id) else { return Ok(Vec::new()); };
+            let template = settings.flows.iter().find(|f| f.id == "pr_review").context("Review flow missing")?;
+            if !source.account.eq_ignore_ascii_case(reviewer) || !source.allows_owner(owner) || !source.allows_actor("pr_review")
+                || template.activation_for_source(source_id, &settings.source_connectors) != ActivationState::Enabled { return Ok(Vec::new()); }
+            for e in candidates {
+                ensure!(e.trigger_id == "pr_review" && e.number > 0 && valid_repository(&e.repository)
+                    && e.origin_token_profile_id.as_deref() == Some(source_id) && origin_is_current(settings, e)
+                    && e.repository.split('/').next().is_some_and(|v| v.eq_ignore_ascii_case(owner)), "Invalid review candidate identity");
             }
-            let flow = settings.flow_for_actor(flow, reviewer);
-            let key = format!("review:{owner}:{reviewer}");
-            let raw: Option<String> = tx.query_row("SELECT json FROM observations WHERE key=?1", [&key], |r| r.get(0)).optional()?;
-            let mut previous: serde_json::Value = raw.map(|raw| serde_json::from_str(&raw)).transpose()?.unwrap_or(json!({}));
-            let map = previous.as_object_mut().context("Invalid review state")?;
-            let mut present = HashSet::new();
-            let mut created = Vec::new();
+            let flow = settings.flow_for_source(template, source_id)?;
+            let owner = owner.to_lowercase(); let reviewer = reviewer.to_lowercase();
+            let global_key = format!("review:{owner}:{reviewer}");
+            let local_key = format!("review-source:{source_id}:{owner}:{reviewer}");
+            let read = |key: &str| -> Result<std::collections::BTreeMap<String, ReviewObservation>> {
+                let raw: Option<String> = tx.query_row("SELECT json FROM observations WHERE key=?1", [key], |r| r.get(0)).optional()?;
+                Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?.unwrap_or_default())
+            };
+            let mut global = read(&global_key)?; let mut local = read(&local_key)?;
+            // Recover exact numeric generations even after run deletion/import or older observation loss.
+            let mut q = tx.prepare("SELECT event_id FROM dedup WHERE substr(event_id,1,7)='review:'")?;
+            for row in q.query_map([], |r| r.get::<_,String>(0))? {
+                let id = row?;
+                let Some((prefix, generation)) = id.rsplit_once(':') else { continue; };
+                let Some((identity, actor)) = prefix.strip_prefix("review:").and_then(|v| v.rsplit_once(':')) else { continue; };
+                let Some((repo, number)) = identity.rsplit_once('#') else { continue; };
+                if actor != reviewer || repo.split('/').next() != Some(owner.as_str()) || !valid_repository(repo) || number.parse::<u64>().ok().is_none_or(|n| n==0) { continue; }
+                let Ok(generation) = generation.parse::<u64>() else { continue; };
+                let key = identity.to_lowercase();
+                if generation > global.get(&key).map_or(0, |v| v.generation) { global.insert(key, ReviewObservation { requested:true, generation }); }
+            }
+            let mut present = HashSet::new(); let mut created = Vec::new();
             for candidate in candidates {
-                if !origin_is_current(settings, candidate) { continue; }
-                let identity = format!("{}#{}", candidate.repository, candidate.number);
+                let identity = format!("{}#{}", candidate.repository.to_lowercase(), candidate.number);
                 if !present.insert(identity.clone()) { continue; }
-                let old = map.get(&identity);
-                let requested = old.and_then(|v| v["requested"].as_bool()).unwrap_or(false);
-                let generation = old.and_then(|v| v["generation"].as_u64()).unwrap_or(0);
-                if requested { continue; }
-                let generation = generation.checked_add(1).context("Review generation limit reached")?;
-                let mut event = candidate.clone();
-                event.event_id = format!("review:{}#{}:{reviewer}:{generation}", event.repository, event.number);
-                if let Some(id) = Self::insert_in_tx(tx, &event, &flow, 1, true, None)? { created.push(id); }
-                map.insert(identity, json!({"requested":true,"generation":generation}));
+                let (generation, advance) = review_generation(global.get(&identity), local.get(&identity))?;
+                if advance {
+                    let mut event = candidate.clone();
+                    event.event_id = format!("review:{identity}:{reviewer}:{generation}");
+                    if let Some(id) = Self::insert_in_tx(tx, &event, &flow, 1, true, None)? { created.push(id); }
+                }
+                global.insert(identity.clone(), ReviewObservation { requested:true, generation });
+                local.insert(identity, ReviewObservation { requested:true, generation });
             }
-            for (identity, value) in map.iter_mut() {
-                if !present.contains(identity) { value["requested"] = json!(false); }
+            let identities: HashSet<_> = global.keys().chain(local.keys()).cloned().collect();
+            for identity in identities {
+                if !present.contains(&identity) {
+                    local.insert(identity.clone(), ReviewObservation { requested:false, generation:global.get(&identity).map_or(0, |v| v.generation) });
+                }
             }
-            tx.execute("INSERT INTO observations VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json", params![key, serde_json::to_string(&previous)?])?;
+            for (key, map) in [(global_key, global), (local_key, local)] {
+                tx.execute("INSERT INTO observations VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json", params![key, serde_json::to_string(&map)?])?;
+            }
             Ok(created)
         })
     }
@@ -81,12 +129,20 @@ impl Store {
                 .iter()
                 .find(|f| f.id == event.trigger_id)
                 .context("Unknown trigger")?;
-            if flow.activation_for(&event.actor, &settings.token_profiles)
-                != ActivationState::Enabled
+            if flow.activation_for_source(
+                event.origin_token_profile_id.as_deref().unwrap_or(""),
+                &settings.source_connectors,
+            ) != ActivationState::Enabled
             {
                 return Ok(None);
             }
-            let flow = settings.flow_for_actor(flow, &event.actor);
+            let flow = settings.flow_for_source(
+                flow,
+                event
+                    .origin_token_profile_id
+                    .as_deref()
+                    .context("Source connector unavailable")?,
+            )?;
             Self::insert_in_tx(tx, event, &flow, 1, true, None)
         })
     }
@@ -110,12 +166,20 @@ impl Store {
                 .iter()
                 .find(|f| f.id == "pr_approved")
                 .context("Approval flow missing")?;
-            if flow.activation_for(&event.actor, &settings.token_profiles)
-                != ActivationState::Enabled
+            if flow.activation_for_source(
+                event.origin_token_profile_id.as_deref().unwrap_or(""),
+                &settings.source_connectors,
+            ) != ActivationState::Enabled
             {
                 return Ok(None);
             }
-            let flow = settings.flow_for_actor(flow, &event.actor);
+            let flow = settings.flow_for_source(
+                flow,
+                event
+                    .origin_token_profile_id
+                    .as_deref()
+                    .context("Source connector unavailable")?,
+            )?;
             Self::insert_in_tx(tx, event, &flow, 1, true, Some((comments, approved)))
         })
     }
@@ -142,15 +206,13 @@ impl Store {
                 )?,
                 "Cannot retry event with another active attempt"
             );
-            let flow = settings
-                .flows
-                .iter()
-                .find(|f| f.id == event.trigger_id)
-                .context("Flow missing")?;
-            let reason = match flow.activation_for(&event.actor, &settings.token_profiles) {
+            settings.source_for_event(&event)?;
+            let flow = settings.flows.iter().find(|f| f.id == event.trigger_id).context("Flow missing")?;
+            let reason = match flow.activation_for_source(event.origin_token_profile_id.as_deref().unwrap_or(""), &settings.source_connectors) {
                 ActivationState::Enabled => None,
                 ActivationState::DisabledGlobally => Some("disabled globally"),
-                ActivationState::DisabledForProfile => Some("disabled for this account"),
+                ActivationState::DisabledForProfile => Some("disabled for this source"),
+                ActivationState::UnavailableSource => Some("source connector unavailable"),
             };
             if let Some(reason) = reason {
                 anyhow::bail!("Workflow {} for @{} is {}", flow.id, event.actor, reason);
@@ -159,7 +221,7 @@ impl Store {
                 .attempt
                 .checked_add(1)
                 .context("Run attempt limit reached")?;
-            let flow = settings.flow_for_actor(flow, &event.actor);
+            let flow = settings.flow_for_source(flow, event.origin_token_profile_id.as_deref().context("Source connector unavailable")?)?;
             Self::insert_in_tx(tx, &event, &flow, attempt, false, None)?
                 .context("Retry was not inserted")
         })
@@ -194,19 +256,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_with_credentials(dir.path(), Arc::new(Memory::default())).unwrap();
         let mut s = Settings::default();
-        s.token_profiles.push(TokenProfile {
+        s.source_connectors.push(SourceConnector {
+            kind: SourceKind::GithubIssues,
             id: "work".into(),
             label: "Work".into(),
             account: "alice".into(),
+            owners: vec!["acme".into()],
+            authors: vec!["alice".into()],
+            reviewers: vec!["alice".into()],
             token: Some("fixture".into()),
             has_token: false,
-            ..Default::default()
         });
         store.save_settings(&s).unwrap();
         (dir, store, s)
     }
     fn candidate(trigger: &str, n: u64) -> TriggerEvent {
         let mut e = TriggerEvent::issue("acme/repo", n, "fixture", "alice", "");
+        e.origin_token_profile_id = Some("work".into());
         e.trigger_id = trigger.into();
         e.event_id = if trigger == "pr_review" {
             String::new()
@@ -307,7 +373,7 @@ mod tests {
         s.flows[2].profile_activation.insert("work".into(), false);
         store.save_settings(&s).unwrap();
         assert!(store
-            .admit_review_scan("acme", "alice", std::slice::from_ref(&e))
+            .admit_review_scan("work", "acme", "alice", std::slice::from_ref(&e))
             .unwrap()
             .is_empty());
         assert_eq!(counts(&store), (0, 0, 0));
@@ -315,13 +381,13 @@ mod tests {
         store.save_settings(&s).unwrap();
         assert_eq!(
             store
-                .admit_review_scan("acme", "alice", &[e.clone(), e.clone()])
+                .admit_review_scan("work", "acme", "alice", &[e.clone(), e.clone()])
                 .unwrap()
                 .len(),
             1
         );
         assert!(store
-            .admit_review_scan("acme", "alice", std::slice::from_ref(&e))
+            .admit_review_scan("work", "acme", "alice", std::slice::from_ref(&e))
             .unwrap()
             .is_empty());
         let before = store.observation("review:acme:alice").unwrap();
@@ -331,19 +397,31 @@ mod tests {
         );
         s.flows[2].enabled = false;
         store.save_settings(&s).unwrap();
-        store.admit_review_scan("acme", "alice", &[]).unwrap();
+        store
+            .admit_review_scan("work", "acme", "alice", &[])
+            .unwrap();
         assert_eq!(store.observation("review:acme:alice").unwrap(), before);
         s.flows[2].enabled = true;
         store.save_settings(&s).unwrap();
-        store.admit_review_scan("acme", "alice", &[]).unwrap();
+        store
+            .admit_review_scan("work", "acme", "alice", &[])
+            .unwrap();
         store.db.lock().unwrap().execute_batch("CREATE TRIGGER deny_observation BEFORE UPDATE ON observations BEGIN SELECT RAISE(ABORT,'fixture write denied'); END;").unwrap();
         let baseline = counts(&store);
         assert!(store
-            .admit_review_scan("acme", "alice", &[e.clone(), candidate("pr_review", 6)])
+            .admit_review_scan(
+                "work",
+                "acme",
+                "alice",
+                &[e.clone(), candidate("pr_review", 6)]
+            )
             .is_err());
         assert_eq!(counts(&store), baseline);
         assert_eq!(
-            store.observation("review:acme:alice").unwrap().unwrap()["acme/repo#5"]["requested"],
+            store
+                .observation("review-source:work:acme:alice")
+                .unwrap()
+                .unwrap()["acme/repo#5"]["requested"],
             json!(false)
         );
         store
@@ -354,7 +432,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .admit_review_scan("acme", "alice", &[e, candidate("pr_review", 6)])
+                .admit_review_scan("work", "acme", "alice", &[e, candidate("pr_review", 6)])
                 .unwrap()
                 .len(),
             2
@@ -372,13 +450,328 @@ mod tests {
         store.insert(&e, &s.flows[2], 1, true).unwrap().unwrap();
         e.event_id.clear();
         assert!(store
-            .admit_review_scan("acme", "alice", &[e])
+            .admit_review_scan("work", "acme", "alice", &[e])
             .unwrap()
             .is_empty());
-        assert_eq!(counts(&store), (1, 1, 1));
+        assert_eq!(counts(&store), (1, 1, 2));
         assert_eq!(
             store.observation("review:acme:alice").unwrap().unwrap()["acme/repo#5"],
             json!({"requested":true,"generation":1})
+        );
+    }
+    fn source_pair() -> (tempfile::TempDir, Store, Settings) {
+        let (dir, store, mut settings) = setup();
+        let mut a = settings.source_connectors[0].clone();
+        a.id = "src-a".into();
+        a.account = "alice".into();
+        a.owners = vec!["acme".into()];
+        a.authors.clear();
+        a.reviewers = vec!["alice".into()];
+        a.token = Some("fixture-a".into());
+        let mut b = a.clone();
+        b.id = "src-b".into();
+        b.token = Some("fixture-b".into());
+        settings.source_connectors = vec![a, b];
+        settings
+            .flows
+            .iter_mut()
+            .find(|f| f.id == "pr_review")
+            .unwrap()
+            .enabled = true;
+        store.save_settings(&settings).unwrap();
+        (dir, store, settings)
+    }
+    fn source_review_candidate(source_id: &str) -> TriggerEvent {
+        let mut e = candidate("pr_review", 5);
+        e.origin_token_profile_id = Some(source_id.into());
+        e
+    }
+
+    #[test]
+    fn review_sources_keep_global_generation_after_disable_and_removal() {
+        for catch_up_before_removal in [false, true] {
+            let (dir, store, mut settings) = source_pair();
+            let a = source_review_candidate("src-a");
+            let b = source_review_candidate("src-b");
+            assert_eq!(
+                store
+                    .admit_review_scan("src-a", "acme", "alice", std::slice::from_ref(&a))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(store
+                .admit_review_scan("src-b", "acme", "alice", std::slice::from_ref(&b))
+                .unwrap()
+                .is_empty());
+            let b_before = store.observation("review-source:src-b:acme:alice").unwrap();
+            settings
+                .flows
+                .iter_mut()
+                .find(|f| f.id == "pr_review")
+                .unwrap()
+                .profile_activation
+                .insert("src-b".into(), false);
+            store.save_settings(&settings).unwrap();
+            assert!(store
+                .admit_review_scan("src-b", "acme", "alice", &[])
+                .unwrap()
+                .is_empty());
+            assert!(store
+                .admit_review_scan("src-b", "acme", "alice", std::slice::from_ref(&b))
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                store.observation("review-source:src-b:acme:alice").unwrap(),
+                b_before
+            );
+            store
+                .admit_review_scan("src-a", "acme", "alice", &[])
+                .unwrap();
+            assert_eq!(
+                store
+                    .admit_review_scan("src-a", "acme", "alice", &[a])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            settings
+                .flows
+                .iter_mut()
+                .find(|f| f.id == "pr_review")
+                .unwrap()
+                .profile_activation
+                .remove("src-b");
+            if catch_up_before_removal {
+                store.save_settings(&settings).unwrap();
+                assert!(store
+                    .admit_review_scan("src-b", "acme", "alice", std::slice::from_ref(&b))
+                    .unwrap()
+                    .is_empty());
+            }
+            settings
+                .source_connectors
+                .retain(|source| source.id != "src-a");
+            store.save_settings(&settings).unwrap();
+            let a_before = store.observation("review-source:src-a:acme:alice").unwrap();
+            store
+                .admit_review_scan("src-b", "acme", "alice", &[])
+                .unwrap();
+            let ids = store
+                .admit_review_scan("src-b", "acme", "alice", std::slice::from_ref(&b))
+                .unwrap();
+            assert_eq!(ids.len(), 1, "new request must not reuse generation 2");
+            let detail = store.detail(&ids[0]).unwrap();
+            assert_eq!(detail.event.event_id, "review:acme/repo#5:alice:3");
+            assert_eq!(
+                detail.event.origin_token_profile_id.as_deref(),
+                Some("src-b")
+            );
+            assert!(store
+                .admit_review_scan("src-b", "acme", "alice", std::slice::from_ref(&b))
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                store.observation("review-source:src-a:acme:alice").unwrap(),
+                a_before
+            );
+            let mut events: Vec<_> = store
+                .runs()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event_id)
+                .collect();
+            events.sort();
+            assert_eq!(
+                events,
+                (1..=3)
+                    .map(|g| format!("review:acme/repo#5:alice:{g}"))
+                    .collect::<Vec<_>>()
+            );
+            drop(store);
+            let reopened =
+                Store::open_with_credentials(dir.path(), Arc::new(Memory::default())).unwrap();
+            assert!(reopened
+                .admit_review_scan("src-b", "acme", "alice", &[b])
+                .unwrap()
+                .is_empty());
+            assert_eq!(reopened.runs().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn review_generation_joins_current_and_advances_only_from_current_absence() {
+        let state = |requested, generation| ReviewObservation {
+            requested,
+            generation,
+        };
+        let cases = [
+            (None, None, (1, true)),
+            (Some(state(true, 2)), None, (2, false)),
+            (Some(state(true, 2)), Some(state(true, 1)), (2, false)),
+            (Some(state(true, 2)), Some(state(false, 1)), (2, false)),
+            (Some(state(true, 2)), Some(state(false, 2)), (3, true)),
+            (Some(state(true, 2)), Some(state(true, 2)), (2, false)),
+            (Some(state(false, 2)), None, (3, true)),
+        ];
+        for (global, local, expected) in cases {
+            assert_eq!(
+                review_generation(global.as_ref(), local.as_ref()).unwrap(),
+                expected
+            );
+        }
+        assert!(review_generation(Some(&state(true, 2)), Some(&state(false, 3))).is_err());
+        assert!(
+            review_generation(Some(&state(true, u64::MAX)), Some(&state(false, u64::MAX))).is_err()
+        );
+    }
+
+    #[test]
+    fn review_sources_staggered_absence_joins_existing_cycle() {
+        for (leader, follower) in [("src-a", "src-b"), ("src-b", "src-a")] {
+            let (_dir, store, _) = source_pair();
+            let first = source_review_candidate(leader);
+            let second = source_review_candidate(follower);
+            assert_eq!(
+                store
+                    .admit_review_scan(leader, "acme", "alice", std::slice::from_ref(&first))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(store
+                .admit_review_scan(follower, "acme", "alice", std::slice::from_ref(&second))
+                .unwrap()
+                .is_empty());
+            store
+                .admit_review_scan(follower, "acme", "alice", &[])
+                .unwrap();
+            store
+                .admit_review_scan(leader, "acme", "alice", &[])
+                .unwrap();
+            assert_eq!(
+                store
+                    .admit_review_scan(leader, "acme", "alice", &[first])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(store
+                .admit_review_scan(follower, "acme", "alice", &[second])
+                .unwrap()
+                .is_empty());
+            let mut ids: Vec<_> = store
+                .runs()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event_id)
+                .collect();
+            ids.sort();
+            assert_eq!(
+                ids,
+                vec!["review:acme/repo#5:alice:1", "review:acme/repo#5:alice:2"]
+            );
+            let detail = store.detail(&store.runs().unwrap()[0].id).unwrap();
+            assert_eq!(
+                detail.event.origin_token_profile_id.as_deref(),
+                Some(leader)
+            );
+        }
+    }
+    #[test]
+    fn review_history_numeric_bootstrap_and_deletion_never_replay_the_current_cycle() {
+        for historical_false in [false, true] {
+            let (_dir, store, settings) = source_pair();
+            let mut e = source_review_candidate("src-a");
+            for generation in [9, 10] {
+                e.event_id = format!("review:acme/repo#5:alice:{generation}");
+                store.insert(&e, &settings.flows[2], 1, true).unwrap();
+            }
+            if historical_false {
+                store
+                    .observe(
+                        "review:acme:alice",
+                        &json!({"acme/repo#5":{"requested":false,"generation":10}}),
+                    )
+                    .unwrap();
+            }
+            e.event_id.clear();
+            let ids = store
+                .admit_review_scan("src-a", "acme", "alice", std::slice::from_ref(&e))
+                .unwrap();
+            assert_eq!(ids.len(), usize::from(historical_false));
+            let generation = if historical_false { 11 } else { 10 };
+            assert_eq!(
+                store.observation("review:acme:alice").unwrap().unwrap()["acme/repo#5"]
+                    ["generation"],
+                json!(generation)
+            );
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute_batch("DELETE FROM nodes;DELETE FROM runs;DELETE FROM dedup;")
+                .unwrap();
+            let b = source_review_candidate("src-b");
+            assert!(store
+                .admit_review_scan("src-b", "acme", "alice", std::slice::from_ref(&b))
+                .unwrap()
+                .is_empty());
+            store
+                .admit_review_scan("src-b", "acme", "alice", &[])
+                .unwrap();
+            let ids = store
+                .admit_review_scan("src-b", "acme", "alice", &[b])
+                .unwrap();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(
+                store.detail(&ids[0]).unwrap().event.event_id,
+                format!("review:acme/repo#5:alice:{}", generation + 1)
+            );
+        }
+    }
+    #[test]
+    fn review_local_write_failure_and_overflow_rollback_every_admission_effect() {
+        let (_dir, store, _) = source_pair();
+        let e = source_review_candidate("src-a");
+        store
+            .admit_review_scan("src-a", "acme", "alice", std::slice::from_ref(&e))
+            .unwrap();
+        store
+            .admit_review_scan("src-a", "acme", "alice", &[])
+            .unwrap();
+        let global = store.observation("review:acme:alice").unwrap();
+        let local = store.observation("review-source:src-a:acme:alice").unwrap();
+        let before = counts(&store);
+        store.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_local BEFORE UPDATE ON observations WHEN NEW.key='review-source:src-a:acme:alice' BEGIN SELECT RAISE(ABORT,'local denied'); END;").unwrap();
+        assert!(store
+            .admit_review_scan("src-a", "acme", "alice", std::slice::from_ref(&e))
+            .is_err());
+        assert_eq!(counts(&store), before);
+        assert_eq!(store.observation("review:acme:alice").unwrap(), global);
+        assert_eq!(
+            store.observation("review-source:src-a:acme:alice").unwrap(),
+            local
+        );
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_local")
+            .unwrap();
+        store
+            .observe(
+                "review:acme:alice",
+                &json!({"acme/repo#5":{"requested":false,"generation":u64::MAX}}),
+            )
+            .unwrap();
+        assert!(store
+            .admit_review_scan("src-a", "acme", "alice", &[e])
+            .is_err());
+        assert_eq!(counts(&store), before);
+        assert_eq!(
+            store.observation("review:acme:alice").unwrap().unwrap()["acme/repo#5"]["generation"],
+            json!(u64::MAX)
         );
     }
 }

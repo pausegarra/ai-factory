@@ -24,7 +24,7 @@ pub(crate) const VERSION_BUMP_NODE_ID: &str = "version_bump";
 #[serde(try_from = "settings_input::SettingsInput")]
 pub struct Settings {
     pub notification_connectors: Vec<super::notification_connector::NotificationConnector>,
-    pub token_profiles: Vec<TokenProfile>,
+    pub source_connectors: Vec<SourceConnector>,
     #[serde(default)]
     pub codex_bindings: BTreeMap<String, String>,
     pub projects: Vec<Project>,
@@ -37,61 +37,7 @@ pub struct Settings {
     pub start_at_login: bool,
     pub flows: Vec<Flow>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct TokenProfile {
-    pub id: String,
-    pub label: String,
-    pub account: String,
-    #[serde(default)]
-    pub owners: Vec<String>,
-    #[serde(default)]
-    pub authors: Vec<String>,
-    #[serde(default)]
-    pub reviewers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    #[serde(default)]
-    pub has_token: bool,
-}
-
-impl TokenProfile {
-    pub fn allows_owner(&self, owner: &str) -> bool {
-        self.owners
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(owner))
-    }
-
-    pub fn allows_actor(&self, trigger: &str) -> bool {
-        let actors = match trigger {
-            "new_issue" | "pr_approved" | "release" => &self.authors,
-            "pr_review" => &self.reviewers,
-            _ => return false,
-        };
-        actors
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(&self.account))
-    }
-
-    /// Convert legacy global permissions to this account's effective scope.
-    pub fn apply_legacy_scope(
-        &mut self,
-        owners: &[String],
-        authors: &[String],
-        reviewers: &[String],
-    ) {
-        self.owners = owners.to_vec();
-        self.authors = authors
-            .iter()
-            .filter(|value| value.eq_ignore_ascii_case(&self.account))
-            .cloned()
-            .collect();
-        self.reviewers = reviewers
-            .iter()
-            .filter(|value| value.eq_ignore_ascii_case(&self.account))
-            .cloned()
-            .collect();
-    }
-}
+use super::source_connector::SourceConnector;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
@@ -121,6 +67,7 @@ pub enum ActivationState {
     Enabled,
     DisabledGlobally,
     DisabledForProfile,
+    UnavailableSource,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -205,7 +152,7 @@ impl Default for Settings {
         };
         Self {
             notification_connectors: vec![],
-            token_profiles: vec![],
+            source_connectors: vec![],
             codex_bindings: BTreeMap::new(),
             projects: vec![],
             commands: Commands {
@@ -332,13 +279,12 @@ impl Settings {
             .unwrap_or(self.max_concurrent))
     }
 
-    pub fn flow_for_actor(&self, template: &Flow, actor: &str) -> Flow {
-        let mut flow = template.for_actor(actor, &self.token_profiles);
-        let account = self
-            .token_profiles
-            .iter()
-            .find(|profile| profile.account.eq_ignore_ascii_case(actor))
-            .and_then(|profile| self.codex_bindings.get(&profile.id));
+    pub fn flow_for_source(&self, template: &Flow, source_id: &str) -> Result<Flow> {
+        let source = self
+            .source_by_id(source_id)
+            .ok_or_else(|| anyhow::anyhow!("Source connector unavailable"))?;
+        let mut flow = template.for_source(source);
+        let account = self.codex_bindings.get(source_id);
         for node in &mut flow.nodes {
             node.codex_account_id = if node.agent == "codex" {
                 account.cloned()
@@ -346,22 +292,30 @@ impl Settings {
                 None
             };
         }
-        flow
+        Ok(flow)
+    }
+    pub fn source_by_id(&self, id: &str) -> Option<&SourceConnector> {
+        self.source_connectors.iter().find(|s| s.id == id)
+    }
+    pub fn source_for_event(&self, event: &TriggerEvent) -> Result<&SourceConnector> {
+        let source = event
+            .origin_token_profile_id
+            .as_deref()
+            .filter(|id| safe_id(id))
+            .and_then(|id| self.source_by_id(id))
+            .ok_or_else(|| anyhow::anyhow!("Source connector unavailable"))?;
+        ensure!(
+            valid_repository(&event.repository)
+                && event.number > 0
+                && source.account.eq_ignore_ascii_case(&event.actor)
+                && source.allows_owner(event.repository.split('/').next().unwrap_or(""))
+                && source.allows_actor(&event.trigger_id),
+            "Source connector does not authorize this event"
+        );
+        Ok(source)
     }
     pub fn validate(&self) -> Result<()> {
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
-        for c in &self.notification_connectors {
-            if let Some((_, profile_ids)) = c.provider.notification_filters() {
-                let name = c.provider.notification_name();
-                ensure!(
-                    !c.enabled
-                        || profile_ids
-                            .iter()
-                            .all(|id| self.token_profiles.iter().any(|p| &p.id == id)),
-                    "Select an available GitHub profile for {name}"
-                );
-            }
-        }
         self.validate_concurrency()?;
         ensure!(
             self.poll_interval_seconds > 0,
@@ -374,24 +328,17 @@ impl Settings {
             "CLI commands cannot be empty"
         );
         let mut ids = HashSet::new();
-        let mut accounts = HashSet::new();
-        for t in &self.token_profiles {
+        for source in &self.source_connectors {
+            source.validate()?;
             ensure!(
-                safe_id(&t.id) && ids.insert(t.id.clone()),
-                "Invalid or duplicate token profile ID"
+                ids.insert(source.id.clone()),
+                "Source connector IDs must be unique"
             );
-            ensure!(
-                valid_login(&t.account) && accounts.insert(t.account.to_lowercase()),
-                "Invalid or duplicate token account"
-            );
-            for value in t.owners.iter().chain(&t.authors).chain(&t.reviewers) {
-                ensure!(valid_login(value), "Invalid GitHub login");
-            }
         }
         for (profile, account) in &self.codex_bindings {
             ensure!(
-                ids.contains(profile),
-                "Codex binding refers to an unknown GitHub token profile"
+                safe_id(profile),
+                "Invalid source connector ID in Codex binding"
             );
             ensure!(
                 uuid::Uuid::parse_str(account).is_ok_and(|id| id.to_string() == *account),
@@ -440,51 +387,40 @@ impl Settings {
                 config.webhook_url = None;
             }
         }
-        for t in &mut s.token_profiles {
+        for t in &mut s.source_connectors {
             t.has_token = t.token.as_ref().is_some_and(|v| !v.is_empty());
             t.token = None;
         }
         s
     }
-    pub fn token_for(&self, actor: &str) -> Result<&str> {
-        self.profile_for(actor)
-            .and_then(|p| p.token.as_deref())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("No API token configured for actor {actor}"))
-    }
-
-    pub fn profile_for(&self, actor: &str) -> Option<&TokenProfile> {
-        self.token_profiles
-            .iter()
-            .find(|profile| profile.account.eq_ignore_ascii_case(actor))
-    }
 }
 impl Flow {
-    pub fn activation_for(&self, actor: &str, profiles: &[TokenProfile]) -> ActivationState {
+    pub fn activation_for_source(
+        &self,
+        source_id: &str,
+        sources: &[SourceConnector],
+    ) -> ActivationState {
         if !self.enabled {
             return ActivationState::DisabledGlobally;
         }
-        let allowed = profiles
-            .iter()
-            .find(|profile| profile.account.eq_ignore_ascii_case(actor))
-            .and_then(|profile| self.profile_activation.get(&profile.id))
+        if !sources.iter().any(|s| s.id == source_id) {
+            return ActivationState::UnavailableSource;
+        }
+        if self
+            .profile_activation
+            .get(source_id)
             .copied()
-            .unwrap_or(true);
-        if allowed {
+            .unwrap_or(true)
+        {
             ActivationState::Enabled
         } else {
             ActivationState::DisabledForProfile
         }
     }
-
-    /// Freeze effective agent settings for each node using the event actor's profile.
-    pub fn for_actor(&self, actor: &str, profiles: &[TokenProfile]) -> Self {
-        let profile = profiles
-            .iter()
-            .find(|p| p.account.eq_ignore_ascii_case(actor));
+    pub fn for_source(&self, source: &SourceConnector) -> Self {
         let mut flow = self.clone();
         for node in &mut flow.nodes {
-            if let Some(config) = profile.and_then(|p| node.token_overrides.get(&p.id)) {
+            if let Some(config) = node.token_overrides.get(&source.id) {
                 node.agent = config.agent.clone();
                 node.model = config.model.clone();
                 node.effort = config.effort.clone();
@@ -493,7 +429,6 @@ impl Flow {
         }
         flow
     }
-
     pub fn validate(&self) -> Result<()> {
         for profile in self.profile_activation.keys() {
             ensure!(safe_id(profile), "Invalid workflow activation profile ID");

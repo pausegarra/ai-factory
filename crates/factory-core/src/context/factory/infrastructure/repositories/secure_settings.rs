@@ -21,7 +21,8 @@ impl Store {
             .map(|s| serde_json::from_str(&s))
             .transpose()?
             .unwrap_or_default();
-        let mut query = db.prepare("SELECT profile_id,account,reference FROM credential_refs")?;
+        let mut query =
+            db.prepare("SELECT connector_id,account,reference FROM source_credential_refs")?;
         let rows = query.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -38,9 +39,10 @@ impl Store {
         );
         Ok((settings, refs))
     }
-    fn credential_refs(&self) -> Result<HashMap<String, Reference>> {
+    fn source_credential_refs(&self) -> Result<HashMap<String, Reference>> {
         let db = self.db.lock().unwrap();
-        let mut query = db.prepare("SELECT profile_id,account,reference FROM credential_refs")?;
+        let mut query =
+            db.prepare("SELECT connector_id,account,reference FROM source_credential_refs")?;
         let rows = query.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -70,18 +72,16 @@ impl Store {
         Ok(secret)
     }
 
-    /// Resolve only the actor being used. Native keychain calls must not block Tokio workers.
-    pub async fn token_for(&self, actor: &str) -> Result<String> {
+    /// Resolve the exact current connector, without consulting legacy references or logins.
+    pub async fn token_for_source(&self, source_id: &str) -> Result<String> {
         let reference = {
             let (settings, mut refs) = self.metadata_with_refs()?;
-            let profile = settings
-                .token_profiles
-                .iter()
-                .find(|p| p.account.eq_ignore_ascii_case(actor))
-                .ok_or_else(|| anyhow::anyhow!("No API token configured for actor {actor}"))?;
-            refs.remove(&profile.id)
-                .filter(|r| r.account.eq_ignore_ascii_case(actor))
-                .ok_or_else(|| anyhow::anyhow!("No API token configured for actor {actor}"))?
+            let source = settings
+                .source_by_id(source_id)
+                .ok_or_else(|| anyhow::anyhow!("Source connector unavailable"))?;
+            refs.remove(source_id)
+                .filter(|r| r.account.eq_ignore_ascii_case(&source.account))
+                .ok_or_else(|| anyhow::anyhow!("No API token configured for source connector"))?
                 .key
         };
         let credentials = self.credentials.clone();
@@ -98,7 +98,7 @@ impl Store {
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Stored GitHub credential is missing; replace the token in Settings"
+                        "Stored GitHub credential is missing; replace the token in Sources"
                     )
                 })?;
             cache.lock().unwrap().insert(reference, secret.clone());
@@ -110,7 +110,7 @@ impl Store {
 
     /// Used before displaying persisted logs on a blocking caller; fail closed if secrets cannot be loaded.
     pub fn load_redaction_secrets(&self) -> Result<()> {
-        for reference in self.credential_refs()?.values() {
+        for reference in self.source_credential_refs()?.values() {
             ensure!(
                 self.secret(&reference.key)?.is_some(),
                 "Cannot display historical logs: a stored GitHub credential is missing"
@@ -182,7 +182,7 @@ impl Store {
     /// Public configuration contains only metadata, even while the keychain is locked.
     pub fn public_settings(&self) -> Result<Settings> {
         let (mut settings, refs) = self.metadata_with_refs()?;
-        for profile in &mut settings.token_profiles {
+        for profile in &mut settings.source_connectors {
             profile.token = None;
             profile.has_token = refs
                 .get(&profile.id)
@@ -194,9 +194,20 @@ impl Store {
     /// Hydrated secrets stay inside the engine and are never serialized to SQLite.
     pub fn settings(&self) -> Result<Settings> {
         let (mut settings, refs) = self.metadata_with_refs()?;
-        for profile in &mut settings.token_profiles {
-            profile.token = match refs.get(&profile.id).filter(|r| r.account.eq_ignore_ascii_case(&profile.account)) {
-                Some(reference) => Some(self.secret(&reference.key)?.filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Stored GitHub credential is missing; replace the token in Settings"))?),
+        for profile in &mut settings.source_connectors {
+            profile.token = match refs
+                .get(&profile.id)
+                .filter(|r| r.account.eq_ignore_ascii_case(&profile.account))
+            {
+                Some(reference) => Some(
+                    self.secret(&reference.key)?
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Stored GitHub credential is missing; replace the token in Sources"
+                            )
+                        })?,
+                ),
                 None => None,
             };
             profile.has_token = profile.token.is_some();
@@ -210,15 +221,15 @@ impl Store {
     ) -> Result<(Settings, HashMap<String, Reference>)> {
         settings.validate()?;
         let old = self.raw_settings()?;
-        let old_refs = self.credential_refs()?;
+        let old_refs = self.source_credential_refs()?;
         let mut clean = settings.clone();
         let mut refs = HashMap::new();
-        for profile in &mut clean.token_profiles {
+        for profile in &mut clean.source_connectors {
             let existing = old_refs
                 .get(&profile.id)
                 .filter(|r| r.account.eq_ignore_ascii_case(&profile.account));
             let previous = old
-                .token_profiles
+                .source_connectors
                 .iter()
                 .find(|p| p.id == profile.id && p.account.eq_ignore_ascii_case(&profile.account));
             let token = profile
@@ -246,6 +257,7 @@ impl Store {
             } else {
                 existing.map(|r| r.key.clone())
             };
+            ensure!(key.is_some(), "Source connector token is required");
             profile.has_token = key.is_some();
             if let Some(key) = key {
                 refs.insert(
@@ -304,13 +316,13 @@ impl Store {
                     clean.notification_connectors = notifications.connectors;
                 }
                 tx.execute(
-                    "INSERT OR IGNORE INTO credential_gc SELECT reference FROM credential_refs",
+                    "INSERT OR IGNORE INTO credential_gc SELECT reference FROM source_credential_refs",
                     [],
                 )?;
-                tx.execute("DELETE FROM credential_refs", [])?;
+                tx.execute("DELETE FROM source_credential_refs", [])?;
                 for (id, reference) in refs {
                     tx.execute(
-                        "INSERT INTO credential_refs VALUES(?1,?2,?3)",
+                        "INSERT INTO source_credential_refs VALUES(?1,?2,?3)",
                         params![id, reference.account, reference.key],
                     )?;
                     tx.execute(
@@ -332,7 +344,7 @@ impl Store {
     fn collect_credentials(&self) {
         let pending = (|| -> Result<Vec<String>> {
             let db = self.db.lock().unwrap();
-            let mut query = db.prepare("SELECT reference FROM credential_gc WHERE reference NOT IN (SELECT reference FROM credential_refs UNION SELECT reference FROM notification_credential_refs)")?;
+            let mut query = db.prepare("SELECT reference FROM credential_gc WHERE reference NOT IN (SELECT reference FROM source_credential_refs UNION SELECT reference FROM notification_credential_refs)")?;
             let rows = query.query_map([], |row| row.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })();
@@ -348,13 +360,36 @@ impl Store {
     }
 
     pub(super) fn migrate_credentials(&self) -> Result<()> {
-        let old = self.raw_settings()?;
-        if old.token_profiles.iter().any(|p| p.token.is_some()) {
-            self.db.lock().unwrap().execute(
-                "INSERT OR REPLACE INTO observations VALUES('credential-scrub-pending','true')",
+        // Scrub the original JSON before decoding: legacy scopes/profiles can be malformed.
+        // Never hydrate, copy or stage a legacy secret, including matching connector IDs.
+        {
+            let mut db = self.db.lock().unwrap();
+            let raw: Option<String> = db
+                .query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0))
+                .optional()?;
+            let tx = db.transaction()?;
+            if let Some(raw) = raw {
+                let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+                if let Some(map) = value.as_object_mut() {
+                    let mut removed = false;
+                    for key in ["token_profiles", "owners", "authors", "reviewers"] {
+                        removed |= map.remove(key).is_some();
+                    }
+                    if removed {
+                        tx.execute("INSERT OR REPLACE INTO observations VALUES('credential-scrub-pending','true')", [])?;
+                        tx.execute(
+                            "UPDATE settings SET json=?1 WHERE id=1",
+                            [serde_json::to_string(&value)?],
+                        )?;
+                    }
+                }
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO credential_gc SELECT reference FROM credential_refs",
                 [],
             )?;
-            self.save_settings(&old)?;
+            tx.execute("DELETE FROM credential_refs", [])?;
+            tx.commit()?;
         }
         let pending: bool = self.db.lock().unwrap().query_row(
             "SELECT EXISTS(SELECT 1 FROM observations WHERE key='credential-scrub-pending')",

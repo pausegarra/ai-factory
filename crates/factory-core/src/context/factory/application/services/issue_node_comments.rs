@@ -1,4 +1,5 @@
 use crate::context::factory::application::dto::issue_node_comment::*;
+use crate::TriggerEvent;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 pub(crate) fn terminal_for_issue_comment(status: &str) -> bool {
@@ -193,7 +194,7 @@ async fn deliver_job(
         }
     }
     let transport = f
-        .issue_node_comment_transport(&job.snapshot.actor)
+        .issue_node_comment_transport(&job.snapshot)
         .await
         .map_err(|_| Failure::CredentialUnavailable)?;
     let request = request_for(&job.snapshot, None, |text| f.store.redact_cached(text));
@@ -307,9 +308,21 @@ fn diagnostic(f: &Factory, job: &IssueNodeCommentJob, line: &str) {
 impl Factory {
     pub(crate) async fn issue_node_comment_transport(
         &self,
-        actor: &str,
+        snapshot: &IssueNodeCommentSnapshot,
     ) -> crate::Result<Box<dyn IssueNodeCommentTransport>> {
-        Ok(Box::new(self.github(&self.store.token_for(actor).await?)?))
+        let mut event = TriggerEvent::issue(
+            &snapshot.repository,
+            snapshot.number,
+            "",
+            &snapshot.actor,
+            "",
+        );
+        event.origin_token_profile_id = snapshot.origin_token_profile_id.clone();
+        let settings = self.store.public_settings()?;
+        let source = settings.source_for_event(&event)?;
+        Ok(Box::new(
+            self.github(&self.store.token_for_source(&source.id).await?)?,
+        ))
     }
 }
 #[cfg(test)]
@@ -317,6 +330,7 @@ mod tests {
     use super::*;
     pub(super) fn sample(status: &str) -> IssueNodeCommentSnapshot {
         IssueNodeCommentSnapshot {
+            origin_token_profile_id: Some("work".into()),
             run_id: "run-a".into(),
             node_id: "builder".into(),
             node_name: "Builder".into(),

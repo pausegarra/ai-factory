@@ -36,7 +36,8 @@ async fn server(handler: impl Fn(&str, &str) -> (u16, Value) + Send + Sync + 'st
 fn setup(root: std::path::PathBuf, base: &str) -> Arc<Factory> {
     let f = common::open_with_api(root, base).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles = vec![TokenProfile {
+    s.source_connectors = vec![SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         account: "alice".into(),
         label: "Alice".into(),
@@ -83,12 +84,9 @@ async fn approval_fixture(state: ApprovalState) -> (tempfile::TempDir, Arc<Facto
     let dir = tempfile::tempdir().unwrap();
     let factory = setup(dir.path().into(), &base);
     let source = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] source",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] source", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -241,12 +239,9 @@ if path=="/repos/acme/repo/pulls/5"{let mut p=pr();if state.lock().unwrap().0 {p
     );
     f.save_settings(settings).unwrap();
     let source = f
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] issue",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] issue", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -295,8 +290,8 @@ if path.starts_with("/search/"){let m=*state.lock().unwrap();if m==2{return(503,
     let dir = tempfile::tempdir().unwrap();
     let f = setup(dir.path().into(), &base);
     let mut s = f.settings().unwrap();
-    s.token_profiles[0].authors.clear();
-    s.token_profiles[0].reviewers = vec!["alice".into()];
+    s.source_connectors[0].authors.clear();
+    s.source_connectors[0].reviewers = vec!["alice".into()];
     s.flows[2].nodes[0].token_overrides.insert(
         "alice".into(),
         AgentConfig {
@@ -345,12 +340,9 @@ async fn deleted_source_origin_polls_without_history_and_revalidates_authorizati
         let dir = tempfile::tempdir().unwrap();
         let f = setup(dir.path().into(), &base);
         let source = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                1,
-                "[AI] origin",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", 1, "[AI] origin", "alice", "private-body"),
                 "alice",
-                "private-body",
             ))
             .unwrap()
             .unwrap();
@@ -369,10 +361,10 @@ async fn deleted_source_origin_polls_without_history_and_revalidates_authorizati
         let mut s = f.settings().unwrap();
         s.flows[0].enabled = false;
         if mode == "actor_revoked" {
-            s.token_profiles[0].authors.clear();
+            s.source_connectors[0].authors.clear();
         }
         if mode == "owner_revoked" {
-            s.token_profiles[0].owners = vec!["other-owner".into()];
+            s.source_connectors[0].owners = vec!["other-owner".into()];
         }
         f.save_settings(s).unwrap();
         let result = f.poll_now().await;
@@ -445,12 +437,9 @@ async fn two_approval_signals_stay_durable_and_deduplicated() {
     .unwrap();
     for number in [5, 6] {
         let source = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                number + 100,
-                "[AI] source",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", number + 100, "[AI] source", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();

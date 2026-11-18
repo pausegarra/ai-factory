@@ -77,7 +77,11 @@ fn capacity_roundtrip_persists_overrides_and_public_metadata() {
         ("pr_approved".into(), 2),
     ]
     .into();
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors.push(SourceConnector {
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "fixture".into(),
         label: "Fixture".into(),
         account: "alice".into(),
@@ -102,7 +106,7 @@ fn capacity_roundtrip_persists_overrides_and_public_metadata() {
     let s = reopened.settings().unwrap();
     assert_eq!(s.max_concurrent, 8);
     assert_eq!(s.trigger_max_concurrent, saved.trigger_max_concurrent);
-    assert!(s.token_profiles[0].has_token);
+    assert!(s.source_connectors[0].has_token);
 }
 
 #[test]

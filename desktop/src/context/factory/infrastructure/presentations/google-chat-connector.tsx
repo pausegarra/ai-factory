@@ -1,10 +1,10 @@
-import type { GoogleChatNotificationConnector, NotificationConnector, TokenProfile } from "../../domain/types";
+import type { GoogleChatNotificationConnector, NotificationConnector, SourceConnector } from "../../domain/types";
 import { validWebhookUrl } from "../../domain/notification-connectors";
 import { NotificationConnectorFilters } from "./notification-connector-filters";
 import { Field, Toggle } from "./ui";
-export function GoogleChatConnectorEditor({connector: c, profiles, busy, attempted, edit}: {
+export function GoogleChatConnectorEditor({connector: c, sources, busy, attempted, edit}: {
   connector: GoogleChatNotificationConnector;
-  profiles: TokenProfile[];
+  sources: SourceConnector[];
   busy: boolean;
   attempted: boolean;
   edit: (patch: Partial<NotificationConnector>) => void;
@@ -24,7 +24,7 @@ export function GoogleChatConnectorEditor({connector: c, profiles, busy, attempt
     <NotificationConnectorFilters
       id={c.id} enabled={c.enabled} events={c.events}
       triggers={c.config.triggers} tokenProfileIds={c.config.token_profile_ids}
-      profiles={profiles} attempted={attempted}
+      sources={sources} attempted={attempted}
       onChange={({events, triggers, token_profile_ids}) => edit({events, config: {...c.config, triggers, token_profile_ids}})}
     />
   </>;

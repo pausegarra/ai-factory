@@ -71,7 +71,10 @@ async fn server(
     base
 }
 fn event(trigger: &str) -> TriggerEvent {
-    let mut e = TriggerEvent::issue("acme/repo", 1, "[AI] work", "alice", "");
+    let mut e = common::from_source(
+        TriggerEvent::issue("acme/repo", 1, "[AI] work", "alice", ""),
+        "alice",
+    );
     e.trigger_id = trigger.into();
     if trigger != "new_issue" {
         e.event_id = format!("{trigger}:acme/repo#5@{}", "a".repeat(40));
@@ -93,13 +96,16 @@ fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open_with_api(dir.path().join("app"), base).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles = vec![TokenProfile {
+    s.source_connectors = vec![SourceConnector {
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         account: "alice".into(),
         label: "Alice".into(),
         token: Some("alice-token".into()),
         has_token: false,
-        ..Default::default()
     }];
     f.save_settings(s).unwrap();
     (dir, f)

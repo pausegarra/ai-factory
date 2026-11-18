@@ -7,6 +7,8 @@ pub(crate) struct IssueNodeCommentSnapshot {
     pub repository: String,
     pub number: u64,
     pub actor: String,
+    #[serde(default)]
+    pub origin_token_profile_id: Option<String>,
     pub run_attempt: u32,
     pub revision: u32,
     pub status: String,

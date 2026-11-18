@@ -107,6 +107,42 @@ mod tests {
         mpsc,
     };
 
+    struct FixtureCredentials;
+    impl crate::Credentials for FixtureCredentials {
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(Some("fixture".into()))
+        }
+        fn set(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+    fn test_factory(root: std::path::PathBuf) -> Result<Arc<Factory>> {
+        let f = Factory::open_with_credentials(
+            root,
+            "http://127.0.0.1:9",
+            Arc::new(FixtureCredentials),
+        )?;
+        let mut s = f.settings()?;
+        s.source_connectors.push(crate::SourceConnector {
+            id: "work".into(),
+            label: "Work".into(),
+            account: "alice".into(),
+            owners: vec!["acme".into()],
+            authors: vec!["alice".into()],
+            token: Some("fixture".into()),
+            ..Default::default()
+        });
+        f.save_settings(s)?;
+        Ok(f)
+    }
+    fn issue(repository: &str, number: u64, title: &str, actor: &str, body: &str) -> TriggerEvent {
+        let mut e = TriggerEvent::issue(repository, number, title, actor, body);
+        e.origin_token_profile_id = Some("work".into());
+        e
+    }
     struct BlockCleanup {
         entered: mpsc::Sender<()>,
         release: Mutex<mpsc::Receiver<()>>,
@@ -125,15 +161,9 @@ mod tests {
     #[test]
     fn accepted_delete_blocks_retry_but_not_other_runs_and_serializes_waiters() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let mut f = Factory::open(dir.path().into())?;
+        let mut f = test_factory(dir.path().into())?;
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                1,
-                "[AI] delete",
-                "alice",
-                "",
-            ))?
+            .enqueue(issue("acme/repo", 1, "[AI] delete", "alice", ""))?
             .unwrap();
         f.cancel(&id)?;
         let (entered, received) = mpsc::channel();
@@ -151,13 +181,7 @@ mod tests {
             assert!(f.run_detail(&id).is_err());
             assert!(matches!(f.run_view(&id)?, RunView::Deleting { .. }));
             let other = f
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    2,
-                    "[AI] other",
-                    "alice",
-                    "",
-                ))?
+                .enqueue(issue("acme/repo", 2, "[AI] other", "alice", ""))?
                 .unwrap();
             assert_eq!(f.snapshot()?.runs[0].id, other);
             let second = s.spawn(|| f.delete_run(&id));
@@ -179,15 +203,9 @@ mod tests {
     #[test]
     fn terminal_status_is_not_proof_worker_has_drained() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let f = Factory::open(dir.path().into())?;
+        let f = test_factory(dir.path().into())?;
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                1,
-                "[AI] delete",
-                "alice",
-                "",
-            ))?
+            .enqueue(issue("acme/repo", 1, "[AI] delete", "alice", ""))?
             .unwrap();
         assert!(f.register_queued_worker(&id)?.is_some());
         f.cancel(&id)?;
@@ -205,15 +223,9 @@ mod tests {
     #[test]
     fn stale_scheduler_candidate_cannot_register_after_cancel_or_deletion() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let f = Factory::open(dir.path().into())?;
+        let f = test_factory(dir.path().into())?;
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                1,
-                "[AI] delete",
-                "alice",
-                "",
-            ))?
+            .enqueue(issue("acme/repo", 1, "[AI] delete", "alice", ""))?
             .unwrap();
         let stale = f.snapshot()?.runs.remove(0);
         f.cancel(&id)?;
@@ -222,13 +234,7 @@ mod tests {
         assert!(f.register_queued_worker(&stale.id)?.is_none());
         assert!(f.active.lock().unwrap().is_empty());
         let id = f
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                2,
-                "[AI] other",
-                "alice",
-                "",
-            ))?
+            .enqueue(issue("acme/repo", 2, "[AI] other", "alice", ""))?
             .unwrap();
         let gate = f.lifecycle_gate.lock().unwrap();
         assert!(
@@ -262,15 +268,9 @@ mod tests {
         }
         for fail in 1..=3 {
             let dir = tempfile::tempdir()?;
-            let f = Factory::open(dir.path().into())?;
+            let f = test_factory(dir.path().into())?;
             let id = f
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    1,
-                    "[AI] delete",
-                    "alice",
-                    "",
-                ))?
+                .enqueue(issue("acme/repo", 1, "[AI] delete", "alice", ""))?
                 .unwrap();
             f.cancel(&id)?;
             f.store.prepare_deletion(&id)?;

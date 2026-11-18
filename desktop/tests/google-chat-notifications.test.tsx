@@ -8,7 +8,7 @@ import { TRIGGERS, type Settings } from "../src/context/factory/domain/types";
 import { noticeSettings, deferred } from "./fixtures/notices";
 afterEach(cleanup);
 const url="https://chat.googleapis.com/v1/spaces/fixture/messages?key=PRIVATE_KEY&token=PRIVATE_TOKEN";
-function settings():Settings {return {...noticeSettings(),token_profiles:[{id:"work",label:"Work",account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}]};}
+function settings():Settings {return {...noticeSettings(),source_connectors:[{id:"work",label:"Work",type: "github_issues" as const, account:"alice",has_token:true,owners:[],authors:[],reviewers:[]}]};}
 function configured() {const c=newGoogleChatConnector("chat");c.enabled=true;c.config.has_webhook_url=true;c.config.token_profile_ids=["work"];return c;}
 function save(){fireEvent.click(screen.getByRole("button",{name:"Save changes"}));}
 it("opens a keyboard accessible provider selector without creating a connector or dirty state",async()=>{
@@ -52,7 +52,7 @@ it("allows incomplete disabled drafts but associates all enabled requirement err
   openConnector("Google Chat");
   fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Draft"}});applyConnector();save();await screen.findByText("Notification settings saved.");
   openConnector("Draft"); fireEvent.click(screen.getByRole("checkbox",{name:"Enabled"}));applyConnector();save();expect(onSave).toHaveBeenCalledTimes(1);
-  for (const name of ["Run events","GitHub triggers","GitHub profiles"]) {const group=screen.getByRole("group",{name});expect(group.getAttribute("aria-invalid")).toBe("true");expect(document.getElementById(group.getAttribute("aria-describedby")!)?.textContent).toBeTruthy();}
+  for (const name of ["Run events","GitHub triggers","GitHub sources"]) {const group=screen.getByRole("group",{name});expect(group.getAttribute("aria-invalid")).toBe("true");expect(document.getElementById(group.getAttribute("aria-describedby")!)?.textContent).toBeTruthy();}
   const input=screen.getByLabelText("Webhook URL");expect(input.getAttribute("aria-invalid")).toBe("true");expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toContain("Webhook URL");
 });
 it("rejects unsafe URL drafts even when disabled without echoing the credential",()=>{
@@ -67,12 +67,12 @@ it("preserves IDs through profile refreshes and exposes removed selections witho
   const view=render(<NotificationsPage settings={original} onSave={onSave}/>);
   openConnector("Google Chat");
   fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Dirty"}});
-  const added={id:"new",label:"New",account:"bob",has_token:true,owners:[],authors:[],reviewers:[]};
-  view.rerender(<NotificationsPage settings={{...original,token_profiles:[{...original.token_profiles[0],label:"Renamed"},added]}} onSave={onSave}/>);
+  const added={id:"new",label:"New",type: "github_issues" as const, account:"bob",has_token:true,owners:[],authors:[],reviewers:[]};
+  view.rerender(<NotificationsPage settings={{...original,source_connectors:[{...original.source_connectors[0],label:"Renamed"},added]}} onSave={onSave}/>);
   expect((screen.getByRole("checkbox",{name:"Renamed (@alice)"}) as HTMLInputElement).checked).toBe(true);expect((screen.getByRole("checkbox",{name:"New (@bob)"}) as HTMLInputElement).checked).toBe(false);
-  view.rerender(<NotificationsPage settings={{...original,token_profiles:[added]}} onSave={onSave}/>);
-  const missing=screen.getByRole("checkbox",{name:"Unavailable profile (work)"});expect((missing as HTMLInputElement).checked).toBe(true);applyConnector();save();expect(onSave).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("checkbox",{name:"Unavailable profile (work)"}));fireEvent.click(screen.getByRole("checkbox",{name:"New (@bob)"}));applyConnector();save();await screen.findByText("Notification settings saved.");expect(onSave.mock.calls[0][0].notification_connectors?.[0].config.token_profile_ids).toEqual(["new"]);
+  view.rerender(<NotificationsPage settings={{...original,source_connectors:[added]}} onSave={onSave}/>);
+  const missing=screen.getByRole("checkbox",{name:"Unavailable source (work)"});expect((missing as HTMLInputElement).checked).toBe(true);applyConnector();save();expect(onSave).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("checkbox",{name:"Unavailable source (work)"}));fireEvent.click(screen.getByRole("checkbox",{name:"New (@bob)"}));applyConnector();save();await screen.findByText("Notification settings saved.");expect(onSave.mock.calls[0][0].notification_connectors?.[0].config.token_profile_ids).toEqual(["new"]);
 });
 it("uses refreshed webhook presence without overwriting a dirty URL and keeps credentials out of notices",async()=>{
   const original={...settings(),notification_connectors:[configured()]};const pending=deferred<Settings>();const onSave=vi.fn(()=>pending.promise);
@@ -101,7 +101,7 @@ it("isolates multiple Google Chat connectors from Telegram and restores focus af
   await waitFor(()=>expect(document.activeElement).toBe(screen.getByRole("button",{name:"Add connector"})));
 });
 it("explains missing profiles and never renders GitHub token values",()=>{
-  const c=newGoogleChatConnector("chat");const s=settings();s.token_profiles[0].token="PRIVATE_GITHUB";
+  const c=newGoogleChatConnector("chat");const s=settings();s.source_connectors[0].token="PRIVATE_GITHUB";
   const view=render(<NotificationsPage settings={{...s,notification_connectors:[c]}} onSave={vi.fn()}/>);openConnector("Google Chat");expect(document.body.innerHTML).not.toContain("PRIVATE_GITHUB");
-  view.rerender(<NotificationsPage settings={{...s,token_profiles:[],notification_connectors:[c]}} onSave={vi.fn()}/>);expect(screen.getByText("Add a GitHub profile in Settings to enable this connector.")).toBeTruthy();
+  view.rerender(<NotificationsPage settings={{...s,source_connectors:[],notification_connectors:[c]}} onSave={vi.fn()}/>);expect(screen.getByText("Add a GitHub Issues connector in Sources to enable this connector.")).toBeTruthy();
 });

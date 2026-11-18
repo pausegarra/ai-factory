@@ -37,7 +37,9 @@ async fn release_poll_is_durable_and_keeps_profile_and_frozen_flow() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = f.settings().unwrap();
-    s.token_profiles = vec![TokenProfile {
+    s.source_connectors = vec![SourceConnector {
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "work".into(),
         label: "Work".into(),
         account: "alice".into(),
@@ -89,7 +91,9 @@ async fn release_poll_is_durable_and_keeps_profile_and_frozen_flow() {
 
 fn release_settings() -> Settings {
     let mut s = Settings {
-        token_profiles: vec![TokenProfile {
+        source_connectors: vec![SourceConnector {
+            reviewers: vec!["alice".into()],
+            kind: factory_core::SourceKind::GithubIssues,
             id: "work".into(),
             label: "Work".into(),
             account: "alice".into(),
@@ -205,8 +209,8 @@ async fn disabled_or_unauthorized_release_never_reads_credentials_or_http() {
                     .profile_activation
                     .insert("work".into(), false);
             }
-            "author" => s.token_profiles[0].authors.clear(),
-            _ => s.token_profiles[0].owners.clear(),
+            "author" => s.source_connectors[0].authors.clear(),
+            _ => s.source_connectors[0].owners.clear(),
         }
         f.save_settings(s).unwrap();
         let credentials = common::backend(dir.path());
@@ -260,7 +264,7 @@ async fn activation_changes_during_release_detail_do_not_consume_event() {
                     .profile_activation
                     .insert("work".into(), false);
             }
-            _ => changed.token_profiles.clear(),
+            _ => changed.source_connectors.clear(),
         }
         f.save_settings(changed).unwrap();
         resume.notify_one();
@@ -429,8 +433,10 @@ async fn release_and_ai_share_one_scan_per_profile_without_crossing_credentials(
     let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = release_settings();
     s.flows[0].enabled = true;
-    s.token_profiles[0].owners = vec!["alice".into()];
-    s.token_profiles.push(TokenProfile {
+    s.source_connectors[0].owners = vec!["alice".into()];
+    s.source_connectors.push(SourceConnector {
+        reviewers: vec!["bob".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "personal".into(),
         label: "Personal".into(),
         account: "bob".into(),

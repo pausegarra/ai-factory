@@ -175,21 +175,6 @@ fn path_from(base: &Path, raw: &str) -> PathBuf {
         base.join(expanded)
     }
 }
-fn strings(v: &Value, key: &str) -> Result<Vec<String>> {
-    let Some(value) = v.get(key) else {
-        return Ok(vec![]);
-    };
-    value
-        .as_array()
-        .context(format!("{key} must be a list"))?
-        .iter()
-        .map(|x| {
-            Ok(x.as_str()
-                .context(format!("{key} must contain strings"))?
-                .to_lowercase())
-        })
-        .collect()
-}
 fn read_config(path: &Path, current: &Settings, warnings: &mut Vec<String>) -> Result<Settings> {
     let path = path.canonicalize().context("Legacy config not found")?;
     let base = path
@@ -199,15 +184,9 @@ fn read_config(path: &Path, current: &Settings, warnings: &mut Vec<String>) -> R
         serde_yaml::from_str(&fs::read_to_string(&path)?).context("Invalid legacy YAML")?;
     ensure!(data.is_object(), "Legacy config must be a mapping");
     let mut settings = current.clone();
-    let github = &data["github"];
-    let owners = strings(github, "owners")?;
-    let authors = strings(github, "authors")?;
-    let reviewers = strings(github, "reviewers")?;
-    for value in owners.iter().chain(&authors).chain(&reviewers) {
-        ensure!(crate::valid_login(value), "Invalid GitHub login");
-    }
-    for profile in &mut settings.token_profiles {
-        profile.apply_legacy_scope(&owners, &authors, &reviewers);
+    if data.get("github").is_some() {
+        warnings
+            .push("Legacy GitHub sources were ignored. Configure connectors in Sources.".into());
     }
     if let Some(n) = data.get("poll_seconds").and_then(Value::as_f64) {
         ensure!(n.is_finite() && n > 0., "Invalid legacy poll_seconds");
@@ -715,7 +694,7 @@ fn read_database(
             fs::create_dir_all(&sessions)?;
             for (node, mut output) in node_logs {
                 for token in settings
-                    .token_profiles
+                    .source_connectors
                     .iter()
                     .filter_map(|p| p.token.as_ref())
                     .filter(|t| !t.is_empty())

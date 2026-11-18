@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 
 fn settings(factory: &Factory) -> Settings {
     let mut s = factory.settings().unwrap();
-    s.token_profiles = vec![TokenProfile {
+    s.source_connectors = vec![SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         account: "alice".into(),
         label: "Alice".into(),
@@ -42,12 +43,9 @@ async fn historical_closed_prs_need_no_individual_requests_on_any_cycle() {
     let store = Store::open(dir.path()).unwrap();
     for number in 1..=20 {
         let id = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                number,
-                "[AI] old",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", number, "[AI] old", "alice", ""),
                 "alice",
-                "",
             ))
             .unwrap()
             .unwrap();
@@ -127,7 +125,7 @@ async fn owner_scopes_and_identity_are_grouped_per_token_across_triggers() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = settings(&factory);
-    s.token_profiles[0].owners.push("other".into());
+    s.source_connectors[0].owners.push("other".into());
     factory.save_settings(s).unwrap();
     factory.poll_now().await.unwrap();
     let calls = server.calls.lock().unwrap();
@@ -163,12 +161,9 @@ async fn issue_with_published_pr_stays_consumed_after_local_history_deletion() {
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
     factory.save_settings(settings(&factory)).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] task",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] task", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
@@ -204,12 +199,9 @@ async fn tracked_factory(server: &Server) -> (tempfile::TempDir, std::sync::Arc<
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
     factory.save_settings(settings(&factory)).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] task",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] task", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();

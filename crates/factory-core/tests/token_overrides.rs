@@ -4,9 +4,10 @@ use serde_json::json;
 
 fn settings_with_overrides() -> Settings {
     let mut value = serde_json::to_value(Settings::default()).unwrap();
-    value["token_profiles"] = json!([
-        {"id":"work", "label":"Work", "account":"alice", "token":"fixture-token"},
-        {"id":"other", "label":"Other", "account":"bob", "token":"other-fixture-token"}
+    value["source_connectors"] = json!([
+        {"owners":["acme"],"authors":["alice"],"reviewers":["alice"],"id":"work", "label":"Work", "type":"github_issues","account":"alice", "token":"fixture-token"},
+        {"owners":["acme"],"authors":["bob"],"reviewers":["bob"],"id":"other", "label":"Other", "type":"github_issues","account":"bob", "token":"other-fixture-token"},
+        {"type":"github_issues","id":"third","label":"Third","account":"carol","token":"third-fixture-token","owners":["acme"],"authors":["carol"]}
     ]);
     let nodes = value["flows"][0]["nodes"].as_array_mut().unwrap();
     for node in nodes.iter_mut() {
@@ -56,12 +57,13 @@ fn snapshots_use_overrides_per_node_and_token_and_keep_defaults() {
         ),
     ] {
         let id = factory
-            .enqueue(TriggerEvent::issue(
-                "acme/repo",
-                number,
-                "[AI] test",
-                actor,
-                "",
+            .enqueue(common::from_source(
+                TriggerEvent::issue("acme/repo", number, "[AI] test", actor, ""),
+                match actor {
+                    "ALICE" => "work",
+                    "bob" => "other",
+                    _ => "third",
+                },
             ))
             .unwrap()
             .unwrap();
@@ -95,12 +97,9 @@ fn empty_override_model_and_effort_use_cli_defaults_without_inheriting() {
         .save_settings(serde_json::from_value(value).unwrap())
         .unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] test",
-            "alice",
-            "",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] test", "alice", ""),
+            "work",
         ))
         .unwrap()
         .unwrap();
@@ -117,12 +116,9 @@ fn retries_resolve_latest_overrides_without_changing_previous_snapshot() {
     let factory = common::open(dir.path().into()).unwrap();
     factory.save_settings(settings_with_overrides()).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] test",
-            "alice",
-            "",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] test", "alice", ""),
+            "work",
         ))
         .unwrap()
         .unwrap();
@@ -165,20 +161,13 @@ fn legacy_settings_and_removed_profiles_fall_back_to_node_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open(dir.path().into()).unwrap();
     let mut settings = settings_with_overrides();
-    settings.token_profiles.clear();
+    settings.source_connectors.clear();
     factory.save_settings(settings).unwrap();
-    let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] test",
-            "alice",
-            "",
+    let admitted = factory
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] test", "alice", ""),
+            "work",
         ))
-        .unwrap()
         .unwrap();
-    assert_eq!(
-        factory.run_detail(&id).unwrap().flow.nodes[0].model,
-        "default-model"
-    );
+    assert!(admitted.is_none());
 }

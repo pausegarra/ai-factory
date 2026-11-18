@@ -1,4 +1,5 @@
 use super::{fixture, terminal};
+use crate::common;
 use factory_core::*;
 use sha2::{Digest, Sha256};
 
@@ -118,12 +119,9 @@ async fn delivery(
     }
     factory.save_settings(settings).unwrap();
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            8,
-            "[AI] window size and pos",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 8, "[AI] window size and pos", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();

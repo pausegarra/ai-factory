@@ -4,25 +4,25 @@ import { factoryApi } from "../ipc/factory-api";
 import { Field } from "./ui";
 import { noticeText } from "./notice-content";
 
-export function AgentModelFields({ node, command, tokenProfileId, boundAccountId, onChange }: {
+export function AgentModelFields({ node, command, sourceConnectorId, boundAccountId, onChange }: {
   node: AgentConfig;
   command: string;
-  tokenProfileId?: string;
+  sourceConnectorId?: string;
   boundAccountId?: string;
   onChange: (patch: Partial<AgentConfig>) => void;
 }) {
-  const key = JSON.stringify([node.agent, command, tokenProfileId ?? null, node.agent === "codex" ? boundAccountId ?? null : null]);
+  const key = JSON.stringify([node.agent, command, sourceConnectorId ?? null, node.agent === "codex" ? boundAccountId ?? null : null]);
   const [revision, setRevision] = useState(0);
   const [catalog, setCatalog] = useState<{ key: string; models: AgentModel[]; loading: boolean; error: string }>({ key: "", models: [], loading: true, error: "" });
   useEffect(() => {
     let active = true;
     setCatalog({ key, models: [], loading: true, error: "" });
-    void factoryApi.agentModels(node.agent, tokenProfileId).then(
+    void factoryApi.agentModels(node.agent, sourceConnectorId).then(
       (models) => { if (active) setCatalog({ key, models, loading: false, error: "" }); },
       (error: unknown) => { if (active) setCatalog({ key, models: [], loading: false, error: noticeText(`Could not load ${node.agent === "codex" ? "Codex" : "OpenCode"} models.`, error) }); },
     );
     return () => { active = false; };
-  }, [key, node.agent, tokenProfileId, revision]);
+  }, [key, node.agent, sourceConnectorId, revision]);
   const loading = catalog.key !== key || catalog.loading;
   const models = catalog.key === key ? catalog.models : [];
   const currentError = catalog.key === key && !catalog.loading ? catalog.error : "";

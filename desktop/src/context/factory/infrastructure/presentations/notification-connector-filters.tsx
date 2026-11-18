@@ -1,4 +1,5 @@
-import type { NotificationEvent, TokenProfile, Trigger } from "../../domain/types";
+import { sourceLabel } from "../../domain/source-connectors";
+import type { NotificationEvent, SourceConnector, Trigger } from "../../domain/types";
 import { TRIGGERS } from "../../domain/types";
 import { notificationEvents } from "../../domain/notification-connectors";
 import { Toggle } from "./ui";
@@ -14,16 +15,15 @@ export interface NotificationConnectorFiltersProps {
   events: NotificationEvent[];
   triggers: Trigger[];
   tokenProfileIds: string[];
-  profiles: TokenProfile[];
+  sources: SourceConnector[];
   attempted: boolean;
   onChange: (selection: NotificationFilterSelection) => void;
 }
-export function NotificationConnectorFilters({id, enabled, events, triggers, tokenProfileIds, profiles, attempted, onChange}: NotificationConnectorFiltersProps) {
+export function NotificationConnectorFilters({id, enabled, events, triggers, tokenProfileIds, sources, attempted, onChange}: NotificationConnectorFiltersProps) {
   const required = attempted && enabled;
-  const missingProfiles = !tokenProfileIds.length || tokenProfileIds.some(id => !profiles.some(p => p.id === id));
+  const missingProfiles = !tokenProfileIds.length || tokenProfileIds.some(id => !sources.some(p => p.id === id));
   const choose = <T extends string,>(items: T[], item: T, checked: boolean): T[] => checked ? (items.includes(item) ? items : [...items, item]) : items.filter(i => i !== item);
   const emit = (patch: Partial<NotificationFilterSelection>) => onChange({events, triggers, token_profile_ids: tokenProfileIds, ...patch});
-  const profileLabel = (p: TokenProfile) => `${p.label || p.account} (@${p.account})`;
   return <>
     <fieldset className="notifications-events" aria-invalid={required && !events.length} aria-describedby={required && !events.length ? `events-error-${id}` : undefined}>
       <legend>Run events</legend><div className="notifications-event-list">
@@ -37,12 +37,12 @@ export function NotificationConnectorFilters({id, enabled, events, triggers, tok
         {required && !triggers.length && <p id={`triggers-error-${id}`}>Select at least one GitHub trigger.</p>}
       </div>
     </fieldset>
-    <fieldset className="notifications-events" aria-invalid={required && missingProfiles} aria-describedby={required && missingProfiles ? `profiles-error-${id}` : undefined}>
-      <legend>GitHub profiles</legend><div className="notifications-event-list">
-        {!profiles.length && <p>Add a GitHub profile in Settings to enable this connector.</p>}
-        {profiles.map(p => <Toggle key={p.id} label={profileLabel(p) + (profiles.filter(other => profileLabel(other) === profileLabel(p)).length > 1 ? ` (${p.id})` : "")} checked={tokenProfileIds.includes(p.id)} onChange={checked => emit({token_profile_ids: choose(tokenProfileIds, p.id, checked)})} />)}
-        {tokenProfileIds.filter(id => !profiles.some(p => p.id === id)).map(id => <Toggle key={id} label={`Unavailable profile (${id})`} checked onChange={() => emit({token_profile_ids: tokenProfileIds.filter(p => p !== id)})} />)}
-        {required && missingProfiles && <p id={`profiles-error-${id}`}>Select available GitHub profiles.</p>}
+    <fieldset className="notifications-events" aria-invalid={required && missingProfiles} aria-describedby={required && missingProfiles ? `sources-error-${id}` : undefined}>
+      <legend>GitHub sources</legend><div className="notifications-event-list">
+        {!sources.length && <p>Add a GitHub Issues connector in Sources to enable this connector.</p>}
+        {sources.map(p => <Toggle key={p.id} label={sourceLabel(p, sources)} checked={tokenProfileIds.includes(p.id)} onChange={checked => emit({token_profile_ids: choose(tokenProfileIds, p.id, checked)})} />)}
+        {tokenProfileIds.filter(id => !sources.some(p => p.id === id)).map(id => <Toggle key={id} label={`Unavailable source (${id})`} checked onChange={() => emit({token_profile_ids: tokenProfileIds.filter(p => p !== id)})} />)}
+        {required && missingProfiles && <p id={`sources-error-${id}`}>Select available Source connectors.</p>}
       </div>
     </fieldset>
   </>;

@@ -142,10 +142,10 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
       return c;
     });
     setAttempted(true); setSaved(false);
-    const errors = validateNotificationConnectors(connectors, settings.token_profiles);
+    const errors = validateNotificationConnectors(connectors, settings.source_connectors);
     if (errors.length) {
       setError(errors.join(" "));
-      const invalid = draft.find(c => validateNotificationConnectors([c], settings.token_profiles).length);
+      const invalid = draft.find(c => validateNotificationConnectors([c], settings.source_connectors).length);
       if (invalid) openExisting(invalid);
       return;
     }
@@ -193,7 +193,7 @@ export function NotificationsPage({ settings, onSave, onDirtyChange, onBusyChang
     </div>
   </section>
     {session && <NotificationConnectorDialog id={dialogId} connector={session.value} mode={session.mode}
-      profiles={settings.token_profiles} attempted={attempted} busy={busy} onChange={editSession}
+      sources={settings.source_connectors} attempted={attempted} busy={busy} onChange={editSession}
       onApply={applySession} onCancel={cancelSession}
       onRemove={session.mode === "existing" ? () => remove(session.value.id) : undefined}
       returnFocus={() => (focusRow.current ? rows.current.get(focusRow.current) : null) ?? addButton.current} />}

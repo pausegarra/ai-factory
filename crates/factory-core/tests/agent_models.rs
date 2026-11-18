@@ -17,7 +17,12 @@ fn fixture(script: &str) -> (tempfile::TempDir, Arc<Factory>) {
     let mut settings = factory.settings().unwrap();
     settings.commands.codex = executable.to_string_lossy().into();
     settings.commands.opencode = settings.commands.codex.clone();
-    settings.token_profiles.push(TokenProfile {
+    settings.source_connectors.push(SourceConnector {
+        token: Some("fixture-source-only".into()),
+        owners: vec!["acme".into()],
+        authors: vec!["alice".into()],
+        reviewers: vec!["alice".into()],
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Fixture".into(),
         account: "alice".into(),
@@ -145,7 +150,12 @@ done
     let mut settings = factory.settings().unwrap();
     let first_account = settings.codex_bindings["alice"].clone();
     for name in ["bob", "unassigned"] {
-        settings.token_profiles.push(TokenProfile {
+        settings.source_connectors.push(SourceConnector {
+            token: Some("fixture-source-only".into()),
+            owners: vec!["acme".into()],
+            authors: vec![name.into()],
+            reviewers: vec![name.into()],
+            kind: factory_core::SourceKind::GithubIssues,
             id: name.into(),
             label: name.into(),
             account: name.into(),
@@ -158,7 +168,7 @@ done
     factory.save_settings(settings).unwrap();
     for (profile, expected) in [("alice", first_account.as_str()), ("bob", second_account)] {
         let models = factory
-            .agent_models_for_profile("codex", Some(profile))
+            .agent_models_for_source("codex", Some(profile))
             .await
             .unwrap();
         assert_eq!(models[0].id, expected);
@@ -168,7 +178,7 @@ done
         first_account
     );
     let error = factory
-        .agent_models_for_profile("codex", Some("unassigned"))
+        .agent_models_for_source("codex", Some("unassigned"))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Assign a Codex account"));

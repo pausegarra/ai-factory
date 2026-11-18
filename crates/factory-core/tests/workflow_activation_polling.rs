@@ -16,8 +16,9 @@ use tokio::sync::Notify;
 
 fn settings() -> Settings {
     Settings {
-        token_profiles: vec![
-            TokenProfile {
+        source_connectors: vec![
+            SourceConnector {
+                kind: factory_core::SourceKind::GithubIssues,
                 id: "work".into(),
                 label: "Work".into(),
                 account: "alice".into(),
@@ -27,7 +28,8 @@ fn settings() -> Settings {
                 authors: vec!["alice".into()],
                 reviewers: vec!["alice".into()],
             },
-            TokenProfile {
+            SourceConnector {
+                kind: factory_core::SourceKind::GithubIssues,
                 id: "personal".into(),
                 label: "Personal".into(),
                 account: "bob".into(),
@@ -95,21 +97,18 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                 let dir = tempfile::tempdir().unwrap();
                 let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
                 let mut s = settings();
-                if trigger != "new_issue" {
-                    s.token_profiles[0].authors.clear();
+                if trigger == "pr_review" {
+                    s.source_connectors[0].authors.clear();
                 }
                 if trigger != "pr_review" {
-                    s.token_profiles[0].reviewers.clear();
+                    s.source_connectors[0].reviewers.clear();
                 }
                 f.save_settings(s).unwrap();
                 if trigger == "pr_approved" {
                     let source = f
-                        .enqueue(TriggerEvent::issue(
-                            "acme/repo",
-                            1,
-                            "[AI] source",
-                            "alice",
-                            "",
+                        .enqueue(common::from_source(
+                            TriggerEvent::issue("acme/repo", 1, "[AI] source", "alice", ""),
+                            "work",
                         ))
                         .unwrap()
                         .unwrap();
@@ -118,7 +117,7 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                         .track_pr("acme/repo", 5, &source)
                         .unwrap();
                     let mut s = f.settings().unwrap();
-                    s.token_profiles[0].authors = vec!["alice".into()];
+                    s.source_connectors[0].authors = vec!["alice".into()];
                     s.flows[0].enabled = false;
                     // Bob's preference must not replace the source author's preference.
                     s.flows[1]
@@ -224,8 +223,8 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
         let dir = tempfile::tempdir().unwrap();
         let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
         let mut s = settings();
-        for profile in &mut s.token_profiles {
-            profile.authors = if trigger == "new_issue" {
+        for profile in &mut s.source_connectors {
+            profile.authors = if trigger != "pr_review" {
                 vec![profile.account.clone()]
             } else {
                 vec![]
@@ -248,12 +247,9 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
             f.save_settings(s).unwrap();
             for (n, actor) in [(1, "alice"), (2, "bob")] {
                 let id = f
-                    .enqueue(TriggerEvent::issue(
-                        "acme/repo",
-                        n,
-                        "[AI] source",
-                        actor,
-                        "",
+                    .enqueue(common::from_source(
+                        TriggerEvent::issue("acme/repo", n, "[AI] source", actor, ""),
+                        if actor == "bob" { "personal" } else { "work" },
                     ))
                     .unwrap()
                     .unwrap();
@@ -263,7 +259,7 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
                     .unwrap();
             }
             let mut s = f.settings().unwrap();
-            for profile in &mut s.token_profiles {
+            for profile in &mut s.source_connectors {
                 profile.authors = vec![profile.account.clone()];
             }
             s.flows[0].enabled = false;
@@ -274,7 +270,7 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
         let credentials = common::backend(dir.path());
         let alice_ref: String = db(dir.path())
             .query_row(
-                "SELECT reference FROM credential_refs WHERE profile_id='work'",
+                "SELECT reference FROM source_credential_refs WHERE connector_id='work'",
                 [],
                 |r| r.get(0),
             )
@@ -348,7 +344,7 @@ async fn review_withdrawal_race_and_unobserved_edges_preserve_generation() {
     let dir = tempfile::tempdir().unwrap();
     let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = settings();
-    s.token_profiles[0].authors.clear();
+    s.source_connectors[0].authors.clear();
     s.flows[2]
         .profile_activation
         .insert("personal".into(), false);
@@ -515,22 +511,19 @@ async fn removed_origin_profile_during_polling_cannot_admit_any_trigger() {
         let dir = tempfile::tempdir().unwrap();
         let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
         let mut s = settings();
-        s.token_profiles.truncate(1);
-        if trigger != "new_issue" {
-            s.token_profiles[0].authors.clear();
+        s.source_connectors.truncate(1);
+        if trigger == "pr_review" {
+            s.source_connectors[0].authors.clear();
         }
         if trigger != "pr_review" {
-            s.token_profiles[0].reviewers.clear();
+            s.source_connectors[0].reviewers.clear();
         }
         f.save_settings(s).unwrap();
         if trigger == "pr_approved" {
             let id = f
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    1,
-                    "[AI] source",
-                    "alice",
-                    "",
+                .enqueue(common::from_source(
+                    TriggerEvent::issue("acme/repo", 1, "[AI] source", "alice", ""),
+                    "work",
                 ))
                 .unwrap()
                 .unwrap();
@@ -539,7 +532,7 @@ async fn removed_origin_profile_during_polling_cannot_admit_any_trigger() {
                 .track_pr("acme/repo", 5, &id)
                 .unwrap();
             let mut s = f.settings().unwrap();
-            s.token_profiles[0].authors = vec!["alice".into()];
+            s.source_connectors[0].authors = vec!["alice".into()];
             s.flows[0].enabled = false;
             f.save_settings(s).unwrap();
         }
@@ -552,7 +545,7 @@ async fn removed_origin_profile_during_polling_cannot_admit_any_trigger() {
             .await
             .unwrap();
         let mut s = f.settings().unwrap();
-        s.token_profiles.clear();
+        s.source_connectors.clear();
         f.save_settings(s).unwrap();
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(2), task)
@@ -565,10 +558,6 @@ async fn removed_origin_profile_during_polling_cannot_admit_any_trigger() {
             before,
             "{trigger}"
         );
-        assert_eq!(
-            count(dir.path(), "observations"),
-            if trigger == "pr_review" { 1 } else { 0 },
-            "{trigger}"
-        );
+        assert_eq!(count(dir.path(), "observations"), 0, "{trigger}");
     }
 }

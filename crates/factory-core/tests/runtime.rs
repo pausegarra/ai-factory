@@ -111,7 +111,8 @@ async fn fixture() -> (
     let git_wrapper = common::remote_git(dir.path(), &source);
     let factory = common::open_with_api(dir.path().join("data"), &address).unwrap();
     let mut settings = factory.settings().unwrap();
-    settings.token_profiles = vec![TokenProfile {
+    settings.source_connectors = vec![SourceConnector {
+        kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Test".into(),
         account: "alice".into(),
@@ -199,7 +200,10 @@ async fn status(factory: &Factory, id: &str, expected: &str) {
 }
 
 fn runtime_event(trigger: &str, number: u64, sha: &str) -> TriggerEvent {
-    let mut event = TriggerEvent::issue("acme/repo", number, "[AI] Runtime test", "alice", "");
+    let mut event = common::from_source(
+        TriggerEvent::issue("acme/repo", number, "[AI] Runtime test", "alice", ""),
+        "alice",
+    );
     event.trigger_id = trigger.into();
     if trigger != "new_issue" {
         event.head_sha = sha.into();
@@ -251,12 +255,9 @@ printf '%s' '{"status":"succeeded","summary":"continued","artifacts":[],"data":{
     for n in [1, 2] {
         ids.push(
             factory
-                .enqueue(TriggerEvent::issue(
-                    "acme/repo",
-                    n,
-                    "[AI] Runtime test",
+                .enqueue(common::from_source(
+                    TriggerEvent::issue("acme/repo", n, "[AI] Runtime test", "alice", ""),
                     "alice",
-                    "",
                 ))
                 .unwrap()
                 .unwrap(),
@@ -317,7 +318,10 @@ async fn four_real_processes_from_three_triggers_share_default_capacity() {
         (4, "pr_review"),
         (5, "new_issue"),
     ] {
-        let mut event = TriggerEvent::issue("acme/repo", number, "[AI] Runtime test", "alice", "");
+        let mut event = common::from_source(
+            TriggerEvent::issue("acme/repo", number, "[AI] Runtime test", "alice", ""),
+            "alice",
+        );
         event.trigger_id = trigger.into();
         if trigger != "new_issue" {
             event.head_sha = sha.clone();
@@ -368,12 +372,9 @@ async fn four_real_processes_from_three_triggers_share_default_capacity() {
 async fn graceful_shutdown_stops_descendants_and_leaves_no_running_history() {
     let (_dir, factory, _, server) = fixture().await;
     let id = factory
-        .enqueue(TriggerEvent::issue(
-            "acme/repo",
-            1,
-            "[AI] Runtime test",
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 1, "[AI] Runtime test", "alice", ""),
             "alice",
-            "",
         ))
         .unwrap()
         .unwrap();
