@@ -98,6 +98,7 @@ fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
     let mut s = f.settings().unwrap();
     s.source_connectors = vec![SourceConnector {
         review_all_open_pull_requests: false,
+        pull_request_authors: vec![],
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
         reviewers: vec!["alice".into()],

@@ -1,17 +1,21 @@
 import type { SourceConnector } from "./types";
-export type SourceScopeField = "owners" | "authors" | "reviewers";
+export type SourceScopeField = "owners" | "authors" | "reviewers" | "pull_request_authors";
 export function newGitHubIssuesSource(id: string): SourceConnector {
-  return {id, label:"GitHub Issues", type:"github_issues", account:"", owners:[], authors:[], reviewers:[], has_token:false, review_all_open_pull_requests:false};
+  return {id, label:"GitHub Issues", type:"github_issues", account:"", owners:[], authors:[], reviewers:[], has_token:false, review_all_open_pull_requests:false, pull_request_authors:[]};
 }
 export function cleanSourceConnectors(items: SourceConnector[]): SourceConnector[] {
   return structuredClone(items).map(source => {
     delete source.token;
+    if (source.pull_request_authors === undefined) source.pull_request_authors = [];
     if (source.review_all_open_pull_requests === undefined) source.review_all_open_pull_requests = false;
     return source;
   });
 }
 export function parseSourceScope(value: string): string[] {
   return value.split(",").map(item => item.trim()).filter(Boolean);
+}
+export function normalizePullRequestAuthors(values: readonly string[]): string[] {
+  return [...new Set(values.map(value => value.trim().toLowerCase()).filter(Boolean))];
 }
 export function validateSourceConnectors(items: SourceConnector[]): string[] {
   const errors: string[] = [], ids = new Set<string>();
@@ -26,6 +30,10 @@ export function validateSourceConnectors(items: SourceConnector[]): string[] {
       const values = source[field];
       if (!Array.isArray(values) || values.some(value => typeof value !== "string" || !/^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(value))) errors.push(`${field} must contain valid GitHub logins.`);
     }
+    const prAuthors = source.pull_request_authors;
+    if (prAuthors !== undefined && (!Array.isArray(prAuthors) || prAuthors.some(
+      value => typeof value !== "string" || !/^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(value)
+    ))) errors.push("pull_request_authors must contain valid GitHub logins.");
     if (!source.has_token && !source.token?.trim()) errors.push("Source connector token is required.");
   }
   return errors;

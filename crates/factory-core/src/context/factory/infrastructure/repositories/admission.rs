@@ -77,6 +77,11 @@ impl Store {
             }
             let mut present = HashSet::new(); let mut created = Vec::new();
             for candidate in candidates {
+                // Polling may have awaited HTTP while this Source's author list was saved.
+                // Recheck inside the settings transaction before consuming any review edge.
+                if !source.allows_pull_request_author(candidate.payload["pull_request"]["user"]["login"].as_str()) {
+                    continue;
+                }
                 let identity = format!("{}#{}", candidate.repository.to_lowercase(), candidate.number);
                 if !present.insert(identity.clone()) { continue; }
                 let (generation, advance) = review_generation(global.get(&identity), local.get(&identity))?;
@@ -258,6 +263,7 @@ mod tests {
         let mut s = Settings::default();
         s.source_connectors.push(SourceConnector {
             review_all_open_pull_requests: false,
+            pull_request_authors: vec![],
             kind: SourceKind::GithubIssues,
             id: "work".into(),
             label: "Work".into(),

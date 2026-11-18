@@ -82,6 +82,10 @@ export function SourceConnectorDialog({id, connector: c, mode, attempted, busy, 
             <small className="footnote" id={`${id}-review-scope-hint`}>
               When off, only PRs with a review requested from this account are discovered. Applies only to PR review.
             </small>
+            {c.review_all_open_pull_requests && <SourceScopeInput
+              field="pull_request_authors" label="Allowed PR authors" source={c} onChange={onChange}
+              hint="Separate GitHub logins with commas. Empty includes all authors in configured owners. Applies only when reviewing all open PRs."
+            />}
           </div>
           <Field label="API token" hint="Leave blank to keep a configured token."><input type="password" autoComplete="new-password" spellCheck={false} value={c.token ?? ""} aria-invalid={attempted && !c.has_token && !c.token?.trim()} onChange={e => onChange({token:e.target.value})} /></Field>
         </div>
@@ -99,10 +103,14 @@ export function SourceConnectorDialog({id, connector: c, mode, attempted, busy, 
   </div>, document.body);
 }
 
-function SourceScopeInput({field, label, source, onChange}: {field:SourceScopeField; label:string; source:SourceConnector; onChange:(patch:Partial<SourceConnector>)=>void}) {
-  const [text, setText] = useState(() => source[field].join(", "));
+function SourceScopeInput({field, label, source, onChange, hint = "Separate GitHub logins with commas."}: {
+  field:SourceScopeField; label:string; source:SourceConnector;
+  onChange:(patch:Partial<SourceConnector>)=>void; hint?:string;
+}) {
+  const values = source[field] ?? [];
+  const [text, setText] = useState(() => values.join(", "));
   useEffect(() => {
-    if (JSON.stringify(parseSourceScope(text)) !== JSON.stringify(source[field])) setText(source[field].join(", "));
+    if (JSON.stringify(parseSourceScope(text)) !== JSON.stringify(values)) setText(values.join(", "));
   }, [source[field]]);
-  return <Field label={label} hint="Separate GitHub logins with commas."><input value={text} autoCapitalize="none" spellCheck={false} onChange={e => {setText(e.target.value); onChange({[field]:parseSourceScope(e.target.value)});}} /></Field>;
+  return <Field label={label} hint={hint}><input value={text} autoCapitalize="none" spellCheck={false} onChange={e => {setText(e.target.value); onChange({[field]:parseSourceScope(e.target.value)});}} /></Field>;
 }

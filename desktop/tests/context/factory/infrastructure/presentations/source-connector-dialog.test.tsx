@@ -39,7 +39,7 @@ it("adopts untouched external scopes and closes an editor after external removal
  expect(screen.queryByRole("dialog")).toBeNull();await waitFor(()=>expect(document.activeElement).toBe(screen.getByRole("button",{name:"Add connector"})));
 });
 it("disables the entire editor and ignores Escape during a pending save",()=>{
- const cancel=vi.fn();render(<SourceConnectorDialog id="busy" connector={source} mode="existing" busy attempted={false} onApply={vi.fn()} onChange={vi.fn()} onCancel={cancel} onRemove={vi.fn()} returnFocus={()=>null}/>);
+ const cancel=vi.fn();render(<SourceConnectorDialog id="busy" connector={{...source,review_all_open_pull_requests:true,pull_request_authors:["first"]}} mode="existing" busy attempted={false} onApply={vi.fn()} onChange={vi.fn()} onCancel={cancel} onRemove={vi.fn()} returnFocus={()=>null}/>);
  const dialog=screen.getByRole("dialog");for(const control of dialog.querySelectorAll("button,input,select"))expect(control.matches(":disabled")).toBe(true);
  fireEvent.keyDown(dialog,{key:"Escape"});expect(cancel).not.toHaveBeenCalled();
 });
@@ -82,4 +82,24 @@ it("renders missing review scope as unchecked and disables it while busy", async
   expect(control.matches(":disabled")).toBe(true);
   await userEvent.setup().click(control);
   expect(changed).not.toHaveBeenCalled();
+});
+
+it("edits PR authors by keyboard and cancels without changing saved source", async () => {
+  const user = userEvent.setup();
+  const settings = {...noticeSettings(), source_connectors:[{
+    ...source, review_all_open_pull_requests:true, pull_request_authors:["first"]
+  }]};
+  const onSave = vi.fn();
+  render(<SourcesPage settings={settings} onSave={onSave}/>);
+  open();
+  const input = screen.getByLabelText("Allowed PR authors") as HTMLInputElement;
+  expect(screen.getByText(/Empty includes all authors in configured owners/)).toBeTruthy();
+  await user.click(input);
+  await user.clear(input);
+  await user.type(input, "first, second");
+  expect(input.value).toBe("first, second");
+  await user.keyboard("{Escape}");
+  open();
+  expect((screen.getByLabelText("Allowed PR authors") as HTMLInputElement).value).toBe("first");
+  expect(onSave).not.toHaveBeenCalled();
 });

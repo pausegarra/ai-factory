@@ -38,6 +38,7 @@ fn setup(root: std::path::PathBuf, base: &str) -> Arc<Factory> {
     let mut s = f.settings().unwrap();
     s.source_connectors = vec![SourceConnector {
         review_all_open_pull_requests: false,
+        pull_request_authors: vec![],
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         account: "alice".into(),

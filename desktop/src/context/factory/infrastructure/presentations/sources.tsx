@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Plugs } from "@phosphor-icons/react";
 import type { SourceConnector, Settings } from "../../domain/types";
-import { cleanSourceConnectors, newGitHubIssuesSource, validateSourceConnectors } from "../../domain/source-connectors";
+import { cleanSourceConnectors, newGitHubIssuesSource, normalizePullRequestAuthors, validateSourceConnectors } from "../../domain/source-connectors";
 import { Empty, Notice } from "./ui";
 import { ConfiguredConnectorPicker } from "./connector-picker";
 import { SourceConnectorDialog } from "./source-connector-dialog";
@@ -119,6 +119,7 @@ export function SourcesPage({ settings, onSave, onDirtyChange, onBusyChange }: {
       c.has_token = baseline.some(saved => saved.id === c.id && saved.account.toLowerCase() === c.account.trim().toLowerCase() && saved.has_token);
       c.label = c.label.trim(); c.account = c.account.trim().toLowerCase();
       for (const field of ["owners", "authors", "reviewers"] as const) c[field] = [...new Set(c[field].map(v => v.trim().toLowerCase()))];
+      c.pull_request_authors = normalizePullRequestAuthors(c.pull_request_authors ?? []);
       const token = c.token?.trim(); if (token) c.token=token; else delete c.token;
       return c;
     });

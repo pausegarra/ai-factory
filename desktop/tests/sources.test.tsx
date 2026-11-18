@@ -126,3 +126,66 @@ it("keeps old settings valid and cancels scope changes with the existing editor"
     .toBe(false);
   expect(onSave.mock.calls[0][0].source_connectors[0].token).toBeUndefined();
 });
+
+it("saves, reloads, retains and clears PR authors independently per source", async () => {
+  const onSave = vi.fn(async (s:Settings) => structuredClone(s));
+  const view = render(<SourcesPage settings={noticeSettings()} onSave={onSave}/>);
+  const scope = () => screen.getByRole("checkbox", {name:"Review all open PRs in configured owners"});
+  const authors = () => screen.getByLabelText("Allowed PR authors") as HTMLInputElement;
+  add(); fill();
+  expect(screen.queryByLabelText("Allowed PR authors")).toBeNull();
+  fireEvent.click(scope());
+  fireEvent.change(authors(), {target:{value:" CCarneroMerida, , ccarneromerida, NEXT-dvalverde, laubernal "}});
+  apply();
+  add(); fill("Personal", "fixture-second");
+  fireEvent.click(scope());
+  fireEvent.change(authors(), {target:{value:"someone-else"}});
+  apply(); save();
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  await screen.findByText("Source settings saved.");
+  const stored = structuredClone(onSave.mock.calls[0][0]);
+  expect(stored.source_connectors[0].pull_request_authors).toEqual(["ccarneromerida","next-dvalverde","laubernal"]);
+  expect(stored.source_connectors[1].pull_request_authors).toEqual(["someone-else"]);
+  expect(stored.source_connectors.map(c => c.authors)).toEqual([["alice"],["alice"]]);
+  for (const c of stored.source_connectors) {c.has_token=true; delete c.token;}
+  view.unmount();
+  render(<SourcesPage settings={stored} onSave={onSave}/>);
+  open();
+  expect(authors().value).toBe("ccarneromerida, next-dvalverde, laubernal");
+  fireEvent.click(scope());
+  expect(screen.queryByLabelText("Allowed PR authors")).toBeNull();
+  apply(); save();
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+  await screen.findByText("Source settings saved.");
+  expect(onSave.mock.calls[1][0].source_connectors[0].pull_request_authors).toEqual(["ccarneromerida","next-dvalverde","laubernal"]);
+  open(); fireEvent.click(scope());
+  expect(authors().value).toBe("ccarneromerida, next-dvalverde, laubernal");
+  fireEvent.change(authors(), {target:{value:""}});
+  apply(); save();
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(3));
+  await screen.findByText("Source settings saved.");
+  const cleared = onSave.mock.calls[2][0].source_connectors;
+  expect(cleared[0].pull_request_authors).toEqual([]);
+  expect(cleared[1]).toEqual(stored.source_connectors[1]);
+  expect(cleared[0].authors).toEqual(["alice"]);
+  expect(cleared[0].token).toBeUndefined();
+});
+
+it("loads legacy PR author settings as empty and saves without replacing a token", async () => {
+  const {pull_request_authors: removed, ...legacy} = {
+    ...newGitHubIssuesSource("legacy"), label:"Work", account:"alice",
+    has_token:true, owners:["team"], authors:["alice"], reviewers:["alice"]
+  };
+  expect(removed).toEqual([]);
+  const onSave = vi.fn(async (s:Settings) => structuredClone(s));
+  render(<SourcesPage settings={{...noticeSettings(),source_connectors:[legacy]}} onSave={onSave}/>);
+  open();
+  fireEvent.click(screen.getByRole("checkbox", {name:"Review all open PRs in configured owners"}));
+  expect((screen.getByLabelText("Allowed PR authors") as HTMLInputElement).value).toBe("");
+  apply(); save();
+  await screen.findByText("Source settings saved.");
+  const saved = onSave.mock.calls[0][0].source_connectors[0];
+  expect(saved.pull_request_authors).toEqual([]);
+  expect(saved.authors).toEqual(["alice"]);
+  expect(saved.token).toBeUndefined();
+});

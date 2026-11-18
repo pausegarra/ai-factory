@@ -216,7 +216,8 @@ fn notification_telegram_legacy_filters_are_canonical_and_do_not_expand_after_sa
         .unwrap()
         .push(json!({
             "id":"other","label":"Other","type":"github_issues","account":"bob","has_token":false,
-            "owners":[],"authors":[],"reviewers":[],"review_all_open_pull_requests":false
+            "owners":[],"authors":[],"reviewers":[],"review_all_open_pull_requests":false,
+            "pull_request_authors":[]
         }));
     let reloaded: Settings = serde_json::from_value(canonical.clone()).unwrap();
     assert_eq!(serde_json::to_value(reloaded).unwrap(), canonical);
