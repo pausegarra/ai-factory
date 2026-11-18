@@ -309,12 +309,12 @@ impl Github {
 
     async fn poll_reviews(&self, factory: &Factory, profile: &SourceConnector) -> Result<()> {
         let reviewer = &profile.account;
-        let rows = self
-            .scoped_search(
-                profile,
-                &format!("is:pr is:open review-requested:{reviewer}"),
-            )
-            .await?;
+        let query = if profile.review_all_open_pull_requests {
+            "is:pr is:open".to_string()
+        } else {
+            format!("is:pr is:open review-requested:{reviewer}")
+        };
+        let rows = self.scoped_search(profile, &query).await?;
         let mut candidates = vec![];
         for row in rows {
             if !factory.workflow_enabled_for("pr_review", &profile.id)? {
@@ -324,15 +324,16 @@ impl Github {
             let n = row["number"].as_u64().context("Invalid PR number")?;
             let pr = self.pr(&repo, n).await?;
             if pr["state"] != "open"
-                || !pr["requested_reviewers"]
-                    .as_array()
-                    .is_some_and(|reviewers| {
-                        reviewers.iter().any(|r| {
-                            r["login"]
-                                .as_str()
-                                .is_some_and(|actor| actor.eq_ignore_ascii_case(reviewer))
-                        })
-                    })
+                || (!profile.review_all_open_pull_requests
+                    && !pr["requested_reviewers"]
+                        .as_array()
+                        .is_some_and(|reviewers| {
+                            reviewers.iter().any(|r| {
+                                r["login"]
+                                    .as_str()
+                                    .is_some_and(|actor| actor.eq_ignore_ascii_case(reviewer))
+                            })
+                        }))
             {
                 continue;
             }

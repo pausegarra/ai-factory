@@ -97,6 +97,7 @@ fn factory(base: &str) -> (tempfile::TempDir, Arc<Factory>) {
     let f = common::open_with_api(dir.path().join("app"), base).unwrap();
     let mut s = f.settings().unwrap();
     s.source_connectors = vec![SourceConnector {
+        review_all_open_pull_requests: false,
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
         reviewers: vec!["alice".into()],

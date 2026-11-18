@@ -43,3 +43,43 @@ it("disables the entire editor and ignores Escape during a pending save",()=>{
  const dialog=screen.getByRole("dialog");for(const control of dialog.querySelectorAll("button,input,select"))expect(control.matches(":disabled")).toBe(true);
  fireEvent.keyDown(dialog,{key:"Escape"});expect(cancel).not.toHaveBeenCalled();
 });
+
+it("labels the review scope, emits boolean patches and supports the keyboard", async () => {
+  const user = userEvent.setup();
+  const changed = vi.fn();
+  const view = render(<SourceConnectorDialog id="scope" connector={source}
+    mode="existing" busy={false} attempted={false} onApply={vi.fn()}
+    onChange={changed} onCancel={vi.fn()} returnFocus={()=>null}/>);
+  const control = screen.getByRole("checkbox", {
+    name:"Review all open PRs in configured owners"
+  }) as HTMLInputElement;
+  expect(control.checked).toBe(false);
+  expect(control.getAttribute("aria-describedby")).toBe("scope-review-scope-hint");
+  expect(document.getElementById("scope-review-scope-hint")?.textContent)
+    .toContain("When off, only PRs with a review requested from this account");
+  control.focus();
+  await user.keyboard(" ");
+  expect(changed).toHaveBeenLastCalledWith({review_all_open_pull_requests:true});
+  view.rerender(<SourceConnectorDialog id="scope"
+    connector={{...source,review_all_open_pull_requests:true}}
+    mode="existing" busy={false} attempted={false} onApply={vi.fn()}
+    onChange={changed} onCancel={vi.fn()} returnFocus={()=>null}/>);
+  expect(control.checked).toBe(true);
+  await user.click(control);
+  expect(changed).toHaveBeenLastCalledWith({review_all_open_pull_requests:false});
+});
+
+it("renders missing review scope as unchecked and disables it while busy", async () => {
+  const {review_all_open_pull_requests: _scope, ...legacy} = source;
+  const changed = vi.fn();
+  render(<SourceConnectorDialog id="legacy-scope" connector={legacy}
+    mode="existing" busy attempted={false} onApply={vi.fn()} onChange={changed}
+    onCancel={vi.fn()} returnFocus={()=>null}/>);
+  const control = screen.getByRole("checkbox", {
+    name:"Review all open PRs in configured owners"
+  }) as HTMLInputElement;
+  expect(control.checked).toBe(false);
+  expect(control.matches(":disabled")).toBe(true);
+  await userEvent.setup().click(control);
+  expect(changed).not.toHaveBeenCalled();
+});

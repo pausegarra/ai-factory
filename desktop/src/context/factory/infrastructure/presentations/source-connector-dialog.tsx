@@ -71,7 +71,18 @@ export function SourceConnectorDialog({id, connector: c, mode, attempted, busy, 
         <div className="form-grid">
           <Field label="Connector type"><select defaultValue="github_issues" disabled><option value="github_issues">GitHub Issues</option></select></Field>
           <Field label="Name"><input value={c.label} aria-invalid={attempted && !c.label.trim()} onChange={e => onChange({label:e.target.value})} /></Field>
-          <Field label="GitHub account"><input value={c.account} autoCapitalize="none" spellCheck={false} aria-invalid={attempted && !c.account.trim()} onChange={e => onChange({account:e.target.value, has_token:false})} /></Field>
+          <div className="source-account-fields">
+            <Field label="GitHub account"><input value={c.account} autoCapitalize="none" spellCheck={false} aria-invalid={attempted && !c.account.trim()} onChange={e => onChange({account:e.target.value, has_token:false})} /></Field>
+            <label className="checkbox-label source-review-scope">
+              <input type="checkbox" checked={c.review_all_open_pull_requests ?? false}
+                aria-describedby={`${id}-review-scope-hint`}
+                onChange={e => onChange({review_all_open_pull_requests:e.target.checked})} />
+              <span>Review all open PRs in configured owners</span>
+            </label>
+            <small className="footnote" id={`${id}-review-scope-hint`}>
+              When off, only PRs with a review requested from this account are discovered. Applies only to PR review.
+            </small>
+          </div>
           <Field label="API token" hint="Leave blank to keep a configured token."><input type="password" autoComplete="new-password" spellCheck={false} value={c.token ?? ""} aria-invalid={attempted && !c.has_token && !c.token?.trim()} onChange={e => onChange({token:e.target.value})} /></Field>
         </div>
         <p>{c.has_token ? "Token configured" : "Token not configured"}</p>

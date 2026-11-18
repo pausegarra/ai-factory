@@ -112,6 +112,7 @@ async fn fixture() -> (
     let factory = common::open_with_api(dir.path().join("data"), &address).unwrap();
     let mut settings = factory.settings().unwrap();
     settings.source_connectors = vec![SourceConnector {
+        review_all_open_pull_requests: false,
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Test".into(),

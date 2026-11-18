@@ -12,6 +12,7 @@ use std::{
 fn with_token(token: &str) -> Settings {
     let mut settings = Settings::default();
     settings.source_connectors.push(SourceConnector {
+        review_all_open_pull_requests: false,
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),
@@ -46,6 +47,7 @@ fn github_tokens_are_not_written_to_sqlite() {
     let factory = common::open(dir.path().into()).unwrap();
     let mut settings = factory.settings().unwrap();
     settings.source_connectors.push(SourceConnector {
+        review_all_open_pull_requests: false,
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),

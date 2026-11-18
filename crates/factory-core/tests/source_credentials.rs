@@ -141,3 +141,44 @@ fn diagnostic_formatting_never_exposes_source_tokens() {
     };
     assert!(!format!("{source:?}").contains("PRIVATE_DEBUG_SECRET"));
 }
+
+#[tokio::test]
+async fn review_scope_survives_reload_and_changes_without_a_new_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let credentials = Arc::new(common::MemoryCredentials::default());
+    {
+        let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
+        let mut settings = Settings::default();
+        settings.source_connectors.push(SourceConnector {
+            id: "work".into(),
+            label: "Work".into(),
+            account: "alice".into(),
+            owners: vec!["acme".into()],
+            reviewers: vec!["alice".into()],
+            token: Some("fixture-secret".into()),
+            ..Default::default()
+        });
+        store.save_settings(&settings).unwrap();
+    }
+    for value in [true, false, true] {
+        {
+            let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
+            let mut public = store.public_settings().unwrap();
+            assert!(public.source_connectors[0].token.is_none());
+            assert!(public.source_connectors[0].has_token);
+            public.source_connectors[0].review_all_open_pull_requests = value;
+            store.save_settings(&public).unwrap();
+        }
+        let reopened = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
+        let public = reopened.public_settings().unwrap();
+        assert_eq!(
+            public.source_connectors[0].review_all_open_pull_requests,
+            value
+        );
+        assert!(public.source_connectors[0].token.is_none());
+        assert_eq!(
+            reopened.token_for_source("work").await.unwrap(),
+            "fixture-secret"
+        );
+    }
+}

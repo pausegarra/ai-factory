@@ -3401,6 +3401,21 @@ select {
 }
 .notification-connector-dialog h2 { color: #f1f1ef; font-size: 20px; line-height: 28px; text-wrap: balance; }
 .notification-connector-dialog p { text-wrap: pretty; }
+.source-account-fields {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.source-review-scope {
+  white-space: normal;
+  align-items: flex-start;
+  font-size: 14px;
+  line-height: 20px;
+}
+.source-review-scope > span {
+  min-width: 0;
+  text-wrap: pretty;
+}
 .notification-connector-dialog > .notifications-connector-content { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
 .notification-connector-dialog .button { padding: 8px 12px; }
 .notification-connector-dialog .button:disabled { opacity: 0.5; cursor: default; }

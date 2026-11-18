@@ -80,6 +80,7 @@ done"#,
     }
     let mut settings = factory.settings().unwrap();
     settings.source_connectors.push(SourceConnector {
+        review_all_open_pull_requests: false,
         kind: factory_core::SourceKind::GithubIssues,
         id: "fixture-profile".into(),
         label: "Fixture profile".into(),

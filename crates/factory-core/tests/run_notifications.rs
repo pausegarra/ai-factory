@@ -246,6 +246,7 @@ fn notification_cached_credentials_are_redacted_without_keychain_io() -> Result<
     let (dir, f, sink) = setup();
     let mut settings = f.settings()?;
     settings.source_connectors = vec![SourceConnector {
+        review_all_open_pull_requests: false,
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Test".into(),

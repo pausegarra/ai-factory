@@ -70,3 +70,42 @@ fn new_sources_do_not_inherit_legacy_scopes_and_require_a_supported_type() {
         assert!(serde_json::from_value::<Settings>(invalid).is_err());
     }
 }
+
+#[test]
+fn review_scope_json_defaults_false_and_round_trips_both_values() {
+    let base = json!({
+        "id": "work", "label": "Work", "type": "github_issues",
+        "account": "alice", "owners": ["acme"], "reviewers": ["alice"]
+    });
+    for value in [None, Some(false), Some(true)] {
+        let mut raw = base.clone();
+        if let Some(value) = value {
+            raw["review_all_open_pull_requests"] = json!(value);
+        }
+        let settings: Settings =
+            serde_json::from_value(json!({"source_connectors": [raw]})).unwrap();
+        settings.validate().unwrap();
+        let encoded = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            encoded["source_connectors"][0]["review_all_open_pull_requests"],
+            json!(value.unwrap_or(false))
+        );
+        let decoded: Settings = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["source_connectors"][0]
+                ["review_all_open_pull_requests"],
+            json!(value.unwrap_or(false))
+        );
+    }
+}
+
+#[test]
+fn review_scope_rejects_explicit_non_boolean_json() {
+    for value in [json!(null), json!("true"), json!(1)] {
+        let raw = json!({"source_connectors": [{
+            "id": "work", "label": "Work", "type": "github_issues",
+            "account": "alice", "review_all_open_pull_requests": value
+        }]});
+        assert!(serde_json::from_value::<Settings>(raw).is_err());
+    }
+}

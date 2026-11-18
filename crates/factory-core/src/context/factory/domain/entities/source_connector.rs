@@ -22,6 +22,8 @@ pub struct SourceConnector {
     pub authors: Vec<String>,
     #[serde(default)]
     pub reviewers: Vec<String>,
+    #[serde(default)]
+    pub review_all_open_pull_requests: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default)]
