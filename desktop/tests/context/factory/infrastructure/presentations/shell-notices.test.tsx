@@ -7,7 +7,7 @@ import { deferred, noticeSettings, noticeSnapshot } from "../../../../fixtures/n
 const mocks = vi.hoisted(() => ({ listeners: new Set<(event: FactoryEvent) => void>() }));
 vi.mock("../../../../../src/context/factory/infrastructure/ipc/factory-api", () => ({
   native: true,
-  factoryApi: {
+  factoryApi: { backupRecoveryStatus: vi.fn(async () => ({required:false})),
     settings: vi.fn(), snapshot: vi.fn(), poll: vi.fn(), subscribe: vi.fn(),
     saveSettings: vi.fn(), importLegacy: vi.fn(), agentAccounts: vi.fn(),
     agentModels: vi.fn(), installedSkills: vi.fn(),

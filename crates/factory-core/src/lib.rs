@@ -7,27 +7,35 @@ pub mod context {
             pub mod entities {
                 pub(crate) mod agent_account;
                 pub mod agent_usage;
+                pub mod backup;
                 pub mod models;
                 pub mod notification_connector;
                 pub mod run_deletion;
+                pub(crate) mod run_file_origin;
                 pub(crate) mod run_transition;
             }
         }
         pub mod application {
             pub(crate) mod use_cases {
+                pub(crate) mod backup;
                 pub mod delete_run;
             }
             pub mod interfaces {
                 pub mod agent_usage_source;
+                pub(crate) mod backup_archive;
+                pub(crate) mod backup_repository;
                 pub(crate) mod issue_node_comment_transport;
                 pub mod notification_transport;
                 pub mod run_cleanup;
                 pub mod run_notification_sink;
+                pub mod startup_registration;
             }
             pub mod dto {
                 pub mod agent_account;
                 pub mod agent_model;
                 pub mod agent_usage;
+                pub mod backup;
+                pub(crate) mod backup_format;
                 pub mod connector_notification;
                 pub mod installed_skill;
                 pub(crate) mod issue_node_comment;
@@ -40,6 +48,7 @@ pub mod context {
                 pub(crate) mod connector_notifications;
                 pub mod factory;
                 pub(crate) mod issue_node_comments;
+                pub(crate) mod maintenance;
                 pub(crate) mod reviews;
                 pub(crate) mod run_notifications;
             }
@@ -47,6 +56,7 @@ pub mod context {
         pub mod infrastructure {
             pub mod filesystem {
                 pub(crate) mod agent_home;
+                pub(crate) mod backup_archive;
                 pub mod run_cleanup;
                 pub mod skill_catalog;
             }
@@ -56,14 +66,18 @@ pub mod context {
             pub mod repositories {
                 pub(crate) mod admission;
                 pub(crate) mod agent_accounts;
+                pub(crate) mod backup;
+                pub(crate) mod backup_recovery;
                 pub(crate) mod issue_node_comments;
                 pub(crate) mod pr_origins;
                 pub(crate) mod run_deletions;
+                pub(crate) mod run_file_origins;
                 pub(crate) mod secure_notifications;
                 pub mod secure_settings;
                 pub mod store;
             }
             pub mod security {
+                pub(crate) mod backup_crypto;
                 pub mod native_credentials;
             }
             pub mod rest_clients {
@@ -106,3 +120,8 @@ pub use context::factory::application::dto::connector_notification::Notification
 pub use context::factory::application::interfaces::notification_transport::{
     DeliveryFailure, NotificationTransport,
 };
+
+pub use context::factory::application::dto::backup::*;
+pub use context::factory::domain::entities::backup::*;
+
+pub(crate) use context::factory::domain::entities::run_file_origin::*;

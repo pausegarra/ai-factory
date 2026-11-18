@@ -122,11 +122,11 @@ pub(super) fn backfill(tx: &Transaction<'_>) -> Result<()> {
     }
     Ok(())
 }
-fn receipt_key(key: &str) -> bool {
+pub(super) fn receipt_key(key: &str) -> bool {
     key.strip_prefix("action:")
         .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
 }
-fn compact_receipt(receipt: &serde_json::Value) -> serde_json::Value {
+pub(super) fn compact_receipt(receipt: &serde_json::Value) -> serde_json::Value {
     let mut value = serde_json::json!({"completed":true});
     if let Some(id) = receipt
         .get("remote_id")
@@ -142,6 +142,10 @@ impl Store {
         ensure!(valid_repository(repo) && number > 0, "Invalid PR identity");
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        ensure!(
+            super::run_file_origins::origin_db(&tx, source_run)? == Some(RunFileOrigin::Local),
+            "Run has no local files"
+        );
         let detail = super::run_deletions::detail_db(&tx, source_run)?;
         ensure!(
             detail.run.id == source_run

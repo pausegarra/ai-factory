@@ -60,3 +60,8 @@ it("provides an isolated disabled Release flow in preview",async()=>{
  expect((await factoryApi.settings()).flows.find(f=>f.id==="release")!.enabled).toBe(false);
  expect((await factoryApi.snapshot()).capacity.by_trigger.release).toEqual({active:0,limit:4});
 });
+
+it("requires desktop for every backup operation without invoking native", async () => {
+ for (const operation of [() => factoryApi.exportBackup("x",{components:["history"]},null),()=>factoryApi.inspectBackup("x"),()=>factoryApi.prepareBackupImport("x",{components:["history"]},null),()=>factoryApi.applyBackupImport("x",true,null),()=>factoryApi.discardBackupImport("x"),()=>factoryApi.recoverBackupImport(),()=>factoryApi.backupRecoveryStatus()]) {await expect(operation()).rejects.toMatchObject({code:"desktop_required"});}
+ expect(invoke).not.toHaveBeenCalled();
+});

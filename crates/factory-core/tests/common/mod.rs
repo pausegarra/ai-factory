@@ -157,3 +157,5 @@ exec '{actual}' "$@"
 pub mod notifications;
 
 pub mod telegram_http;
+
+pub mod backup;

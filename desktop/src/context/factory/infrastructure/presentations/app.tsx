@@ -1,3 +1,4 @@
+import type { ApplyBackupImport } from "../../application/dto/backup";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowClockwise,
@@ -49,6 +50,7 @@ export function App() {
   const [usageOpen, setUsageOpen] = useState(false);
   const [page, setPage] = useState("overview");
   const settingsEpoch = useRef(0);
+  const dataEpoch = useRef(0);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -107,20 +109,26 @@ export function App() {
       {
         listen: (cb) =>
           factoryApi.subscribe((e) => {
+            if (e.kind === "backup_imported") {
+              dataEpoch.current += 1; settingsEpoch.current += 1;
+              selected.current = null; initiated.current.clear(); setSelection(null);
+            }
             if (e.kind === "run_deleted" && e.run_id) unavailable(e.run_id);
             if (e.kind !== "log") cb();
           }),
         load: async () => {
           const epoch = settingsEpoch.current;
+          const generation = dataEpoch.current;
           const selection = selected.current;
           const [settings, snapshot] = await Promise.all([
             factoryApi.settings(),
             factoryApi.snapshot(),
           ]);
-          return { settings, snapshot, selection, epoch };
+          return { settings, snapshot, selection, epoch, generation };
         },
       },
       (data) => {
+        if (data.generation !== dataEpoch.current) return;
         if (data.epoch === settingsEpoch.current) setSettings(data.settings);
         setSnapshot(data.snapshot);
         if (data.selection && selected.current === data.selection &&
@@ -149,6 +157,20 @@ export function App() {
       throw error;
     }
   }
+  const applyBackupImport: ApplyBackupImport = async (confirmationId, confirmed, password) => {
+    dataEpoch.current += 1; settingsEpoch.current += 1;
+    try {
+      const outcome = await factoryApi.applyBackupImport(confirmationId, confirmed, password);
+      dataEpoch.current += 1; settingsEpoch.current += 1;
+      if (outcome.components.includes("history")) { selected.current = null; initiated.current.clear(); setSelection(null); }
+      try {
+        const generation = dataEpoch.current;
+        const [settings, snapshot] = await Promise.all([factoryApi.settings(), factoryApi.snapshot()]);
+        if (alive.current && generation === dataEpoch.current) {setSettings(settings);setSnapshot(snapshot);setHasUnsaved(false);}
+        return {outcome, refresh_error: null};
+      } catch { return {outcome, refresh_error: "Could not refresh imported data"}; }
+    } finally { dataEpoch.current += 1; settingsEpoch.current += 1; if (alive.current) setReload(value => value + 1); }
+  };
   function navigate(value: string) {
     if (savingPage) return;
     if (value === page) return;
@@ -391,6 +413,8 @@ export function App() {
             <NotificationsPage settings={settings} onSave={saveSettings} onDirtyChange={setHasUnsaved} onBusyChange={setSavingPage} />
           ) : (
             <SettingsPage
+              onApplyBackupImport={applyBackupImport}
+              onBusyChange={setSavingPage}
               settings={settings}
               onSave={saveSettings}
               appDir={snapshot.service.app_data_dir}

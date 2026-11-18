@@ -38,6 +38,8 @@ impl Store {
    CREATE TABLE IF NOT EXISTS notification_credential_refs (connector_id TEXT PRIMARY KEY,reference TEXT NOT NULL UNIQUE);
    CREATE TABLE IF NOT EXISTS credential_gc (reference TEXT PRIMARY KEY);")?;
         super::run_deletions::migrate(&mut db)?;
+        super::run_file_origins::migrate(&mut db)?;
+        super::backup_recovery::migrate(&db)?;
         super::agent_accounts::migrate(&db)?;
         super::issue_node_comments::migrate(&db)?;
         let s = Self {
@@ -46,24 +48,32 @@ impl Store {
             settings_lock: Mutex::new(()),
             secret_cache: Arc::new(Mutex::new(HashMap::new())),
         };
-        s.migrate_credentials()?;
-        for mut r in s.runs()? {
+        match crate::context::factory::application::interfaces::backup_repository::BackupRestoreRepository::recover(&s) {
+            Ok(())=>s.complete_backup_startup()?,
+            Err(error) if error.code==BackupErrorCode::RecoveryRequired=>(),
+            Err(error)=>return Err(error.into()),
+        }
+        Ok(s)
+    }
+    pub(crate) fn complete_backup_startup(&self) -> Result<()> {
+        self.migrate_credentials()?;
+        for mut r in self.runs()? {
             if r.status == "running" {
                 r.status = "interrupted".into();
                 r.finished_at = Some(now());
                 r.error=Some("Application stopped while run was executing; retry explicitly to avoid duplicate side effects".into());
                 r.current_step = None;
-                s.save_run(&r)?;
-                for mut n in s.nodes(&r.id)? {
+                self.save_run(&r)?;
+                for mut n in self.nodes(&r.id)? {
                     if n.status == "running" {
                         n.status = "interrupted".into();
                         n.finished_at = Some(now());
-                        s.save_node(&r.id, &n)?;
+                        self.save_node(&r.id, &n)?;
                     }
                 }
             }
         }
-        Ok(s)
+        Ok(())
     }
     pub(super) fn raw_settings(&self) -> Result<Settings> {
         let raw: Option<String> = self
@@ -175,6 +185,7 @@ impl Store {
                 created
             ],
         )?;
+        tx.execute("INSERT INTO run_file_origins VALUES(?1,'local')", [&id])?;
         for n in &flow.nodes {
             let state = NodeRun {
                 id: n.id.clone(),
@@ -217,6 +228,7 @@ impl Store {
             )?;
             imported += inserted;
             if inserted == 1 {
+                tx.execute("INSERT INTO run_file_origins VALUES(?1,'local')",[&r.id])?;
                 for n in &d.nodes {
                     tx.execute(
                         "INSERT OR IGNORE INTO nodes VALUES(?1,?2,?3)",
@@ -306,6 +318,9 @@ impl Store {
     pub(crate) fn claim_queued_transition(&self, id: &str) -> Result<Option<RunTransition>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        if super::run_file_origins::origin_db(&tx, id)? != Some(RunFileOrigin::Local) {
+            return Ok(None);
+        }
         let raw: Option<String> = tx
             .query_row("SELECT json FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)", [id], |r| r.get(0))
             .optional()?;
@@ -357,13 +372,14 @@ impl Store {
         }))
     }
     pub(crate) fn set_workspace(&self, id: &str, workspace: Option<&str>) -> Result<()> {
-        ensure!(
-            self.db.lock().unwrap().execute(
-                "UPDATE runs SET json=json_set(json,'$.workspace',?2) WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)",
-                params![id, workspace]
-            )? == 1,
-            "Run not found"
-        );
+        let db = self.db.lock().unwrap();
+        if workspace.is_some() {
+            ensure!(
+                super::run_file_origins::origin_db(&db, id)? == Some(RunFileOrigin::Local),
+                "Run has no local files"
+            );
+        }
+        ensure!(db.execute("UPDATE runs SET json=json_set(json,'$.workspace',?2) WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)",params![id,workspace])?==1,"Run not found");
         Ok(())
     }
     pub(crate) fn set_node_result(
@@ -481,19 +497,28 @@ impl Store {
         Ok(true)
     }
     pub fn observation(&self, key: &str) -> Result<Option<serde_json::Value>> {
-        let v: Option<String> = self
-            .db
-            .lock()
-            .unwrap()
+        let db = self.db.lock().unwrap();
+        if let Some(id) = local_operational_owner(key) {
+            if super::run_file_origins::origin_db(&db, id)? != Some(RunFileOrigin::Local) {
+                return Ok(None);
+            }
+        }
+        let raw: Option<String> = db
             .query_row("SELECT json FROM observations WHERE key=?1", [key], |r| {
                 r.get(0)
             })
             .optional()?;
-        Ok(v.map(|s| serde_json::from_str(&s)).transpose()?)
+        Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?)
     }
     pub fn observe(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        if let Some(id) = local_operational_owner(key) {
+            ensure!(
+                super::run_file_origins::origin_db(&tx, id)? == Some(RunFileOrigin::Local),
+                "Run has no local files"
+            );
+        }
         let owner = key
             .strip_prefix("identity:")
             .or_else(|| key.strip_prefix("pr-workspace:"))

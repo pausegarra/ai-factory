@@ -7,7 +7,7 @@ import type { AgentAccount, Settings } from "../src/context/factory/domain/types
 
 vi.mock("../src/context/factory/infrastructure/ipc/factory-api", () => ({
   native: true,
-  factoryApi: { agentAccounts: vi.fn(), startCodexLogin: vi.fn(), openCodexLogin: vi.fn(), removeAgentAccount: vi.fn() },
+  factoryApi: { backupRecoveryStatus: vi.fn(async () => ({required:false})), agentAccounts: vi.fn(), startCodexLogin: vi.fn(), openCodexLogin: vi.fn(), removeAgentAccount: vi.fn() },
 }));
 const account = (id = "codex-work", status: AgentAccount["status"] = "ready"): AgentAccount => ({ id, agent: "codex", label: "Work Codex", email: status === "ready" ? "person@example.com" : null, status, error: null });
 const settings = (): Settings => ({
@@ -17,12 +17,12 @@ const settings = (): Settings => ({
   flows: [],
 });
 function agents() { fireEvent.click(screen.getByRole("tab", { name: "Agents" })); }
-beforeEach(() => { vi.resetAllMocks(); vi.mocked(factoryApi.agentAccounts).mockResolvedValue([]); });
+beforeEach(() => { vi.resetAllMocks(); vi.mocked(factoryApi.backupRecoveryStatus).mockResolvedValue({required:false}); vi.mocked(factoryApi.agentAccounts).mockResolvedValue([]); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 it("keeps Codex YOLO off by default and stages changes until Save", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/app" />);
   const toggle = screen.getByRole("checkbox", { name: /^Codex YOLO mode/ }) as HTMLInputElement;
   expect(toggle.checked).toBe(false);
   expect(screen.getByText(/all Codex steps.*full filesystem and network access/i)).toBeTruthy();
@@ -40,7 +40,7 @@ it("keeps Codex YOLO off by default and stages changes until Save", async () => 
 it("can save Codex YOLO disabled after loading enabled settings", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   const initial = { ...settings(), codex_yolo: true };
-  render(<SettingsPage settings={initial} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={initial} onSave={save} appDir="/app" />);
   const toggle = screen.getByRole("checkbox", { name: /^Codex YOLO mode/ }) as HTMLInputElement;
   expect(toggle.checked).toBe(true);
   fireEvent.click(toggle);
@@ -50,7 +50,7 @@ it("can save Codex YOLO disabled after loading enabled settings", async () => {
 });
 
 it("offers accessible Settings tabs and keeps agent auth outside GitHub profiles", async () => {
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   const general = screen.getByRole("tab", { name: "General" });
   expect(general.getAttribute("aria-selected")).toBe("true");
   for (const tab of screen.getAllByRole("tab")) expect(document.getElementById(tab.getAttribute("aria-controls")!)).toBeTruthy();
@@ -79,12 +79,12 @@ it("stages profile assignments until Save changes and preserves draft across unr
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([account()]);
   const save = vi.fn().mockResolvedValue(undefined);
   const initial = settings();
-  const view = render(<SettingsPage settings={initial} onSave={save} appDir="/app" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={initial} onSave={save} appDir="/app" />);
   agents();
   await screen.findByRole("option", { name: /Work Codex/ });
   fireEvent.change(screen.getByLabelText("Codex account for Work (@worker)"), { target: { value: "codex-work" } });
   expect(save).not.toHaveBeenCalled();
-  view.rerender(<SettingsPage settings={{ ...initial, flows: [{ id: "new_issue", name: "Updated", enabled: false, nodes: [] }] }} onSave={save} appDir="/app" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...initial, flows: [{ id: "new_issue", name: "Updated", enabled: false, nodes: [] }] }} onSave={save} appDir="/app" />);
   expect((screen.getByLabelText("Codex account for Work (@worker)") as HTMLSelectElement).value).toBe("codex-work");
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledOnce());
@@ -94,7 +94,7 @@ it("stages profile assignments until Save changes and preserves draft across unr
 
 it("starts labeled OAuth through native opener and reloads pending account to ready", async () => {
   vi.mocked(factoryApi.startCodexLogin).mockResolvedValue({ account: account("new", "pending"), auth_url: "https://auth.example.test/secret" });
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("No Codex accounts yet");
   fireEvent.change(screen.getByLabelText("Account label"), { target: { value: "Work Codex" } });
@@ -112,7 +112,7 @@ it("starts labeled OAuth through native opener and reloads pending account to re
 it("shows OAuth failures and cancels pending accounts immediately", async () => {
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([{ ...account("failed", "failed"), error: "Sign-in expired" }, account("pending", "pending")]);
   vi.mocked(factoryApi.removeAgentAccount).mockResolvedValue(undefined);
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("Sign-in expired");
   fireEvent.click(screen.getByRole("button", { name: "Cancel sign-in for Work Codex" }));
@@ -123,7 +123,7 @@ it("shows OAuth failures and cancels pending accounts immediately", async () => 
 it("retains account and bindings when active-account deletion fails", async () => {
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([account()]);
   vi.mocked(factoryApi.removeAgentAccount).mockRejectedValue(new Error("Account is used by an active run"));
-  render(<SettingsPage settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("person@example.com");
   fireEvent.click(screen.getByRole("button", { name: "Remove account Work Codex" }));
@@ -141,7 +141,7 @@ it("clears a recovered account-load error without removing account diagnostics",
   vi.mocked(factoryApi.agentAccounts)
     .mockRejectedValueOnce(new Error("fixture account load denied"))
     .mockResolvedValueOnce([{ ...account("pending", "pending"), error: "Complete sign-in in your browser" }]);
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await waitFor(() => expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("fixture account load denied"));
   expect(document.querySelector(".notice[role='alert']")?.textContent).toContain("Could not load Codex accounts.");
@@ -154,7 +154,7 @@ it("clears a recovered account-load error without removing account diagnostics",
 
 it("removes stale bindings when deleting a GitHub profile and supports Discard", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
   fireEvent.click(screen.getByRole("tab", { name: "GitHub accounts" }));
   fireEvent.click(screen.getByRole("button", { name: "Delete profile Work" }));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -166,7 +166,7 @@ it("ignores account reload results made stale by cancellation", async () => {
   vi.mocked(factoryApi.agentAccounts).mockResolvedValueOnce([account("pending", "pending")]);
   let finish!: (value: AgentAccount[]) => void;
   vi.mocked(factoryApi.agentAccounts).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("Pending");
   fireEvent.click(screen.getByRole("button", { name: "Reload accounts" }));
@@ -179,7 +179,7 @@ it("ignores account reload results made stale by cancellation", async () => {
 
 it("loads Codex accounts under StrictMode effect cleanup", async () => {
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([account()]);
-  render(<StrictMode><SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" /></StrictMode>);
+  render(<StrictMode><SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" /></StrictMode>);
   agents();
   await screen.findByText("person@example.com");
 });
@@ -187,7 +187,7 @@ it("loads Codex accounts under StrictMode effect cleanup", async () => {
 it("polls pending auth without overlapping requests and stops after unmount", async () => {
   vi.useFakeTimers();
   vi.mocked(factoryApi.agentAccounts).mockResolvedValueOnce([account("pending", "pending")]);
-  const view = render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await act(async () => {});
   expect(screen.getByText("Pending")).toBeTruthy();
@@ -205,7 +205,7 @@ it("polls pending auth without overlapping requests and stops after unmount", as
 it("discards assignment edits and clears bindings after account removal", async () => {
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([account()]);
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
   agents();
   await screen.findByText("person@example.com");
   fireEvent.change(screen.getByLabelText("Codex account for Work (@worker)"), { target: { value: "" } });
@@ -221,7 +221,7 @@ it("discards assignment edits and clears bindings after account removal", async 
 it("retains pending connection when native browser opening fails", async () => {
   vi.mocked(factoryApi.startCodexLogin).mockResolvedValue({ account: account("pending", "pending"), auth_url: "https://auth.example.test/secret" });
   vi.mocked(factoryApi.openCodexLogin).mockRejectedValueOnce(new Error("Browser could not open"));
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("No Codex accounts yet");
   fireEvent.change(screen.getByLabelText("Account label"), { target: { value: "Work Codex" } });
@@ -236,7 +236,7 @@ it("retains pending connection when native browser opening fails", async () => {
 it("labels account creation failures and keeps the current account list", async () => {
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([account()]);
   vi.mocked(factoryApi.startCodexLogin).mockRejectedValueOnce(new Error("fixture OAuth start denied"));
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("person@example.com");
   fireEvent.change(screen.getByLabelText("Account label"), { target: { value: "New account" } });
@@ -251,7 +251,7 @@ it("preserves unrelated drafts when account removal finishes after switching tab
   let finish!: () => void;
   vi.mocked(factoryApi.removeAgentAccount).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...settings(), codex_bindings: { work: "codex-work" } }} onSave={save} appDir="/app" />);
   agents();
   await screen.findByText("person@example.com");
   fireEvent.click(screen.getByRole("button", { name: "Remove account Work Codex" }));
@@ -268,7 +268,7 @@ it("preserves unrelated drafts when account removal finishes after switching tab
 it("opens initiated sign-in even if the user switches tabs before OAuth starts", async () => {
   let finish!: (value: { account: AgentAccount; auth_url: string }) => void;
   vi.mocked(factoryApi.startCodexLogin).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   agents();
   await screen.findByText("No Codex accounts yet");
   fireEvent.change(screen.getByLabelText("Account label"), { target: { value: "Work Codex" } });

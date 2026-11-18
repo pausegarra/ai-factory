@@ -144,6 +144,15 @@ impl IssueNodeCommentDispatcher {
                     break;
                 }
                 let Some(f) = factory.upgrade() else { break };
+                let operation = f
+                    .maintenance
+                    .try_enter(super::maintenance::OperationKind::ExternalEffect);
+                if operation.is_err() {
+                    drop(f);
+                    tokio::select! {_=task_stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_millis(300))=>{}}
+                    continue;
+                }
+                let operation = operation.unwrap();
                 let job = match f.store.due_issue_node_comment(&now()) {
                     Ok(job) => job,
                     Err(_) => {
@@ -156,6 +165,7 @@ impl IssueNodeCommentDispatcher {
                     record_delivery(&f, &job, result);
                     drop(f);
                 } else {
+                    drop(operation);
                     drop(f);
                     tokio::select! {_=task_stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_millis(300))=>{}}
                 }
@@ -276,6 +286,9 @@ fn diagnostic(f: &Factory, job: &IssueNodeCommentJob, line: &str) {
         return;
     };
     if !detail.nodes.iter().any(|n| n.id == s.node_id) {
+        return;
+    }
+    if f.store.run_file_origin(&s.run_id).ok().flatten() != Some(crate::RunFileOrigin::Local) {
         return;
     }
     let text = format!(

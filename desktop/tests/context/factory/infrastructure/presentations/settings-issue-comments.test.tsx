@@ -13,7 +13,7 @@ const saveButton = () => screen.getByRole("button", { name: "Save changes" }) as
 it("defaults old settings to enabled in General and is keyboard accessible", async () => {
   const value = noticeSettings();
   delete value.issue_node_comments_enabled;
-  render(<SettingsPage settings={value} onSave={vi.fn()} appDir="/fixture" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={vi.fn()} appDir="/fixture" />);
   const general = screen.getByRole("tabpanel", { name: "General" });
   expect(within(general).getByRole("checkbox", { name: /^Automatic issue comments/ })).toBe(checkbox());
   expect(checkbox().checked).toBe(true);
@@ -31,7 +31,7 @@ it("saves both values through the parent and discards to the latest saved value"
   const saved = vi.fn();
   function Harness() {
     const [settings, setSettings] = useState<Settings>({ ...noticeSettings(), issue_node_comments_enabled: true });
-    return <SettingsPage settings={settings} appDir="/fixture" onDirtyChange={dirty} onSave={async next => {
+    return <SettingsPage onApplyBackupImport={vi.fn()} settings={settings} appDir="/fixture" onDirtyChange={dirty} onSave={async next => {
       saved(next);
       setSettings(next);
       return next;
@@ -61,7 +61,7 @@ it("saves both values through the parent and discards to the latest saved value"
 it("keeps the unsaved false value and dirty state after a save error", async () => {
   const dirty = vi.fn();
   const save = vi.fn().mockRejectedValue(new Error("fixture save denied"));
-  render(<SettingsPage settings={{ ...noticeSettings(), issue_node_comments_enabled: true }} onSave={save} onDirtyChange={dirty} appDir="/fixture" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...noticeSettings(), issue_node_comments_enabled: true }} onSave={save} onDirtyChange={dirty} appDir="/fixture" />);
   fireEvent.click(checkbox());
   fireEvent.click(saveButton());
   expect((await screen.findByRole("alert")).textContent).toContain("fixture save denied");
@@ -73,12 +73,12 @@ it("keeps the unsaved false value and dirty state after a save error", async () 
 
 it("reflects saved false values from settings events without overwriting a dirty draft", () => {
   const value = { ...noticeSettings(), issue_node_comments_enabled: true };
-  const view = render(<SettingsPage settings={value} onSave={vi.fn()} appDir="/fixture" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={vi.fn()} appDir="/fixture" />);
   const latest = { ...value, issue_node_comments_enabled: false };
-  view.rerender(<SettingsPage settings={latest} onSave={vi.fn()} appDir="/fixture" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={latest} onSave={vi.fn()} appDir="/fixture" />);
   expect(checkbox().checked).toBe(false);
   fireEvent.click(checkbox());
-  view.rerender(<SettingsPage settings={{ ...latest, poll_interval_seconds: 30 }} onSave={vi.fn()} appDir="/fixture" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...latest, poll_interval_seconds: 30 }} onSave={vi.fn()} appDir="/fixture" />);
   expect(checkbox().checked).toBe(true);
   expect(saveButton().disabled).toBe(false);
 });

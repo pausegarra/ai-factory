@@ -57,6 +57,43 @@ pub(crate) fn home(root: &Path, id: &str, require_auth: bool) -> Result<PathBuf>
     Ok(path)
 }
 
+/// Validate an existing local account without repairing permissions or reading
+/// credentials. Import previews must remain read-only until confirmation.
+pub(crate) fn existing_home(root: &Path, id: &str) -> Result<PathBuf> {
+    validate_account_id(id)?;
+    let mut path = root.to_path_buf();
+    for part in ["agent-accounts", "codex", id] {
+        path.push(part);
+        let metadata = fs::symlink_metadata(&path)?;
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "Unsafe managed account directory"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            ensure!(
+                metadata.permissions().mode() & 0o077 == 0,
+                "Unsafe managed account permissions"
+            );
+        }
+    }
+    let metadata = fs::symlink_metadata(path.join("auth.json"))?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
+        "Managed Codex credentials are missing"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        ensure!(
+            metadata.nlink() == 1 && metadata.permissions().mode() & 0o077 == 0,
+            "Unsafe managed account credential file"
+        );
+    }
+    Ok(path)
+}
+
 /// Missing owned directories are already clean. Existing links never authorize deletion.
 pub(crate) fn remove(root: &Path, id: &str) -> Result<()> {
     validate_account_id(id)?;

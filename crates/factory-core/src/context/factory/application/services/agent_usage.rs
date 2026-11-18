@@ -56,6 +56,7 @@ impl Factory {
         if self.stop.is_cancelled() {
             return Ok(stopping(result));
         }
+        let _operation=self.maintenance.try_enter(crate::context::factory::application::services::maintenance::OperationKind::ExternalEffect)?;
         let deadline = tokio::time::Instant::now() + self.usage.codex_budget;
         let settings = self.settings()?;
         if agent == "opencode" {
@@ -296,7 +297,13 @@ mod tests {
             task.await.unwrap().entries[0].observation.code,
             Some(UsageCode::Stopping)
         );
-        factory.remove_agent_account(&id).await.unwrap();
+        assert!(factory.remove_agent_account(&id).await.is_err());
+        assert!(factory
+            .store
+            .agent_accounts()
+            .unwrap()
+            .iter()
+            .any(|a| a.id == id));
         assert_eq!(
             factory.agent_usage("opencode").await.unwrap().code,
             Some(UsageCode::Stopping)

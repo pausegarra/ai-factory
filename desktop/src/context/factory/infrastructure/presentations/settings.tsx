@@ -1,3 +1,5 @@
+import type { ApplyBackupImport } from "../../application/dto/backup";
+import { BackupSettings } from "./backup-settings";
 import { effectiveTriggerLimit, withTriggerLimit } from "../../domain/execution-capacity";
 import { useEffect, useId, useRef, useState } from "react";
 import {
@@ -56,7 +58,11 @@ export function SettingsPage({
   onSave,
   appDir,
   onDirtyChange,
+  onApplyBackupImport,
+  onBusyChange,
 }: {
+  onApplyBackupImport: ApplyBackupImport;
+  onBusyChange?: (busy: boolean) => void;
   settings: Settings;
   onSave: (s: Settings) => Promise<Settings | void>;
   appDir: string;
@@ -67,6 +73,7 @@ export function SettingsPage({
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
   const [accountBusy, setAccountBusy] = useState(false);
   const [tab, setTab] = useState<typeof settingsTabs[number]["id"]>("general");
   const tabsId = useId();
@@ -142,7 +149,7 @@ export function SettingsPage({
     updateProfile(profile.id, { [field]: split(value) });
   }
   async function save() {
-    if (busy || accountBusy) return;
+    if (busy || accountBusy || backupBusy) return;
     setSaved(false);
     setError("");
     const token_profiles = draft.token_profiles.map((profile) => ({
@@ -222,7 +229,7 @@ export function SettingsPage({
           {dirty && (
             <button
               className="button button-secondary"
-              disabled={busy}
+              disabled={busy || backupBusy}
               onClick={discard}
             >
               Discard
@@ -230,7 +237,7 @@ export function SettingsPage({
           )}
           <button
             className="button button-primary"
-            disabled={busy || accountBusy || !dirty}
+            disabled={busy || backupBusy || accountBusy || !dirty}
             onClick={() => void save()}
           >
             <FloppyDisk size={17} />
@@ -249,7 +256,7 @@ export function SettingsPage({
           <button
             key={id}
             id={`${tabsId}-${id}`}
-            role="tab"
+            role="tab" disabled={busy || backupBusy}
             aria-selected={tab === id}
             aria-controls={`${tabsId}-${id}-panel`}
             tabIndex={tab === id ? 0 : -1}
@@ -276,7 +283,7 @@ export function SettingsPage({
         {tab === "agents" && <AgentsSettings
             profiles={draft.token_profiles}
             bindings={draft.codex_bindings ?? {}}
-            disabled={busy || accountBusy}
+            disabled={busy || backupBusy || accountBusy}
             onBusyChange={(value) => {
               if (mounted.current) setAccountBusy(value);
             }}
@@ -614,7 +621,8 @@ export function SettingsPage({
             />
           </div>
         </section>
-        <LegacyImport disabled={dirty} onImported={imported} active={tab === "general"} />
+        <BackupSettings disabled={dirty || busy || accountBusy} active={tab === "general"} onApply={onApplyBackupImport} onBusyChange={(value) => {setBackupBusy(value); onBusyChange?.(value);}} />
+        <LegacyImport disabled={dirty || busy || backupBusy || accountBusy} onImported={imported} active={tab === "general"} />
         <section className="storage-note">
           <Folder size={20} />
           <div>

@@ -453,8 +453,9 @@ async fn periodic_poll_and_sync_now_skip_all_disabled_pairs_without_secrets() {
     })
     .await
     .unwrap();
-    f.shutdown().await;
     poll(&f).await;
+    f.shutdown().await;
+    assert!(f.poll_now().await.is_err());
     assert!(server.calls.lock().unwrap().is_empty());
     assert!(credentials.gets.lock().unwrap().is_empty());
     assert_eq!(count(dir.path(), "runs"), 0);

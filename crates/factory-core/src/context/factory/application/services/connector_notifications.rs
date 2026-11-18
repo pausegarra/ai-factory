@@ -35,7 +35,7 @@ fn prune_read_gates(gates: &ReadGates) {
 struct Worker {
     key: ConnectorWorkerKey,
     _read_gate: Arc<Semaphore>,
-    sender: mpsc::Sender<ConnectorNotificationJob>,
+    sender: mpsc::Sender<(ConnectorNotificationJob, u64)>,
     stop: CancellationToken,
     handle: JoinHandle<()>,
 }
@@ -120,7 +120,7 @@ impl ConnectorDispatcher {
             let task_gate=read_gate.clone();
             #[cfg(test)]
             let probe=self.read_probe.lock().unwrap().clone();
-            let (sender, mut receiver) = mpsc::channel::<ConnectorNotificationJob>(64);
+            let (sender, mut receiver) = mpsc::channel::<(ConnectorNotificationJob,u64)>(64);
             let stop = self.stop.child_token();
             let task_stop = stop.clone();
             let factory = self.factory.clone();
@@ -135,11 +135,12 @@ impl ConnectorDispatcher {
                             None => break,
                         }
                     };
+                    let (job,epoch)=job;
                     let id = job.target.connector_id.clone();
                     let result = tokio::select! {
                         biased;
                         _ = task_stop.cancelled() => break,
-                        result = deliver(&factory, transport.as_ref(), job, task_gate.clone(), &task_stop, #[cfg(test)] probe.clone()) => result,
+                        result = deliver(&factory, transport.as_ref(), job, epoch, task_gate.clone(), &task_stop, #[cfg(test)] probe.clone()) => result,
                     };
                     if let Err(code) = result {
                         eprintln!("{}", failure_line(&id, code));
@@ -154,7 +155,11 @@ impl ConnectorDispatcher {
                 handle,
             }
         });
-        if let Err(err) = worker.sender.try_send(job) {
+        let Some(factory) = self.factory.upgrade() else {
+            return;
+        };
+        let epoch = factory.maintenance.epoch();
+        if let Err(err) = worker.sender.try_send((job, epoch)) {
             let code = match err {
                 mpsc::error::TrySendError::Full(_) => DeliveryFailure::QueueFull,
                 mpsc::error::TrySendError::Closed(_) => DeliveryFailure::QueueClosed,
@@ -199,6 +204,7 @@ async fn deliver(
     factory: &Weak<Factory>,
     transport: &dyn NotificationTransport,
     job: ConnectorNotificationJob,
+    epoch: u64,
     read_gate: Arc<Semaphore>,
     stop: &CancellationToken,
     #[cfg(test)] probe: Option<mpsc::UnboundedSender<ReadProbeEvent>>,
@@ -235,10 +241,19 @@ async fn deliver(
         return Err(DeliveryFailure::QueueClosed);
     }
     let f = factory.upgrade().ok_or(DeliveryFailure::QueueClosed)?;
+    let _operation = f
+        .maintenance
+        .try_enter_at_epoch(super::maintenance::OperationKind::ExternalEffect, epoch)
+        .map_err(|_| DeliveryFailure::QueueClosed)?;
+    let reader_operation = f
+        .maintenance
+        .try_enter(super::maintenance::OperationKind::ExternalEffect)
+        .map_err(|_| DeliveryFailure::QueueClosed)?;
     let reader = f.clone();
     let read_stop = stop.clone();
     let mut credential = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _operation = reader_operation;
         if read_stop.is_cancelled() {
             return Err(anyhow::anyhow!("Notification credential unavailable"));
         }

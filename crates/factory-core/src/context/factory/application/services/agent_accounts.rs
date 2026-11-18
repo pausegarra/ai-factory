@@ -91,10 +91,16 @@ impl Drop for AccountManager {
 
 impl Factory {
     pub fn agent_accounts(&self) -> Result<Vec<AgentAccount>> {
+        let _operation = self.maintenance.try_enter(
+            crate::context::factory::application::services::maintenance::OperationKind::ReadOnly,
+        )?;
         self.store.agent_accounts()
     }
 
     pub fn codex_login_url(&self, id: &str) -> Result<String> {
+        let _operation = self.maintenance.try_enter(
+            crate::context::factory::application::services::maintenance::OperationKind::ReadOnly,
+        )?;
         validate_account_id(id)?;
         self.accounts
             .pending
@@ -149,6 +155,7 @@ impl Factory {
     }
 
     pub async fn start_codex_login(self: &Arc<Self>, label: String) -> Result<CodexLogin> {
+        let _operation=self.maintenance.try_enter(crate::context::factory::application::services::maintenance::OperationKind::ExternalEffect)?;
         let label = account_label(&label)?;
         let (account, home, executable, cancel, completion) = {
             let _gate = self.lifecycle_gate.lock().unwrap();
@@ -182,6 +189,7 @@ impl Factory {
         let root = self.root.clone();
         let mut updated = account.clone();
         tokio::spawn(async move {
+            let _operation = _operation;
             let mut sender = Some(sender);
             let result = codex_login::login(&executable, &home, cancel, &mut sender, |url| {
                 if let Some(factory) = factory.upgrade() {
@@ -233,6 +241,7 @@ impl Factory {
     }
 
     pub async fn remove_agent_account(&self, id: &str) -> Result<()> {
+        let _operation=self.maintenance.try_enter(crate::context::factory::application::services::maintenance::OperationKind::ExternalEffect)?;
         validate_account_id(id)?;
         let completion = {
             let _gate = self.lifecycle_gate.lock().unwrap();

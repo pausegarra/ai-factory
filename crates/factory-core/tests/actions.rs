@@ -131,6 +131,11 @@ fn seed_run(f: &Factory, e: &TriggerEvent, id: &str) {
         ],
     )
     .unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO run_file_origins VALUES(?1,'local')",
+        [id],
+    )
+    .unwrap();
 }
 
 #[tokio::test]

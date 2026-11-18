@@ -34,6 +34,13 @@ pub(super) fn detail_db(db: &Connection, id: &str) -> Result<RunDetail> {
     })
 }
 
+fn targets_db(db: &Connection, id: &str) -> Result<Vec<CleanupTarget>> {
+    match super::run_file_origins::origin_db(db, id)? {
+        Some(RunFileOrigin::Local) => Ok(deletion_targets(id)),
+        Some(RunFileOrigin::Imported) => Ok(Vec::new()),
+        None => anyhow::bail!("Run not found"),
+    }
+}
 fn record(db: &Connection, id: &str) -> Result<Option<DeletionRecord>> {
     let public = db.query_row("SELECT run_id,repository,number,title,attempt,state,last_error FROM run_deletions WHERE run_id=?1", [id], |r| Ok(RunDeletion {run_id:r.get(0)?,repository:r.get(1)?,number:r.get::<_,i64>(2)?.try_into().map_err(|_|rusqlite::Error::InvalidQuery)?,title:r.get(3)?,attempt:r.get(4)?,state:r.get(5)?,last_error:r.get(6)?})).optional()?;
     let Some(public) = public else {
@@ -56,7 +63,7 @@ fn record(db: &Connection, id: &str) -> Result<Option<DeletionRecord>> {
         }
         targets.push(target);
     }
-    let expected = deletion_targets(id);
+    let expected = targets_db(db, id)?;
     ensure!(
         targets.len() == expected.len() && expected.iter().all(|t| targets.contains(t)),
         "Invalid deletion targets"
@@ -112,7 +119,7 @@ impl Store {
                 r.attempt
             ],
         )?;
-        for target in deletion_targets(id) {
+        for target in targets_db(&tx, id)? {
             tx.execute(
                 "INSERT INTO run_deletion_targets(run_id,target) VALUES(?1,?2)",
                 params![id, serde_json::to_value(target)?.as_str().unwrap()],
@@ -181,7 +188,16 @@ impl Store {
         tx.execute("UPDATE dedup SET run_id='consumed' WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM issue_node_comments WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
-        tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6,?9,?10,?11) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:"),format!("version-workspace:{id}"),format!("pr-version:{id}"),format!("release-issue-close:{id}")])?;
+        if super::run_file_origins::origin_db(&tx, id)? == Some(RunFileOrigin::Imported) {
+            for prefix in ["pr-update", "pr-merge", "pr-version", "release-issue-close"] {
+                tx.execute(
+                    "DELETE FROM observations WHERE key=?1",
+                    [format!("{prefix}:{id}")],
+                )?;
+            }
+        } else {
+            tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6,?9,?10,?11) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:"),format!("version-workspace:{id}"),format!("pr-version:{id}"),format!("release-issue-close:{id}")])?;
+        }
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;
         // Keep the event consumed while any attempt still owns it, including
         // attempts whose cleanup is pending. Release it with the last deletion.
@@ -436,7 +452,12 @@ mod tests {
             .execute_batch("DROP TRIGGER fail_delete;")?;
         store.finish_deletion(&id)?;
         for key in keep {
-            assert!(store.observation(&key)?.is_some());
+            let raw: String = store.db.lock().unwrap().query_row(
+                "SELECT json FROM observations WHERE key=?1",
+                [&key],
+                |r| r.get(0),
+            )?;
+            assert_eq!(raw, r#"{"keep":true}"#);
         }
         Ok(())
     }
@@ -472,10 +493,28 @@ mod tests {
         let store = Store::open(dir.path())?;
         let id = terminal(&store, 1, "interrupted")?;
         let legacy = format!("legacy-{}", "a".repeat(32));
-        store.db.lock().unwrap().execute(
-            "UPDATE runs SET id=?2,json=json_set(json,'$.id',?2) WHERE id=?1",
-            params![id, legacy],
-        )?;
+        {
+            let mut db = store.db.lock().unwrap();
+            let tx = db.transaction()?;
+            tx.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
+            tx.execute(
+                "UPDATE runs SET id=?2,json=json_set(json,'$.id',?2) WHERE id=?1",
+                params![id, legacy],
+            )?;
+            tx.execute(
+                "UPDATE run_file_origins SET run_id=?2 WHERE run_id=?1",
+                params![id, legacy],
+            )?;
+            tx.execute(
+                "UPDATE nodes SET run_id=?2 WHERE run_id=?1",
+                params![id, legacy],
+            )?;
+            tx.execute(
+                "UPDATE dedup SET run_id=?2 WHERE run_id=?1",
+                params![id, legacy],
+            )?;
+            tx.commit()?;
+        }
         let record = store.prepare_deletion(&legacy)?.unwrap();
         assert_eq!(
             record.targets,

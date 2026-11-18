@@ -60,7 +60,7 @@ const settings = (): Settings => ({
 });
 it("does not offer an agent timeout setting", () => {
   render(
-    <SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app/data" />,
+    <SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app/data" />,
   );
 
   expect(screen.queryByLabelText(/step timeout/i)).toBeNull();
@@ -72,7 +72,7 @@ it("explains temporary workspaces without local repository controls", () => {
     { id: "legacy", repository: "owner/repo", source_path: "/old/repo" },
   ];
   render(
-    <SettingsPage settings={value} onSave={vi.fn()} appDir="/app/data" />,
+    <SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={vi.fn()} appDir="/app/data" />,
   );
 
   expect(screen.getByRole("heading", { name: "Temporary workspaces" })).toBeTruthy();
@@ -92,7 +92,7 @@ it("preserves legacy projects when saving unrelated settings", async () => {
   ];
   const save = vi.fn().mockResolvedValue(undefined);
   render(
-    <SettingsPage settings={value} onSave={save} appDir="/app/data" />,
+    <SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={save} appDir="/app/data" />,
   );
 
   githubAccounts();
@@ -108,7 +108,7 @@ it("preserves legacy projects when saving unrelated settings", async () => {
 it("keeps account tokens when replacement is typed then cleared", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(
-    <SettingsPage settings={settings()} onSave={save} appDir="/app/data" />,
+    <SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/app/data" />,
   );
   githubAccounts();
   const user = userEvent.setup();
@@ -124,7 +124,7 @@ it("keeps account tokens when replacement is typed then cleared", async () => {
 
 it("dismisses Settings save errors without discarding edits and restores page focus", async () => {
   const save = vi.fn().mockRejectedValue(new Error("fixture save denied"));
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/fixture" />);
   fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   const alert = await screen.findByRole("alert");
@@ -141,7 +141,7 @@ it("dismisses Settings save errors without discarding edits and restores page fo
 it("keeps newer Settings edits when an earlier save finishes", async () => {
   let resolve!: (value: Settings) => void;
   const save = vi.fn(() => new Promise<Settings>((done) => { resolve = done; }));
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/fixture" />);
   fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "6" } });
@@ -153,7 +153,7 @@ it("keeps newer Settings edits when an earlier save finishes", async () => {
 it("allows comma separated owners while typing", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(
-    <SettingsPage settings={settings()} onSave={save} appDir="/app/data" />,
+    <SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/app/data" />,
   );
   githubAccounts();
   const user = userEvent.setup();
@@ -318,7 +318,7 @@ it.each(["token", "poll interval"])("saves unrelated %s edits with a legacy dott
   value.flows[1].profile_activation = { work: true, removed: false };
   const original = structuredClone(value);
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={save} appDir="/app" />);
 
   if (field === "token") githubAccounts();
   fireEvent.change(screen.getByLabelText(field === "token" ? "Replace token" : "GitHub poll interval · seconds"), {
@@ -338,17 +338,17 @@ it.each(["token", "poll interval"])("saves unrelated %s edits with a legacy dott
 it("Settings validates latest activation metadata instead of stale draft flows", async () => {
   const value = settings();
   const save = vi.fn().mockResolvedValue(undefined);
-  const view = render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={save} appDir="/app" />);
   githubAccounts();
   fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "owner" } });
   const latest = structuredClone(value);
   latest.flows[0].profile_activation = { work: false };
-  view.rerender(<SettingsPage settings={latest} onSave={save} appDir="/app" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={latest} onSave={save} appDir="/app" />);
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0]).toMatchObject({ token_profiles: [{ ...value.token_profiles[0], owners: ["owner"] }], flows: latest.flows });
   latest.flows[0].profile_activation = { work: "bad" } as unknown as Record<string, boolean>;
-  view.rerender(<SettingsPage settings={structuredClone(latest)} onSave={save} appDir="/app" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={structuredClone(latest)} onSave={save} appDir="/app" />);
   fireEvent.change(screen.getByLabelText("GitHub owners"), { target: { value: "other" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   expect(screen.getByRole("alert").textContent).toMatch(/activation must contain booleans/);
@@ -357,7 +357,7 @@ it("Settings validates latest activation metadata instead of stale draft flows",
 
 it('requires a replacement token when changing an existing profile account', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app/data" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/app/data" />);
   githubAccounts();
   fireEvent.change(screen.getByLabelText('GitHub account'), {target: {value: 'another-account'}});
   fireEvent.click(screen.getByRole('button', {name: 'Save changes'}));
@@ -367,7 +367,7 @@ it('requires a replacement token when changing an existing profile account', asy
 
 vi.mock("../src/context/factory/infrastructure/ipc/factory-api", async (original) => {
   const actual = await original<typeof import("../src/context/factory/infrastructure/ipc/factory-api")>();
-  return { ...actual, native: true, factoryApi: { ...actual.factoryApi, settings: vi.fn(), importLegacy: vi.fn(), agentModels: vi.fn(async (agent: string) => agent === "codex" ? [
+  return { ...actual, native: true, factoryApi: { ...actual.factoryApi, backupRecoveryStatus: vi.fn(async () => ({required:false})), settings: vi.fn(), importLegacy: vi.fn(), agentModels: vi.fn(async (agent: string) => agent === "codex" ? [
     {id: "codex-a", name: "Codex A", efforts: ["low", "high"]},
     {id: "codex-b", name: "Codex B", efforts: ["medium"]},
   ] : [{id: "provider/open-model", name: "Open model", efforts: ["fast", "deep"]}]) } };
@@ -527,7 +527,7 @@ it("saves independent account permission scopes while preserving comma drafts an
   const value = twoAccountSettings();
   const original = structuredClone(value);
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={value} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={value} onSave={save} appDir="/app" />);
   githubAccounts();
   const work = accountFields("Work (@worker)");
   const personal = accountFields("Personal (@alice)");
@@ -548,7 +548,7 @@ it("saves independent account permission scopes while preserving comma drafts an
 });
 
 it("discards each account scope draft and leaves new accounts unscoped", () => {
-  render(<SettingsPage settings={twoAccountSettings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={twoAccountSettings()} onSave={vi.fn()} appDir="/app" />);
   githubAccounts();
   fireEvent.change(accountFields("Work (@worker)").getByLabelText("GitHub owners"), { target: { value: "other-org, " } });
   fireEvent.change(accountFields("Personal (@alice)").getByLabelText("Allowed reviewers"), { target: { value: "worker, " } });
@@ -566,7 +566,7 @@ it("reloads all per-account scope inputs after legacy import", async () => {
   imported.token_profiles[1].authors = ["alice"];
   vi.mocked(factoryApi.settings).mockResolvedValue(imported);
   vi.mocked(factoryApi.importLegacy).mockResolvedValue({ runs_imported: 0, settings_imported: true, archive_path: "/archive", warnings: [] });
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
   fireEvent.click(screen.getByRole("button", { name: "Import data" }));
   const importSuccess = await screen.findByRole("status");
@@ -585,7 +585,7 @@ it("does not let an import refresh overwrite a newer settings draft", async () =
   const refresh = deferred<Settings>();
   vi.mocked(factoryApi.settings).mockReturnValueOnce(refresh.promise);
   vi.mocked(factoryApi.importLegacy).mockResolvedValue({ runs_imported: 1, settings_imported: true, archive_path: "/archive", warnings: [] });
-  render(<SettingsPage settings={settings()} onSave={vi.fn()} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={vi.fn()} appDir="/app" />);
   fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
   fireEvent.click(screen.getByRole("button", { name: "Import data" }));
   await waitFor(() => expect(factoryApi.settings).toHaveBeenCalled());
@@ -598,7 +598,7 @@ it("does not let an import refresh overwrite a newer settings draft", async () =
 
 it.each(["GitHub owners", "Allowed authors", "Allowed reviewers"])("rejects malformed logins in per-account %s", async (label) => {
   const save = vi.fn();
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/app" />);
   githubAccounts();
   fireEvent.change(accountFields("Work (@worker)").getByLabelText(label), { target: { value: "valid-login, owner/repo" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -608,7 +608,7 @@ it.each(["GitHub owners", "Allowed authors", "Allowed reviewers"])("rejects malf
 
 it("preserves backend-compatible bot and legacy logins in each account scope", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/app" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/app" />);
   githubAccounts();
   for (const label of ["GitHub owners", "Allowed authors", "Allowed reviewers"]) {
     fireEvent.change(accountFields("Work (@worker)").getByLabelText(label), { target: { value: "dependabot[bot], legacy_login.name" } });
@@ -653,17 +653,17 @@ it("does not carry a model catalog error from one selected workflow step to anot
 it("preserves connectors refreshed while general settings are dirty", async () => {
   const original = settings();
   const onSave = vi.fn(async (value: Settings) => value);
-  const view = render(<SettingsPage settings={original} onSave={onSave} appDir="/fixture/data" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={original} onSave={onSave} appDir="/fixture/data" />);
   fireEvent.change(screen.getByLabelText("Concurrent tasks"), { target: { value: "5" } });
   const connector = {id:"external-team",label:"Team",enabled:false,events:[],type:"telegram",config:{chat_id:"",has_token:false,triggers:["new_issue"],token_profile_ids:["work"]}};
-  view.rerender(<SettingsPage settings={{...original, notification_connectors:[connector]}} onSave={onSave} appDir="/fixture/data" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={{...original, notification_connectors:[connector]}} onSave={onSave} appDir="/fixture/data" />);
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
   expect(onSave.mock.calls[0][0].max_concurrent).toBe(5);
   expect(onSave.mock.calls[0][0].notification_connectors).toEqual([connector]);
 });
 it("follows global only for inherited trigger fields", () => {
-  render(<SettingsPage settings={{ ...settings(), max_concurrent: 8 }} onSave={vi.fn()} appDir="/fixture" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={{ ...settings(), max_concurrent: 8 }} onSave={vi.fn()} appDir="/fixture" />);
   const issue = screen.getByLabelText("New issue concurrent tasks") as HTMLInputElement;
   const review = screen.getByLabelText("PR review concurrent tasks") as HTMLInputElement;
   expect(issue.disabled).toBe(true);
@@ -679,7 +679,7 @@ it("persists independent trigger ceilings and restores inheritance on discard", 
   original.flows[0].max_parallel = 2;
   original.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false, triggers: ["new_issue"], token_profile_ids: ["work"] } }];
   const save = vi.fn(async (value: Settings) => value);
-  const view = render(<SettingsPage settings={original} onSave={save} appDir="/fixture" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={original} onSave={save} appDir="/fixture" />);
   for (const [name, label, limit] of [["new issue", "New issue", "4"], ["PR review", "PR review", "4"], ["PR approved", "PR approved", "2"]]) {
     fireEvent.click(screen.getByRole("checkbox", { name: `Use global capacity for ${name}` }));
     fireEvent.change(screen.getByLabelText(`${label} concurrent tasks`), { target: { value: limit } });
@@ -690,7 +690,7 @@ it("persists independent trigger ceilings and restores inheritance on discard", 
   expect(saved.trigger_max_concurrent).toEqual({ new_issue: 4, pr_review: 4, pr_approved: 2 });
   expect(saved.flows).toEqual(original.flows);
   expect(saved.notification_connectors).toEqual(original.notification_connectors);
-  view.rerender(<SettingsPage settings={saved} onSave={save} appDir="/fixture" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={saved} onSave={save} appDir="/fixture" />);
   expect((screen.getByLabelText("PR approved concurrent tasks") as HTMLInputElement).value).toBe("2");
   fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for PR approved" }));
   expect((screen.getByLabelText("PR approved concurrent tasks") as HTMLInputElement).value).toBe("8");
@@ -702,7 +702,7 @@ it("persists independent trigger ceilings and restores inheritance on discard", 
 for (const [label, inherit] of [["Concurrent tasks", undefined], ["New issue concurrent tasks", "new issue"], ["PR review concurrent tasks", "PR review"], ["PR approved concurrent tasks", "PR approved"], ["Release concurrent tasks", "release"]] as const) {
   it.each(["0", "-1", "1.5", "65", "", "text"])(`rejects invalid ${label} input %s without saving`, invalid => {
     const save = vi.fn();
-    render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+    render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/fixture" />);
     if (inherit) fireEvent.click(screen.getByRole("checkbox", { name: `Use global capacity for ${inherit}` }));
     fireEvent.change(screen.getByLabelText(label), { target: { value: invalid } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -714,7 +714,7 @@ for (const [label, inherit] of [["Concurrent tasks", undefined], ["New issue con
 it("preserves a newer trigger draft when an earlier save completes", async () => {
   const pending = deferred<Settings>();
   const save = vi.fn().mockReturnValueOnce(pending.promise).mockImplementation(async value => value);
-  render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/fixture" />);
   fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for new issue" }));
   fireEvent.change(screen.getByLabelText("New issue concurrent tasks"), { target: { value: "2" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -732,7 +732,7 @@ it("keeps trigger edits across import refresh and preserves fresh workflow and c
   vi.mocked(factoryApi.importLegacy).mockResolvedValue({ runs_imported: 0, settings_imported: true, archive_path: "/archive", warnings: [] });
   const original = settings();
   const save = vi.fn(async (value: Settings) => value);
-  const view = render(<SettingsPage settings={original} onSave={save} appDir="/fixture" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={original} onSave={save} appDir="/fixture" />);
   fireEvent.change(screen.getByLabelText("Previous YAML config"), { target: { value: "/old/config.yaml" } });
   fireEvent.click(screen.getByRole("button", { name: "Import data" }));
   await waitFor(() => expect(factoryApi.settings).toHaveBeenCalled());
@@ -743,7 +743,7 @@ it("keeps trigger edits across import refresh and preserves fresh workflow and c
   const refreshed = structuredClone(original);
   refreshed.flows[0].max_parallel = 3;
   refreshed.notification_connectors = [{ id: "team", label: "Team", enabled: false, events: [], type: "telegram", config: { chat_id: "", has_token: false, triggers: ["new_issue"], token_profile_ids: ["work"] } }];
-  view.rerender(<SettingsPage settings={refreshed} onSave={save} appDir="/fixture" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={refreshed} onSave={save} appDir="/fixture" />);
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0].trigger_max_concurrent).toEqual({ pr_review: 2 });
@@ -753,14 +753,14 @@ it("keeps trigger edits across import refresh and preserves fresh workflow and c
 
 it("saves an explicit Release ceiling and then restores global inheritance", async () => {
   const save = vi.fn(async (value: Settings) => value);
-  const view = render(<SettingsPage settings={settings()} onSave={save} appDir="/fixture" />);
+  const view = render(<SettingsPage onApplyBackupImport={vi.fn()} settings={settings()} onSave={save} appDir="/fixture" />);
   fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for release" }));
   fireEvent.change(screen.getByLabelText("Release concurrent tasks"), { target: { value: "2" } });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   const stored = save.mock.calls[0][0];
   expect(stored.trigger_max_concurrent).toEqual({ release: 2 });
-  view.rerender(<SettingsPage settings={stored} onSave={save} appDir="/fixture" />);
+  view.rerender(<SettingsPage onApplyBackupImport={vi.fn()} settings={stored} onSave={save} appDir="/fixture" />);
   fireEvent.click(screen.getByRole("checkbox", { name: "Use global capacity for release" }));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(2));

@@ -20,7 +20,7 @@ const mocked = vi.hoisted(() => ({
 }));
 vi.mock("../src/context/factory/infrastructure/ipc/factory-api", () => ({
   native: true,
-  factoryApi: {
+  factoryApi: { backupRecoveryStatus: vi.fn(async () => ({required:false})),
     settings: vi.fn(),
     agentModels: vi.fn(async () => []),
     snapshot: vi.fn(),
@@ -365,4 +365,35 @@ it("rehydrates saved account scopes from canonical backend settings without leav
   fireEvent.click(screen.getByRole("button", { name: "Overview" }));
   expect(screen.queryByRole("alertdialog")).toBeNull();
   expect(screen.getByRole("heading", { name: "Factory overview." })).toBeTruthy();
+});
+
+it("ignores a snapshot response captured before a backup import event", async () => {
+  vi.mocked(factoryApi.settings).mockResolvedValue(settings);
+  let staleResolve!: (value: Snapshot) => void;
+  let freshResolve!: (value: Snapshot) => void;
+  vi.mocked(factoryApi.snapshot).mockResolvedValueOnce(snapshot)
+    .mockImplementationOnce(() => new Promise(resolve => {staleResolve = resolve;}))
+    .mockImplementationOnce(() => new Promise(resolve => {freshResolve = resolve;}));
+  render(<App/>);
+  await screen.findByRole("heading",{name:"Factory overview."});
+  fireEvent.click(screen.getByRole("button",{name:"Runs"}));
+  act(() => {for (const listener of mocked.listeners) listener({kind:"history_imported",timestamp:"now"});});
+  await waitFor(() => expect(staleResolve).toBeTypeOf("function"));
+  act(() => {for (const listener of mocked.listeners) listener({kind:"backup_imported",timestamp:"now"});});
+  await act(async () => {staleResolve({...snapshot,runs:[{...run,title:"[AI] stale backup response"}]});});
+  await waitFor(() => expect(freshResolve).toBeTypeOf("function"));
+  expect(screen.queryByText("[AI] stale backup response")).toBeNull();
+  await act(async () => {freshResolve(snapshot);});
+});
+
+it("clears a selected run detail when imported history reuses its ID", async () => {
+  vi.mocked(factoryApi.settings).mockResolvedValue(settings);
+  vi.mocked(factoryApi.snapshot).mockResolvedValue({...snapshot,runs:[run]});
+  vi.mocked(factoryApi.detail).mockResolvedValue({state:"available",detail:{run,flow:settings.flows[0],event:{},nodes:[]}});
+  render(<App/>);await screen.findByRole("heading",{name:"Factory overview."});
+  fireEvent.click(screen.getByRole("button",{name:"Runs"}));
+  fireEvent.click(await screen.findByText(run.title));
+  await screen.findByRole("heading",{name:run.title});
+  act(() => {for (const listener of mocked.listeners) listener({kind:"backup_imported",timestamp:"now"});});
+  await waitFor(() => expect(screen.queryByRole("heading",{name:run.title})).toBeNull());
 });

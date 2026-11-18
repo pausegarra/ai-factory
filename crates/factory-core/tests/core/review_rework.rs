@@ -161,7 +161,6 @@ data='{}'"#,
             std::fs::write(memory.join(format!("release-{round}")), "").unwrap();
         }
         let detail = terminal(&factory, &id).await;
-        factory.shutdown().await;
         assert_eq!(detail.run.status, "succeeded", "{:?}", detail.nodes);
         assert_eq!(detail.run.attempt, 1);
         assert!(factory
@@ -169,6 +168,7 @@ data='{}'"#,
             .unwrap_err()
             .to_string()
             .contains("disabled globally"));
+        factory.shutdown().await;
         for node in ["builder", "review_a", "review_b", "review_c"] {
             assert_eq!(
                 std::fs::read_to_string(memory.join(format!("{node}.count"))).unwrap(),

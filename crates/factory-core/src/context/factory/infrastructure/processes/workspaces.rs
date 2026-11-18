@@ -110,6 +110,9 @@ pub(crate) async fn cleanup(
 pub(crate) fn recover(root: &Path, store: &Store, cleaner: &dyn RunCleanup) -> Result<Vec<String>> {
     let mut errors = Vec::new();
     for run in store.runs()? {
+        if store.run_file_origin(&run.id)? != Some(crate::RunFileOrigin::Local) {
+            continue;
+        }
         if ["queued", "running"].contains(&run.status.as_str())
             || uuid::Uuid::parse_str(&run.id).is_err()
         {

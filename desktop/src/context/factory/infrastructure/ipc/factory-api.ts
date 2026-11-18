@@ -1,3 +1,4 @@
+import type { BackupSelection, BackupInspection, PreparedBackupImport, BackupOutcome, BackupRecoveryStatus } from "../../application/dto/backup";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -70,7 +71,18 @@ function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
     );
   return invoke<T>(name, args);
 }
+function backupCommand<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+  if (!native) return Promise.reject({ code: "desktop_required", category: null, message: "Open AI Factory desktop to manage backups" });
+  return invoke<T>(name, args);
+}
 export const factoryApi = {
+  exportBackup: (path: string, selection: BackupSelection, password: string | null) => backupCommand<BackupOutcome>("export_backup", { path, selection, password: selection.components.includes("credentials") ? password : null }),
+  inspectBackup: (path: string) => backupCommand<BackupInspection>("inspect_backup", { path }),
+  prepareBackupImport: (path: string, selection: BackupSelection, password: string | null) => backupCommand<PreparedBackupImport>("prepare_backup_import", { path, selection, password: selection.components.includes("credentials") ? password : null }),
+  applyBackupImport: (confirmationId: string, confirmed: boolean, password: string | null) => backupCommand<BackupOutcome>("apply_backup_import", { confirmationId, confirmed, password }),
+  discardBackupImport: (confirmationId: string) => backupCommand<void>("discard_backup_import", { confirmationId }),
+  recoverBackupImport: () => backupCommand<void>("recover_backup_import"),
+  backupRecoveryStatus: () => backupCommand<BackupRecoveryStatus>("get_backup_recovery_status"),
   agentUsage: (agent: Agent): Promise<AgentUsage> => native
     ? command<AgentUsage>("get_agent_usage", { agent })
     : Promise.resolve({ agent, status: "preview", entries: [], checked_at: new Date().toISOString(), code: "desktop_required" }),

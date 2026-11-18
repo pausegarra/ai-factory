@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ActiveWorker {
+    _maintenance: super::maintenance::OperationPermit,
     event_id: String,
     trigger_id: String,
     cancel: CancellationToken,
@@ -51,6 +52,12 @@ impl QueuedWorkerScan {
 }
 
 pub struct Factory {
+    pub(crate) maintenance: super::maintenance::MaintenanceGate,
+    pub(crate) backup_registry: Mutex<
+        crate::context::factory::application::use_cases::backup::registry::BackupImportRegistry,
+    >,
+    pub(crate) backup_archive:
+        Arc<dyn crate::context::factory::application::interfaces::backup_archive::BackupArchive>,
     pub(crate) usage: super::agent_usage::UsageManager,
     pub(crate) accounts: super::agent_accounts::AccountManager,
     _process_lock: std::fs::File,
@@ -76,6 +83,8 @@ pub struct Factory {
     run_notification_sink: Mutex<Arc<dyn RunNotificationSink>>,
 }
 
+#[cfg(test)]
+mod settings_update_tests;
 #[cfg(test)]
 mod worker_tests;
 
@@ -128,20 +137,30 @@ impl Factory {
         fs2::FileExt::try_lock_exclusive(&process_lock)
             .context("AI Factory is already using this application data directory")?;
         let store = Store::open_with_credentials(&root, credentials)?;
-        let cleanup = Arc::new(LocalRunCleanup::open(&root)?);
-        for record in store.pending_deletions()? {
-            crate::context::factory::application::use_cases::delete_run::resume(
-                &store,
-                cleanup.as_ref(),
-                &record.public.run_id,
-            )?;
+        let maintenance = super::maintenance::MaintenanceGate::default();
+        let recovery_pending = store.backup_pending()?;
+        if recovery_pending {
+            maintenance.require_recovery();
         }
-        let cleanup_errors =
+        let cleanup = Arc::new(LocalRunCleanup::open(&root)?);
+        if !recovery_pending {
+            for record in store.pending_deletions()? {
+                crate::context::factory::application::use_cases::delete_run::resume(
+                    &store,
+                    cleanup.as_ref(),
+                    &record.public.run_id,
+                )?;
+            }
+        }
+        let cleanup_errors = if recovery_pending {
+            vec!["Unlock the credential store and retry recovery".into()]
+        } else {
             crate::context::factory::infrastructure::processes::workspaces::recover(
                 &root,
                 &store,
                 cleanup.as_ref(),
-            )?;
+            )?
+        };
         let (events, _) = broadcast::channel(4096);
         let status = ServiceStatus {
             running: false,
@@ -151,6 +170,9 @@ impl Factory {
             app_data_dir: root.to_string_lossy().into(),
         };
         Ok(Arc::new(Self {
+            maintenance,
+            backup_registry:Mutex::new(Default::default()),
+            backup_archive:Arc::new(crate::context::factory::infrastructure::filesystem::backup_archive::ZipBackupArchive),
             _process_lock: process_lock,
             accounts: super::agent_accounts::AccountManager::default(),
             usage: super::agent_usage::UsageManager::new(Arc::new(
@@ -175,6 +197,26 @@ impl Factory {
             notification_transport: transport,
             run_notification_sink: Mutex::new(Arc::new(NoopRunNotificationSink)),
         }))
+    }
+    pub(crate) fn complete_backup_recovery(&self) -> Result<Vec<String>> {
+        self.store.complete_backup_startup()?;
+        for record in self.store.pending_deletions()? {
+            crate::context::factory::application::use_cases::delete_run::resume(
+                &self.store,
+                self.cleanup.as_ref(),
+                &record.public.run_id,
+            )?;
+        }
+        crate::context::factory::infrastructure::processes::workspaces::recover(
+            &self.root,
+            &self.store,
+            self.cleanup.as_ref(),
+        )
+    }
+    pub(crate) fn reconcile_backup_dispatchers(&self) {
+        if let Some(dispatcher) = self.connector_dispatcher.lock().unwrap().as_ref() {
+            dispatcher.reconcile(&HashMap::new());
+        }
     }
     pub fn start_notification_delivery(self: &Arc<Self>) {
         let _gate = self.lifecycle_gate.lock().unwrap();
@@ -230,6 +272,9 @@ impl Factory {
         }
     }
     pub(crate) fn claim_run_for_execution(&self, id: &str) -> Result<bool> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         let _gate = self.lifecycle_gate.lock().unwrap();
         let transition = self.store.claim_queued_transition(id)?;
         let claimed = transition.is_some();
@@ -237,6 +282,9 @@ impl Factory {
         Ok(claimed)
     }
     pub fn settings(&self) -> Result<Settings> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ReadOnly)?;
         self.store.public_settings()
     }
     pub async fn agent_models(&self, agent: &str) -> Result<Vec<AgentModel>> {
@@ -247,6 +295,9 @@ impl Factory {
         agent: &str,
         token_profile_id: Option<&str>,
     ) -> Result<Vec<AgentModel>> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ExternalEffect)?;
         let settings = self.store.public_settings()?;
         let executable = match agent {
             "codex" => &settings.commands.codex,
@@ -271,7 +322,39 @@ impl Factory {
             result = crate::context::factory::infrastructure::processes::agent_models::discover_with_home(agent, executable, &self.root, lease.as_ref().map(|lease| lease.home.as_path())) => result,
         }
     }
-    pub fn save_settings(&self, mut s: Settings) -> Result<Settings> {
+    /// Admit the complete OS update, persistence and any compensation as one operation.
+    pub fn save_settings_with_startup(
+        &self,
+        settings: Settings,
+        startup: &mut dyn crate::context::factory::application::interfaces::startup_registration::StartupRegistration,
+    ) -> Result<Settings> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
+        settings.validate()?;
+        let current = startup.is_enabled()?;
+        let desired = settings.start_at_login;
+        if current == desired {
+            return self.save_settings_admitted(settings);
+        }
+        startup.set_enabled(desired)?;
+        match self.save_settings_admitted(settings) {
+            Ok(value) => Ok(value),
+            Err(error) => match startup.set_enabled(current) {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    Err(error.context(format!("Could not restore login setting: {rollback:#}")))
+                }
+            },
+        }
+    }
+    pub fn save_settings(&self, s: Settings) -> Result<Settings> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
+        self.save_settings_admitted(s)
+    }
+    fn save_settings_admitted(&self, mut s: Settings) -> Result<Settings> {
         let _gate = self.lifecycle_gate.lock().unwrap();
         for profile in &mut s.token_profiles {
             profile.account = profile.account.to_lowercase();
@@ -299,13 +382,16 @@ impl Factory {
         }
         self.emit("settings_changed", None, None);
         self.wake.notify_one();
-        self.settings()
+        self.store.public_settings()
     }
     pub fn import_legacy(
         &self,
         config_path: Option<PathBuf>,
         database_path: Option<PathBuf>,
     ) -> Result<ImportReport> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         let _gate = self.lifecycle_gate.lock().unwrap();
         ensure!(
             self.active.lock().unwrap().is_empty(),
@@ -347,6 +433,9 @@ impl Factory {
         });
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ReadOnly)?;
         let _gate = self.lifecycle_gate.lock().unwrap();
         let (runs, deletions) = self.store.snapshot_history()?;
         let settings = self.store.public_settings()?;
@@ -398,9 +487,15 @@ impl Factory {
         })
     }
     pub fn run_detail(&self, id: &str) -> Result<RunDetail> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ReadOnly)?;
         self.store.detail(id)
     }
     pub fn enqueue(&self, e: TriggerEvent) -> Result<Option<String>> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         ensure!(
             valid_repository(&e.repository) && e.number > 0 && valid_login(&e.actor),
             "Invalid event identity"
@@ -418,6 +513,9 @@ impl Factory {
         comments: &[u64],
         approved: bool,
     ) -> Result<Option<String>> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         ensure!(
             valid_repository(&e.repository) && e.number > 0 && valid_login(&e.actor),
             "Invalid event identity"
@@ -447,6 +545,9 @@ impl Factory {
         reviewer: &str,
         candidates: &[TriggerEvent],
     ) -> Result<Vec<String>> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         ensure!(
             valid_login(owner) && valid_login(reviewer),
             "Invalid review scan identity"
@@ -478,7 +579,25 @@ impl Factory {
         Ok(ids)
     }
     pub fn set_run_status(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         let _gate = self.lifecycle_gate.lock().unwrap();
+        self.set_run_status_inner(id, status, error)
+    }
+    // The worker already owns admission through its ActiveWorker reservation.
+    // Keep cleanup/status writes possible after shutdown closes new admission.
+    pub(crate) fn set_worker_run_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<String>,
+    ) -> Result<()> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
+        ensure!(
+            self.active.lock().unwrap().contains_key(id),
+            "Execution reservation required"
+        );
         self.set_run_status_inner(id, status, error)
     }
     fn set_run_status_inner(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
@@ -514,6 +633,9 @@ impl Factory {
         Ok(())
     }
     pub fn cancel(&self, id: &str) -> Result<()> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         let _gate = self.lifecycle_gate.lock().unwrap();
         let d = self.store.detail(id)?;
         ensure!(
@@ -535,6 +657,9 @@ impl Factory {
         Ok(())
     }
     pub fn retry(&self, id: &str) -> Result<String> {
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::Mutating)?;
         let _gate = self.lifecycle_gate.lock().unwrap();
         // Pending deletions are hidden by detail; keep that check under the gate.
         self.store.detail(id)?;
@@ -544,7 +669,9 @@ impl Factory {
         Ok(id)
     }
     pub fn logs(&self, run: &str, node: &str, offset: u64) -> Result<LogChunk> {
-        self.store.load_redaction_secrets()?;
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ReadOnly)?;
         use std::io::{Read, Seek, SeekFrom};
         let d = self.store.detail(run)?;
         let n = d
@@ -552,6 +679,19 @@ impl Factory {
             .iter()
             .find(|n| n.id == node)
             .context("Node not found")?;
+        if self.store.run_file_origin(run)? == Some(RunFileOrigin::Imported) {
+            return Ok(LogChunk {
+                text: String::new(),
+                offset: 0,
+                next_offset: 0,
+                eof: true,
+            });
+        }
+        ensure!(
+            valid_deletion_id(run) && safe_id(node),
+            "Invalid log identity"
+        );
+        self.store.load_redaction_secrets()?;
         let path = self
             .root
             .join("sessions")
@@ -595,6 +735,12 @@ impl Factory {
         })
     }
     pub(crate) fn register_queued_worker(&self, id: &str) -> Result<Option<CancellationToken>> {
+        let Ok(maintenance) = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ExternalEffect)
+        else {
+            return Ok(None);
+        };
         let Ok(_gate) = self.lifecycle_gate.try_lock() else {
             return Ok(None);
         };
@@ -604,7 +750,9 @@ impl Factory {
         let Ok(detail) = self.store.detail(id) else {
             return Ok(None);
         };
-        if detail.run.status != "queued" {
+        if self.store.run_file_origin(id)? != Some(RunFileOrigin::Local)
+            || detail.run.status != "queued"
+        {
             return Ok(None);
         }
         let settings = self.store.public_settings()?;
@@ -629,6 +777,7 @@ impl Factory {
         active.insert(
             id.into(),
             ActiveWorker {
+                _maintenance: maintenance,
                 event_id: detail.run.event_id,
                 trigger_id: detail.run.trigger_id,
                 cancel: cancel.clone(),
@@ -652,63 +801,70 @@ impl Factory {
                 if f.stop.is_cancelled() {
                     break;
                 }
-                let s = match f.store.public_settings() {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                if last.elapsed().as_secs() >= s.poll_interval_seconds
-                    && !f.service.lock().unwrap().polling
-                {
-                    let p = f.clone();
-                    tokio::spawn(async move {
-                        let _ = p.poll_now().await;
-                    });
-                    last = std::time::Instant::now();
-                }
-                if let Ok(runs) = f.store.runs() {
-                    let mut scan = QueuedWorkerScan::default();
-                    for r in runs.into_iter().rev().filter(|r| r.status == "queued") {
-                        let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id) else {
-                            continue;
-                        };
-                        let worker = f.clone();
+                let cycle = f
+                    .maintenance
+                    .try_enter(super::maintenance::OperationKind::ReadOnly);
+                if let Ok(_cycle) = cycle {
+                    let s = match f.store.public_settings() {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    if last.elapsed().as_secs() >= s.poll_interval_seconds
+                        && !f.service.lock().unwrap().polling
+                    {
+                        let p = f.clone();
                         tokio::spawn(async move {
-                            let result = worker.execute(&r.id, c).await;
-                            if let Err(e) = result {
-                                let status = worker.store.detail(&r.id).ok().map(|d| d.run.status);
-                                if status.as_deref() != Some("cancelled") {
-                                    let _ = worker.set_run_status(
+                            let _ = p.poll_now().await;
+                        });
+                        last = std::time::Instant::now();
+                    }
+                    if let Ok(runs) = f.store.runs() {
+                        let mut scan = QueuedWorkerScan::default();
+                        for r in runs.into_iter().rev().filter(|r| r.status == "queued") {
+                            let Ok(Some(c)) = scan.reserve(&f, &r.id, &r.trigger_id) else {
+                                continue;
+                            };
+                            let worker = f.clone();
+                            tokio::spawn(async move {
+                                let result = worker.execute(&r.id, c).await;
+                                if let Err(e) = result {
+                                    let status =
+                                        worker.store.detail(&r.id).ok().map(|d| d.run.status);
+                                    if status.as_deref() != Some("cancelled") {
+                                        let _ = worker.set_worker_run_status(
+                                            &r.id,
+                                            "failed",
+                                            Some(worker.redact(&format!("{e:#}"))),
+                                        );
+                                    }
+                                }
+                                if worker
+                                    .store
+                                    .detail(&r.id)
+                                    .is_ok_and(|d| d.run.status == "running")
+                                {
+                                    let status = if worker.stop.is_cancelled() {
+                                        "interrupted"
+                                    } else {
+                                        "cancelled"
+                                    };
+                                    let _ = worker.set_worker_run_status(
                                         &r.id,
-                                        "failed",
-                                        Some(worker.redact(&format!("{e:#}"))),
+                                        status,
+                                        Some("Execution stopped before completion".into()),
                                     );
                                 }
-                            }
-                            if worker
-                                .store
-                                .detail(&r.id)
-                                .is_ok_and(|d| d.run.status == "running")
-                            {
-                                let status = if worker.stop.is_cancelled() {
-                                    "interrupted"
-                                } else {
-                                    "cancelled"
-                                };
-                                let _ = worker.set_run_status(
-                                    &r.id,
-                                    status,
-                                    Some("Execution stopped before completion".into()),
-                                );
-                            }
-                            {
-                                let _gate = worker.lifecycle_gate.lock().unwrap();
-                                let removed = worker.active.lock().unwrap().remove(&r.id).is_some();
-                                if removed {
-                                    worker.emit("capacity_changed", Some(&r.id), None);
+                                {
+                                    let _gate = worker.lifecycle_gate.lock().unwrap();
+                                    let removed =
+                                        worker.active.lock().unwrap().remove(&r.id).is_some();
+                                    if removed {
+                                        worker.emit("capacity_changed", Some(&r.id), None);
+                                    }
                                 }
-                            }
-                            worker.wake.notify_one();
-                        });
+                                worker.wake.notify_one();
+                            });
+                        }
                     }
                 }
                 tokio::select! {_=f.stop.cancelled()=>break,_=f.wake.notified()=>{},_=tokio::time::sleep(std::time::Duration::from_millis(300))=>{}}
@@ -718,6 +874,8 @@ impl Factory {
         });
     }
     pub async fn shutdown(&self) {
+        self.maintenance.request_shutdown();
+        self.maintenance.wait_for_restore_completion().await;
         {
             let _gate = self.lifecycle_gate.lock().unwrap();
             self.stop.cancel();
@@ -747,6 +905,9 @@ impl Factory {
     }
     pub async fn poll_now(&self) -> Result<()> {
         let _guard = self.poll_lock.lock().await;
+        let _operation = self
+            .maintenance
+            .try_enter(super::maintenance::OperationKind::ExternalEffect)?;
         self.service.lock().unwrap().polling = true;
         self.emit("service_changed", None, None);
         let result = Github::poll(self).await;

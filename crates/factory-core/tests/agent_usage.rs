@@ -261,5 +261,8 @@ done"#,
             "fixture process survived shutdown"
         );
     }
-    factory.remove_agent_account(id).await.unwrap();
+    assert!(factory.remove_agent_account(id).await.is_err());
+    drop(factory);
+    let reopened = common::open(dir.path().join("data")).unwrap();
+    reopened.remove_agent_account(id).await.unwrap();
 }

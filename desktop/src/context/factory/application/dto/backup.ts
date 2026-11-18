@@ -1,0 +1,10 @@
+export type BackupComponent = "configuration" | "history" | "credentials";
+export type BackupSelection = { components: BackupComponent[] };
+export type BackupWarning = { code: string; category: BackupComponent; entity_id: string | null };
+export type BackupInspection = { archive_sha256: string; archive_id: string; components: BackupComponent[]; encrypted_credentials: boolean };
+export type PreparedBackupImport = { confirmation_id: string; replace: BackupComponent[]; preserve: BackupComponent[]; counts: Record<string, number>; warnings: BackupWarning[] };
+export type BackupOutcome = { committed: boolean; components: BackupComponent[]; path: string | null; counts: Record<string, number>; warnings: BackupWarning[] };
+export type BackupFailure = { code: string; category: BackupComponent | null; message: string };
+export type BackupRecoveryStatus = { required: boolean };
+export type BackupApplyResult = { outcome: BackupOutcome; refresh_error: string | null };
+export type ApplyBackupImport = (confirmationId: string, confirmed: boolean, password: string | null) => Promise<BackupApplyResult>;

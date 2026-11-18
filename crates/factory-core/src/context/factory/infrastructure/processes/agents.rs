@@ -304,7 +304,7 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
         let event = &detail.event;
         if status == "succeeded" && release_completion::is_publication(&detail) {
             if !release_completion::confirmed(&detail) {
-                factory.set_run_status(id, "blocked", Some("Release publication was not confirmed; issue left open. Return data.distribution_result.published=true only after verified publication.".into()))?;
+                factory.set_worker_run_status(id, "blocked", Some("Release publication was not confirmed; issue left open. Return data.distribution_result.published=true only after verified publication.".into()))?;
                 return Ok(());
             }
             release_completion::record_pending(factory, &detail)?;
@@ -324,7 +324,7 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
                     && receipt["head_sha"] == event.head_sha
             });
         if status == "succeeded" && event.trigger_id == "pr_approved" && !merge_confirmed {
-            factory.set_run_status(
+            factory.set_worker_run_status(
                 id,
                 "blocked",
                 Some("Approved PR workflow finished without a merge action; merge and source branch cleanup were not confirmed by Factory.".into()),
@@ -346,7 +346,7 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
                         && receipt["head_sha"] == event.head_sha
                 })
         {
-            factory.set_run_status(
+            factory.set_worker_run_status(
                 id,
                 "blocked",
                 Some(
@@ -367,7 +367,7 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
             } else {
                 None
             };
-            factory.set_run_status(id, status, error)?;
+            factory.set_worker_run_status(id, status, error)?;
         }
     }
     Ok(())

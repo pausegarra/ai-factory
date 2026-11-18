@@ -92,3 +92,17 @@ it("preserves both automatic issue comment values through settings IPC", async (
     expect(invoke).toHaveBeenLastCalledWith("get_settings");
   }
 });
+
+it("uses selective backup IPC and never sends unused passwords", async () => {
+  await factoryApi.exportBackup("/fixture/history.zip", { components: ["history"] }, "unused");
+  expect(invoke).toHaveBeenLastCalledWith("export_backup", { path: "/fixture/history.zip", selection: {components:["history"]}, password:null });
+  await factoryApi.inspectBackup("/fixture/history.zip");
+  expect(invoke).toHaveBeenLastCalledWith("inspect_backup", { path:"/fixture/history.zip" });
+  await factoryApi.prepareBackupImport("/fixture/history.zip", {components:["history"]}, null);
+  expect(invoke).toHaveBeenLastCalledWith("prepare_backup_import", {path:"/fixture/history.zip",selection:{components:["history"]},password:null});
+  await factoryApi.applyBackupImport("ticket-89", true, "fixture password 89");
+  expect(invoke).toHaveBeenLastCalledWith("apply_backup_import", {confirmationId:"ticket-89",confirmed:true,password:"fixture password 89"});
+  await factoryApi.discardBackupImport("ticket-89");expect(invoke).toHaveBeenLastCalledWith("discard_backup_import",{confirmationId:"ticket-89"});
+  await factoryApi.recoverBackupImport();expect(invoke).toHaveBeenLastCalledWith("recover_backup_import",undefined);
+  await factoryApi.backupRecoveryStatus();expect(invoke).toHaveBeenLastCalledWith("get_backup_recovery_status",undefined);
+});

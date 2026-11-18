@@ -7,10 +7,16 @@ use std::sync::{Arc, Mutex};
 
 impl Factory {
     pub fn run_view(&self, id: &str) -> Result<RunView> {
+        let _operation = self.maintenance.try_enter(
+            crate::context::factory::application::services::maintenance::OperationKind::ReadOnly,
+        )?;
         self.store.run_view(id)
     }
 
     pub fn delete_run(&self, id: &str) -> Result<DeleteRunOutcome> {
+        let _operation = self.maintenance.try_enter(
+            crate::context::factory::application::services::maintenance::OperationKind::Mutating,
+        )?;
         ensure!(valid_deletion_id(id), "Invalid run ID");
         let lock = {
             let mut locks = self.deletion_locks.lock().unwrap();

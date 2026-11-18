@@ -74,7 +74,7 @@ pub(super) fn capture(
     tx.execute("INSERT INTO issue_node_comments(key,run_id,node_id,revision,snapshot,state,next_at) VALUES(?1,?2,?3,?4,?5,'pending',?6)",params![key,run,node.id,revision,serde_json::to_string(&snapshot)?,now()])?;
     Ok(())
 }
-const ALLOWED:&str="EXISTS(SELECT 1 FROM runs WHERE id=issue_node_comments.run_id) AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=issue_node_comments.run_id)";
+const ALLOWED:&str="EXISTS(SELECT 1 FROM run_file_origins WHERE run_id=issue_node_comments.run_id AND origin='local') AND EXISTS(SELECT 1 FROM runs WHERE id=issue_node_comments.run_id) AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=issue_node_comments.run_id)";
 impl Store {
     pub(crate) fn due_issue_node_comment(&self, at: &str) -> Result<Option<IssueNodeCommentJob>> {
         let db = self.db.lock().unwrap();

@@ -5,7 +5,7 @@ import { noticeSettings, noticeSnapshot } from "../../../../fixtures/notices";
 import { usage } from "../../../../fixtures/usage";
 import { makeDetail } from "../../../../fixtures/run-detail";
 vi.mock("../../../../../src/context/factory/infrastructure/ipc/factory-api", () => ({
-  native: true, factoryApi: { settings: vi.fn(), snapshot: vi.fn(), subscribe: vi.fn(async () => () => {}),
+  native: true, factoryApi: { backupRecoveryStatus: vi.fn(async () => ({required:false})), settings: vi.fn(), snapshot: vi.fn(), subscribe: vi.fn(async () => () => {}),
     agentUsage: vi.fn(), agentAccounts: vi.fn(async () => []), saveSettings: vi.fn(), detail: vi.fn(), logs: vi.fn() },
 }));
 import { factoryApi } from "../../../../../src/context/factory/infrastructure/ipc/factory-api";

@@ -6,7 +6,7 @@ import type { DeleteRunOutcome, FactoryEvent, Run, RunDetail, Snapshot } from ".
 const mocks = vi.hoisted(() => ({ listeners: new Set<(e: FactoryEvent) => void>() }));
 vi.mock("../src/context/factory/infrastructure/ipc/factory-api", () => ({
   native: true,
-  factoryApi: {
+  factoryApi: { backupRecoveryStatus: vi.fn(async () => ({required:false})),
     settings: vi.fn(), snapshot: vi.fn(), detail: vi.fn(), logs: vi.fn(),
     cancel: vi.fn(), retry: vi.fn(), deleteRun: vi.fn(), agentModels: vi.fn(),
     saveSettings: vi.fn(), poll: vi.fn(),

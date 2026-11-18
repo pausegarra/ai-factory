@@ -5,7 +5,7 @@ import type {FactoryEvent, Settings} from "../src/context/factory/domain/types";
 import {noticeSettings, noticeSnapshot, deferred} from "./fixtures/notices";
 import {newTelegramConnector} from "../src/context/factory/domain/notification-connectors";
 const mock=vi.hoisted(()=>({listener:null as null | ((event:FactoryEvent)=>void)}));
-vi.mock("../src/context/factory/infrastructure/ipc/factory-api",()=>({native:true,factoryApi:{
+vi.mock("../src/context/factory/infrastructure/ipc/factory-api",()=>({native:true,factoryApi: { backupRecoveryStatus: vi.fn(async () => ({required:false})),
   settings:vi.fn(), snapshot:vi.fn(), saveSettings:vi.fn(),
   subscribe:vi.fn(async (listener:(e:FactoryEvent)=>void)=>{mock.listener=listener;return ()=>{mock.listener=null;};}),
 }}));

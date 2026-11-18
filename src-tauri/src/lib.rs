@@ -1,6 +1,9 @@
 mod context {
     pub(crate) mod factory {
         pub(crate) mod infrastructure {
+            pub(crate) mod commands {
+                pub(crate) mod backup;
+            }
             pub(crate) mod presentations {
                 pub(crate) mod run_status;
             }
@@ -13,6 +16,7 @@ mod context {
 mod lifecycle;
 mod startup;
 
+use context::factory::infrastructure::commands::backup;
 use context::factory::infrastructure::presentations::run_status;
 use factory_core::{Factory, FactoryEvent, LogChunk, Settings, Snapshot};
 use std::sync::Arc;
@@ -58,34 +62,11 @@ async fn save_settings(
     state: State<'_, DesktopState>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    settings.validate().map_err(|error| error.to_string())?;
-    let current = app
-        .autolaunch()
-        .is_enabled()
-        .map_err(|error| error.to_string())?;
     let factory = state.factory.clone();
-    let desired = settings.start_at_login;
-    tauri::async_runtime::spawn_blocking(move || {
-        startup::change_with_persistence(
-            current,
-            desired,
-            |enabled| {
-                if enabled {
-                    app.autolaunch().enable()
-                } else {
-                    app.autolaunch().disable()
-                }
-                .map_err(|error| error.to_string())
-            },
-            || {
-                factory
-                    .save_settings(settings)
-                    .map_err(|error| format!("{error:#}"))
-            },
-        )
+    blocking(move || {
+        factory.save_settings_with_startup(settings, &mut startup::AutolaunchRegistration(&app))
     })
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -369,7 +350,14 @@ pub fn run() {
             retry_run,
             delete_run,
             poll_now,
-            import_legacy
+            import_legacy,
+            backup::export_backup,
+            backup::inspect_backup,
+            backup::prepare_backup_import,
+            backup::apply_backup_import,
+            backup::discard_backup_import,
+            backup::recover_backup_import,
+            backup::get_backup_recovery_status
         ])
         .build(tauri::generate_context!())
         .expect("AI Factory could not start");

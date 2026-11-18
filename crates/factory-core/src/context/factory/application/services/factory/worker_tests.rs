@@ -498,7 +498,7 @@ async fn shutdown_prevents_new_reservations_after_existing_worker_drains() {
     task.await.unwrap();
     assert!(factory.stop.is_cancelled());
     assert!(factory.register_queued_worker(&next).unwrap().is_none());
-    assert_eq!(factory.run_detail(&next).unwrap().run.status, "queued");
+    assert_eq!(factory.store.detail(&next).unwrap().run.status, "queued");
 }
 
 #[tokio::test]

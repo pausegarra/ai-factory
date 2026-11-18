@@ -332,7 +332,7 @@ impl Store {
     fn collect_credentials(&self) {
         let pending = (|| -> Result<Vec<String>> {
             let db = self.db.lock().unwrap();
-            let mut query = db.prepare("SELECT reference FROM credential_gc WHERE reference NOT IN (SELECT reference FROM credential_refs UNION SELECT reference FROM notification_credential_refs)")?;
+            let mut query = db.prepare("SELECT reference FROM credential_gc WHERE reference NOT IN (SELECT reference FROM credential_refs UNION SELECT reference FROM notification_credential_refs UNION SELECT reference FROM backup_staged_credentials)")?;
             let rows = query.query_map([], |row| row.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })();
@@ -379,7 +379,7 @@ impl Store {
     }
 }
 
-fn redaction_patterns(secret: &str) -> Vec<String> {
+pub(crate) fn redaction_patterns(secret: &str) -> Vec<String> {
     let mut patterns = vec![secret.to_owned()];
     if let Ok(url) = reqwest::Url::parse(secret) {
         for (raw, (key, value)) in url
