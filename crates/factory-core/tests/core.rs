@@ -220,6 +220,7 @@ async fn durable_queue_dedup_redaction_and_immediate_events() {
     let f = common::open(dir.path().into()).unwrap();
     let mut s = f.settings().unwrap();
     s.source_connectors.push(SourceConnector {
+        review_all_open_pull_requests: false,
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
         reviewers: vec!["alice".into()],
@@ -480,6 +481,7 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
         .into();
     s.max_concurrent = limit;
     s.source_connectors.push(SourceConnector {
+        review_all_open_pull_requests: false,
         reviewers: vec!["alice".into()],
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
@@ -1023,6 +1025,7 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
     let f = common::open(root.path().into()).unwrap();
     let mut s = f.settings().unwrap();
     s.source_connectors.push(SourceConnector {
+        review_all_open_pull_requests: false,
         kind: factory_core::SourceKind::GithubIssues,
         id: "actor".into(),
         label: "Alice".into(),

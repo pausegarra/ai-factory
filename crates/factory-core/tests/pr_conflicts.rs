@@ -242,6 +242,7 @@ sys.exit(code)
         let factory = common::open_with_api(dir.path().join("app"), &api_base).unwrap();
         let mut s = factory.settings().unwrap();
         s.source_connectors = vec![SourceConnector {
+            review_all_open_pull_requests: false,
             kind: factory_core::SourceKind::GithubIssues,
             id: "alice".into(),
             account: "alice".into(),

@@ -1,3 +1,4 @@
+import { newGitHubIssuesSource } from "../src/context/factory/domain/source-connectors";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { SourcesPage } from "../src/context/factory/infrastructure/presentations/sources";
@@ -70,4 +71,58 @@ it("validates incomplete sources and requires a replacement after account change
  open();fireEvent.change(screen.getByLabelText("GitHub account"),{target:{value:"bob"}});apply();save();
  expect(onSave).toHaveBeenCalledTimes(1);
  expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toMatch(/token/i);
+});
+
+it("defaults to requested reviews and reloads both saved scope values", async () => {
+  const onSave = vi.fn(async (settings:Settings) => structuredClone(settings));
+  const view = render(<SourcesPage settings={noticeSettings()} onSave={onSave}/>);
+  add(); fill();
+  const scope = () => screen.getByRole("checkbox", {
+    name:"Review all open PRs in configured owners"
+  }) as HTMLInputElement;
+  expect(scope().checked).toBe(false);
+  fireEvent.click(scope()); apply(); save();
+  await screen.findByText("Source settings saved.");
+  expect(onSave.mock.calls[0][0].source_connectors[0].review_all_open_pull_requests)
+    .toBe(true);
+  const stored = structuredClone(onSave.mock.calls[0][0]);
+  stored.source_connectors[0].has_token = true;
+  delete stored.source_connectors[0].token;
+  view.unmount();
+
+  render(<SourcesPage settings={stored} onSave={onSave}/>);
+  open();
+  expect(scope().checked).toBe(true);
+  expect((screen.getByLabelText("API token") as HTMLInputElement).value).toBe("");
+  fireEvent.click(scope()); apply(); save();
+  await screen.findByText("Source settings saved.");
+  expect(onSave.mock.calls[1][0].source_connectors[0].review_all_open_pull_requests)
+    .toBe(false);
+  expect(onSave.mock.calls[1][0].source_connectors[0].token).toBeUndefined();
+  open();
+  expect(scope().checked).toBe(false);
+});
+
+it("keeps old settings valid and cancels scope changes with the existing editor", async () => {
+  const {review_all_open_pull_requests: _scope, ...legacy} =
+    {...newGitHubIssuesSource("work"), label:"Work", account:"alice",
+      has_token:true, owners:["team"], reviewers:["alice"]};
+  const onSave = vi.fn(async (settings:Settings) => settings);
+  render(<SourcesPage settings={{...noticeSettings(),source_connectors:[legacy]}}
+    onSave={onSave}/>);
+  const scope = () => screen.getByRole("checkbox", {
+    name:"Review all open PRs in configured owners"
+  }) as HTMLInputElement;
+  open();
+  expect(scope().checked).toBe(false);
+  fireEvent.click(scope());
+  fireEvent.click(screen.getByRole("button",{name:"Cancel"}));
+  open();
+  expect(scope().checked).toBe(false);
+  fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Renamed"}});
+  apply(); save();
+  await screen.findByText("Source settings saved.");
+  expect(onSave.mock.calls[0][0].source_connectors[0].review_all_open_pull_requests)
+    .toBe(false);
+  expect(onSave.mock.calls[0][0].source_connectors[0].token).toBeUndefined();
 });

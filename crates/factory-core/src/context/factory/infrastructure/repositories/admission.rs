@@ -257,6 +257,7 @@ mod tests {
         let store = Store::open_with_credentials(dir.path(), Arc::new(Memory::default())).unwrap();
         let mut s = Settings::default();
         s.source_connectors.push(SourceConnector {
+            review_all_open_pull_requests: false,
             kind: SourceKind::GithubIssues,
             id: "work".into(),
             label: "Work".into(),
