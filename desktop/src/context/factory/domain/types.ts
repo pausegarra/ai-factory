@@ -59,6 +59,7 @@ export interface SourceConnector {
   authors: string[];
   reviewers: string[];
   review_all_open_pull_requests?: boolean;
+  pull_request_authors?: string[];
 }
 export interface Project {
   id: string;

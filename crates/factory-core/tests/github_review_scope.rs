@@ -8,6 +8,7 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
+use tokio::sync::Notify;
 
 fn pull(repo: &str, number: u64) -> Value {
     json!({
@@ -30,6 +31,7 @@ struct Discovery {
     status: u16,
     incomplete: bool,
     login: String,
+    detail_gate: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 impl Default for Discovery {
     fn default() -> Self {
@@ -39,6 +41,7 @@ impl Default for Discovery {
             status: 200,
             incomplete: false,
             login: "alice".into(),
+            detail_gate: None,
         }
     }
 }
@@ -55,6 +58,18 @@ async fn fixture(
     let server = Server::start(move |request| {
         let state = captured.clone();
         async move {
+            let gate = {
+                let mut state = state.lock().unwrap();
+                if request.path == "/repos/acme/repo/pulls/5" {
+                    state.detail_gate.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((reached, release)) = gate {
+                reached.notify_one();
+                release.notified().await;
+            }
             let state = state.lock().unwrap();
             if request.path == "/user" {
                 return (200, json!({"login":state.login}));
@@ -181,6 +196,9 @@ async fn review_scope_query_and_detail_matrix() {
 async fn review_scope_uses_every_owner_and_existing_search_batches() {
     let (_dir, factory, server, state) = fixture(true).await;
     let mut settings = factory.settings().unwrap();
+    settings.source_connectors[0].pull_request_authors = vec!["CONTRIBUTOR".into()];
+    factory.save_settings(settings).unwrap();
+    let mut settings = factory.settings().unwrap();
     settings.source_connectors[0].owners = vec![
         "acme".into(),
         "other".into(),
@@ -225,6 +243,9 @@ async fn review_scope_cannot_bypass_scope_identity_or_activation() {
             "source_off",
         ] {
             let (_dir, factory, server, state) = fixture(all).await;
+            let mut settings = factory.settings().unwrap();
+            settings.source_connectors[0].pull_request_authors = vec!["CONTRIBUTOR".into()];
+            factory.save_settings(settings).unwrap();
             {
                 let mut state = state.lock().unwrap();
                 state.pulls.get_mut("/repos/acme/repo/pulls/5").unwrap()["requested_reviewers"] =
@@ -287,6 +308,9 @@ async fn review_scope_cannot_bypass_scope_identity_or_activation() {
 #[tokio::test]
 async fn review_scope_preserves_scan_edges_and_deduplication() {
     let (_dir, factory, _server, state) = fixture(true).await;
+    let mut settings = factory.settings().unwrap();
+    settings.source_connectors[0].pull_request_authors = vec!["CONTRIBUTOR".into()];
+    factory.save_settings(settings).unwrap();
     factory.poll_now().await.unwrap();
     factory.poll_now().await.unwrap();
     assert_eq!(events(&factory).len(), 1);
@@ -364,4 +388,297 @@ async fn review_scope_preserves_scan_edges_and_deduplication() {
     assert!(found
         .iter()
         .all(|e| e.event_id.starts_with("review:acme/repo#5:alice:")));
+}
+
+#[tokio::test]
+async fn pull_request_authors_polling_mode_and_login_matrix() {
+    for all in [false, true] {
+        for filtered in [false, true] {
+            for requested in [false, true] {
+                for (missing, login) in [
+                    (false, json!("CCarneroMerida")),
+                    (false, json!("next-dvalverde")),
+                    (false, json!("outside")),
+                    (false, json!(null)),
+                    (true, json!(null)),
+                    (false, json!(42)),
+                    (false, json!("")),
+                    (false, json!("bad login")),
+                ] {
+                    let (_dir, factory, server, state) = fixture(all).await;
+                    let mut settings = factory.settings().unwrap();
+                    settings.source_connectors[0].pull_request_authors = if filtered {
+                        vec!["ccarneromerida".into(), "next-dvalverde".into()]
+                    } else {
+                        vec![]
+                    };
+                    factory.save_settings(settings).unwrap();
+                    {
+                        let mut state = state.lock().unwrap();
+                        let pr = state.pulls.get_mut("/repos/acme/repo/pulls/5").unwrap();
+                        if missing {
+                            pr.as_object_mut().unwrap().remove("user");
+                        } else {
+                            pr["user"]["login"] = login.clone();
+                        }
+                        pr["requested_reviewers"] = if requested {
+                            json!([{"login":"ALICE"}])
+                        } else {
+                            json!([])
+                        };
+                    }
+                    factory.poll_now().await.unwrap();
+                    let matches = login.as_str().is_some_and(|s| {
+                        s.eq_ignore_ascii_case("ccarneromerida") || s == "next-dvalverde"
+                    });
+                    let want = if all { !filtered || matches } else { requested };
+                    let found = events(&factory);
+                    assert_eq!(
+                        found.len(),
+                        usize::from(want),
+                        "{all}/{filtered}/{requested}/{missing}/{login}"
+                    );
+                    for event in found {
+                        assert_eq!(event.actor, "alice");
+                        assert_eq!(event.payload["reviewer"], "alice");
+                        assert_eq!(event.origin_token_profile_id.as_deref(), Some("work"));
+                    }
+                    for query in queries(&server) {
+                        assert!(query.contains("user:acme"));
+                        assert_eq!(query.contains("review-requested:alice"), !all);
+                        assert!(!query.contains("author:"));
+                    }
+                    factory.shutdown().await;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pull_request_authors_exclusion_does_not_consume_and_reuses_edges() {
+    let (dir, factory, _server, _state) = fixture(true).await;
+    let mut s = factory.settings().unwrap();
+    s.source_connectors[0].pull_request_authors = vec!["different".into()];
+    factory.save_settings(s).unwrap();
+    factory.poll_now().await.unwrap();
+    factory.poll_now().await.unwrap();
+    assert!(events(&factory).is_empty());
+    {
+        let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM dedup WHERE event_id LIKE 'review:acme/repo#5:alice:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        let mut q = db.prepare("SELECT json FROM observations WHERE key IN ('review:acme:alice','review-source:work:acme:alice')").unwrap();
+        for row in q.query_map([], |r| r.get::<_, String>(0)).unwrap() {
+            let observation: Value = serde_json::from_str(&row.unwrap()).unwrap();
+            assert!(observation.get("acme/repo#5").is_none());
+        }
+    }
+    let mut s = factory.settings().unwrap();
+    s.source_connectors[0].pull_request_authors = vec!["CONTRIBUTOR".into()];
+    factory.save_settings(s).unwrap();
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory)[0].event_id, "review:acme/repo#5:alice:1");
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 1);
+    let mut s = factory.settings().unwrap();
+    s.source_connectors[0].pull_request_authors = vec!["different".into()];
+    factory.save_settings(s).unwrap();
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 1);
+    let mut s = factory.settings().unwrap();
+    s.source_connectors[0].pull_request_authors.clear();
+    factory.save_settings(s).unwrap();
+    factory.poll_now().await.unwrap();
+    let mut ids: Vec<_> = events(&factory).into_iter().map(|e| e.event_id).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        ["review:acme/repo#5:alice:1", "review:acme/repo#5:alice:2"]
+    );
+    factory.shutdown().await;
+}
+
+// A saved exclusion must win over the Source captured before the HTTP await.
+#[tokio::test]
+async fn pull_request_authors_saved_during_detail_are_rechecked_before_admission() {
+    for all in [true, false] {
+        for initial in [vec![], vec!["contributor".to_string()]] {
+            let (dir, factory, _server, state) = fixture(all).await;
+            let mut settings = factory.settings().unwrap();
+            settings.source_connectors[0].pull_request_authors = initial;
+            factory.save_settings(settings).unwrap();
+            let reached = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            {
+                let mut state = state.lock().unwrap();
+                state.detail_gate = Some((reached.clone(), release.clone()));
+                state.pulls.get_mut("/repos/acme/repo/pulls/5").unwrap()["requested_reviewers"] =
+                    if all {
+                        json!([])
+                    } else {
+                        json!([{"login":"alice"}])
+                    };
+            }
+            let pending = {
+                let factory = factory.clone();
+                tokio::spawn(async move { factory.poll_now().await })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .unwrap();
+            let mut settings = factory.settings().unwrap();
+            settings.source_connectors[0].pull_request_authors = vec!["different".into()];
+            factory.save_settings(settings).unwrap();
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+
+            if all {
+                assert!(
+                    events(&factory).is_empty(),
+                    "saved author exclusion must prevent a run"
+                );
+                let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+                let consumed: i64 = db.query_row(
+                    "SELECT count(*) FROM dedup WHERE event_id LIKE 'review:acme/repo#5:alice:%'",
+                    [], |r| r.get(0),
+                ).unwrap();
+                assert_eq!(consumed, 0, "excluded review must not consume dedup");
+                let mut q = db.prepare(
+                    "SELECT json FROM observations WHERE key IN ('review:acme:alice','review-source:work:acme:alice')"
+                ).unwrap();
+                for row in q.query_map([], |r| r.get::<_, String>(0)).unwrap() {
+                    let observation: Value = serde_json::from_str(&row.unwrap()).unwrap();
+                    assert!(
+                        observation.get("acme/repo#5").is_none(),
+                        "excluded review must not be observed as present"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    events(&factory).len(),
+                    1,
+                    "requested reviews ignore the author list"
+                );
+            }
+
+            // A later inclusion must still get its first generation, exactly once.
+            let mut settings = factory.settings().unwrap();
+            settings.source_connectors[0].pull_request_authors = vec!["CONTRIBUTOR".into()];
+            factory.save_settings(settings).unwrap();
+            factory.poll_now().await.unwrap();
+            factory.poll_now().await.unwrap();
+            let found = events(&factory);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].event_id, "review:acme/repo#5:alice:1");
+            assert_eq!(found[0].origin_token_profile_id.as_deref(), Some("work"));
+            factory.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn pull_request_authors_polling_isolated_for_same_account_sources() {
+    let (_dir, factory, _server, state) = fixture(true).await;
+    let mut s = factory.settings().unwrap();
+    s.source_connectors[0].pull_request_authors = vec!["contributor".into()];
+    let mut b = s.source_connectors[0].clone();
+    b.id = "other-source".into();
+    b.label = "Other".into();
+    b.token = Some("fixture-second".into());
+    b.pull_request_authors = vec!["second".into()];
+    s.source_connectors.push(b);
+    factory.save_settings(s).unwrap();
+    {
+        let mut state = state.lock().unwrap();
+        state.rows.push(row("acme/repo", 6));
+        let mut pr = pull("acme/repo", 6);
+        pr["user"]["login"] = json!("second");
+        state.pulls.insert("/repos/acme/repo/pulls/6".into(), pr);
+    }
+    factory.poll_now().await.unwrap();
+    factory.poll_now().await.unwrap();
+    let mut origins: Vec<_> = events(&factory)
+        .into_iter()
+        .map(|e| (e.number, e.origin_token_profile_id.unwrap()))
+        .collect();
+    origins.sort();
+    assert_eq!(
+        origins,
+        [(5, "work".to_string()), (6, "other-source".to_string())]
+    );
+    let mut s = factory.settings().unwrap();
+    let before = s.source_connectors[1].pull_request_authors.clone();
+    s.source_connectors[0].pull_request_authors.clear();
+    let saved = factory.save_settings(s).unwrap();
+    assert_eq!(saved.source_connectors[1].pull_request_authors, before);
+    factory.shutdown().await;
+}
+
+#[tokio::test]
+async fn pull_request_authors_do_not_filter_issue_or_release_polling() {
+    for authors in [vec![], vec!["different".to_string()]] {
+        let server = Server::start(|request| async move {
+            if request.path == "/user" { return (200, json!({"login":"alice"})); }
+            if request.path.starts_with("/search/issues?") {
+                return (200, json!({"incomplete_results":false,"total_count":2,"items":[
+                    {"number":80,"repository_url":"https://api.github.com/repos/acme/repo","title":"[AI] Work","user":{"login":"alice"}},
+                    {"number":81,"repository_url":"https://api.github.com/repos/acme/repo","title":"[Release] Work","user":{"login":"alice"}}
+                ]}));
+            }
+            for (number, title) in [(80, "[AI] Work"), (81, "[Release] Work")] {
+                if request.path == format!("/repos/acme/repo/issues/{number}") {
+                    return (200, json!({"number":number,"title":title,"body":"fixture",
+                        "state":"open","user":{"login":"alice"},
+                        "html_url":format!("https://github.com/acme/repo/issues/{number}")}));
+                }
+            }
+            (500, json!({"unexpected":request.path}))
+        }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
+        let mut s = factory.settings().unwrap();
+        s.source_connectors = vec![SourceConnector {
+            id: "work".into(),
+            label: "Work".into(),
+            account: "alice".into(),
+            owners: vec!["acme".into()],
+            authors: vec!["alice".into()],
+            token: Some("fixture-token".into()),
+            review_all_open_pull_requests: true,
+            pull_request_authors: authors.clone(),
+            ..Default::default()
+        }];
+        for flow in &mut s.flows {
+            flow.enabled = ["new_issue", "release"].contains(&flow.id.as_str());
+        }
+        factory.save_settings(s).unwrap();
+        factory.poll_now().await.unwrap();
+        factory.poll_now().await.unwrap();
+        let mut triggers: Vec<_> = factory
+            .snapshot()
+            .unwrap()
+            .runs
+            .into_iter()
+            .map(|r| r.trigger_id)
+            .collect();
+        triggers.sort();
+        assert_eq!(triggers, ["new_issue", "release"]);
+        assert_eq!(
+            factory.settings().unwrap().source_connectors[0].authors,
+            ["alice"]
+        );
+        assert!(queries(&server).iter().all(|q| q.contains("author:alice")));
+        factory.shutdown().await;
+    }
 }

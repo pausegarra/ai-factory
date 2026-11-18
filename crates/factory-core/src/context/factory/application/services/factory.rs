@@ -298,6 +298,13 @@ impl Factory {
                 }
                 values.retain(|value| seen.insert(value.clone()));
             }
+            let mut seen = std::collections::HashSet::new();
+            profile.pull_request_authors = profile
+                .pull_request_authors
+                .iter()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+                .collect();
         }
         for p in &mut s.projects {
             p.repository = p.repository.to_lowercase();

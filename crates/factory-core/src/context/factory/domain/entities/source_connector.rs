@@ -24,6 +24,8 @@ pub struct SourceConnector {
     pub reviewers: Vec<String>,
     #[serde(default)]
     pub review_all_open_pull_requests: bool,
+    #[serde(default)]
+    pub pull_request_authors: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default)]
@@ -48,6 +50,18 @@ impl SourceConnector {
             .any(|value| value.eq_ignore_ascii_case(&self.account))
     }
 
+    pub fn allows_pull_request_author(&self, author: Option<&str>) -> bool {
+        !self.review_all_open_pull_requests
+            || self.pull_request_authors.is_empty()
+            || author.is_some_and(|author| {
+                valid_login(author)
+                    && self
+                        .pull_request_authors
+                        .iter()
+                        .any(|value| value.trim().eq_ignore_ascii_case(author))
+            })
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(safe_id(&self.id), "Invalid source connector ID");
         ensure!(
@@ -60,6 +74,7 @@ impl SourceConnector {
             .iter()
             .chain(&self.authors)
             .chain(&self.reviewers)
+            .chain(&self.pull_request_authors)
         {
             ensure!(valid_login(value), "Invalid GitHub login");
         }

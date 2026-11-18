@@ -109,3 +109,73 @@ fn review_scope_rejects_explicit_non_boolean_json() {
         assert!(serde_json::from_value::<Settings>(raw).is_err());
     }
 }
+
+#[test]
+fn pull_request_authors_default_and_round_trip_independently() {
+    let legacy = json!({"id":"a","label":"A","type":"github_issues",
+        "account":"alice","authors":["alice"],"reviewers":["alice"]});
+    let old: SourceConnector = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(old).unwrap()["pull_request_authors"],
+        json!([])
+    );
+    let mut first = legacy;
+    first["pull_request_authors"] = json!(["first", "second"]);
+    let settings: Settings = serde_json::from_value(json!({
+        "source_connectors":[first, serde_json::to_value(source("b")).unwrap()]
+    }))
+    .unwrap();
+    settings.validate().unwrap();
+    let encoded = serde_json::to_value(&settings).unwrap();
+    assert_eq!(
+        encoded["source_connectors"][0]["pull_request_authors"],
+        json!(["first", "second"])
+    );
+    assert_eq!(
+        encoded["source_connectors"][1]["pull_request_authors"],
+        json!([])
+    );
+    assert_eq!(encoded["source_connectors"][0]["authors"], json!(["alice"]));
+    let decoded: Settings = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+}
+
+#[test]
+fn pull_request_authors_reject_invalid_shapes_and_logins() {
+    for value in [json!(null), json!("first"), json!(1), json!({}), json!([1])] {
+        let mut raw = serde_json::to_value(source("a")).unwrap();
+        raw["pull_request_authors"] = value;
+        assert!(serde_json::from_value::<SourceConnector>(raw).is_err());
+    }
+    for value in ["team/repo", "", "with space"] {
+        let mut raw = serde_json::to_value(source("a")).unwrap();
+        raw["pull_request_authors"] = json!([value]);
+        let invalid: SourceConnector = serde_json::from_value(raw).unwrap();
+        assert!(invalid.validate().is_err());
+    }
+}
+
+#[test]
+fn pull_request_authors_predicate_respects_mode_empty_and_login() {
+    let mut s = source("a");
+    s.review_all_open_pull_requests = true;
+    assert!(s.allows_pull_request_author(None));
+    assert!(s.allows_pull_request_author(Some("outside")));
+    s.pull_request_authors = vec!["first".into(), "SECOND".into(), "build[bot]".into()];
+    for login in ["First", "second", "BUILD[bot]"] {
+        assert!(s.allows_pull_request_author(Some(login)));
+    }
+    for login in [
+        None,
+        Some(""),
+        Some("outside"),
+        Some("with space"),
+        Some("x/y"),
+    ] {
+        assert!(!s.allows_pull_request_author(login));
+    }
+    s.review_all_open_pull_requests = false;
+    assert!(s.allows_pull_request_author(Some("outside")));
+    assert!(s.allows_pull_request_author(None));
+    assert_eq!(s.pull_request_authors, ["first", "SECOND", "build[bot]"]);
+}

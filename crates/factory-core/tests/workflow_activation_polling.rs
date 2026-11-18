@@ -19,6 +19,7 @@ fn settings() -> Settings {
         source_connectors: vec![
             SourceConnector {
                 review_all_open_pull_requests: false,
+                pull_request_authors: vec![],
                 kind: factory_core::SourceKind::GithubIssues,
                 id: "work".into(),
                 label: "Work".into(),

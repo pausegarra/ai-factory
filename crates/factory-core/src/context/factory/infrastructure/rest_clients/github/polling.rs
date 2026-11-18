@@ -337,6 +337,9 @@ impl Github {
             {
                 continue;
             }
+            if !profile.allows_pull_request_author(pr["user"]["login"].as_str()) {
+                continue;
+            }
             let mut event = pr_event(
                 "pr_review",
                 String::new(),

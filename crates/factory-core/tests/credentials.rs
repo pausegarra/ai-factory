@@ -13,6 +13,7 @@ fn with_token(token: &str) -> Settings {
     let mut settings = Settings::default();
     settings.source_connectors.push(SourceConnector {
         review_all_open_pull_requests: false,
+        pull_request_authors: vec![],
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),
@@ -48,6 +49,7 @@ fn github_tokens_are_not_written_to_sqlite() {
     let mut settings = factory.settings().unwrap();
     settings.source_connectors.push(SourceConnector {
         review_all_open_pull_requests: false,
+        pull_request_authors: vec![],
         kind: factory_core::SourceKind::GithubIssues,
         id: "alice".into(),
         label: "Alice".into(),

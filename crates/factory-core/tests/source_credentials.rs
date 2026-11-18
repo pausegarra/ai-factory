@@ -182,3 +182,63 @@ async fn review_scope_survives_reload_and_changes_without_a_new_token() {
         );
     }
 }
+
+#[tokio::test]
+async fn pull_request_authors_save_normalizes_and_reopens_per_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    let mut settings = f.settings().unwrap();
+    settings.source_connectors = serde_json::from_value(serde_json::json!([
+        {"id":"a","label":"A","type":"github_issues","account":"alice",
+         "owners":["acme"],"authors":["alice"],"reviewers":["alice"],
+         "token":"fixture-a","review_all_open_pull_requests":true,
+         "pull_request_authors":[" CCarneroMerida ","", "  ","ccarneromerida","NEXT-dvalverde"," laubernal "]},
+        {"id":"b","label":"B","type":"github_issues","account":"alice",
+         "owners":["acme"],"authors":["alice"],"reviewers":["alice"],
+         "token":"fixture-b","pull_request_authors":["Other"]}
+    ])).unwrap();
+    let saved = f.save_settings(settings).unwrap();
+    assert_eq!(
+        saved.source_connectors[0].pull_request_authors,
+        ["ccarneromerida", "next-dvalverde", "laubernal"]
+    );
+    assert_eq!(saved.source_connectors[1].pull_request_authors, ["other"]);
+    assert_eq!(saved.source_connectors[0].authors, ["alice"]);
+    assert_eq!(saved.source_connectors[0].reviewers, ["alice"]);
+    let mut next = saved;
+    next.source_connectors[0].review_all_open_pull_requests = false;
+    f.save_settings(next).unwrap();
+    f.shutdown().await;
+    drop(f);
+    let reopened = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    let mut restored = reopened.settings().unwrap();
+    assert!(!restored.source_connectors[0].review_all_open_pull_requests);
+    assert_eq!(
+        restored.source_connectors[0].pull_request_authors,
+        ["ccarneromerida", "next-dvalverde", "laubernal"]
+    );
+    assert_eq!(
+        restored.source_connectors[1].pull_request_authors,
+        ["other"]
+    );
+    assert!(restored
+        .source_connectors
+        .iter()
+        .all(|s| s.token.is_none() && s.has_token));
+    let b = serde_json::to_value(&restored.source_connectors[1]).unwrap();
+    restored.source_connectors[0].pull_request_authors.clear();
+    let cleared = reopened.save_settings(restored).unwrap();
+    assert!(cleared.source_connectors[0].pull_request_authors.is_empty());
+    assert_eq!(
+        serde_json::to_value(&cleared.source_connectors[1]).unwrap(),
+        b
+    );
+    reopened.shutdown().await;
+    drop(reopened);
+    let store = Store::open_with_credentials(dir.path(), common::backend(dir.path())).unwrap();
+    assert_eq!(store.token_for_source("a").await.unwrap(), "fixture-a");
+    assert_eq!(store.token_for_source("b").await.unwrap(), "fixture-b");
+    assert!(store.public_settings().unwrap().source_connectors[0]
+        .pull_request_authors
+        .is_empty());
+}
