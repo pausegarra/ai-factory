@@ -338,6 +338,9 @@ async fn review_withdrawal_race_and_unobserved_edges_preserve_generation() {
                     p["user"]["login"] = json!("bob");
                     return (200, p);
                 }
+                if r.path.contains("/reviews?") {
+                    return (200, json!([]));
+                }
                 (500, json!({}))
             }
         }
@@ -466,6 +469,12 @@ async fn active_other_trigger_may_use_same_token() {
         }
         if r.path.starts_with("/search/") && r.path.contains("review-requested") {
             return (200, search(true, 5));
+        }
+        if r.path.starts_with("/search/") && r.path.contains("reviewed-by") {
+            return (200, search(false, 5));
+        }
+        if r.path.contains("/reviews?") {
+            return (200, json!([]));
         }
         if r.path == "/repos/acme/repo/pulls/5" {
             return (200, pr());

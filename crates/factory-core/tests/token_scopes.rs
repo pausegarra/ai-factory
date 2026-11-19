@@ -160,6 +160,8 @@ async fn server(fail_personal: bool, calls: Arc<Mutex<Vec<(String, String)>>>) -
                             json!({"incomplete_results":false,"total_count":1,"items":[item]}),
                         )
                     }
+                } else if path.contains("/reviews?") {
+                    (200, json!([]))
                 } else if path.contains("/issues/") {
                     let number = if actor == "alice" { 1 } else { 2 };
                     (
@@ -207,7 +209,7 @@ async fn polling_uses_only_each_tokens_owners_and_continues_after_another_tokens
             2
         );
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), if fail_personal { 5 } else { 6 });
         for (actor, query) in calls.iter() {
             let owner = if actor == "alice" {
                 "personal"
@@ -218,6 +220,7 @@ async fn polling_uses_only_each_tokens_owners_and_continues_after_another_tokens
             assert!(
                 query.contains(&format!("author:{actor}"))
                     || query.contains(&format!("review-requested:{actor}"))
+                    || query.contains(&format!("reviewed-by:{actor} review:changes_requested"))
             );
         }
     }
