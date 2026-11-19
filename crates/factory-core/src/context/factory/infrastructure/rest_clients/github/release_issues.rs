@@ -1,5 +1,5 @@
 use super::Github;
-use crate::context::factory::domain::entities::models::issue_trigger_for_title;
+use crate::context::factory::domain::entities::models::is_release_issue_title;
 use crate::{valid_repository, Factory, Result, TriggerEvent};
 use anyhow::{ensure, Context};
 use reqwest::Method;
@@ -15,7 +15,7 @@ fn validate_issue(issue: &Value, event: &TriggerEvent) -> Result<()> {
                     event.repository, event.number
                 )))
             && issue.get("pull_request").is_none_or(Value::is_null)
-            && issue["title"].as_str().and_then(issue_trigger_for_title) == Some("release")
+            && issue["title"].as_str().is_some_and(is_release_issue_title)
             && issue["user"]["login"]
                 .as_str()
                 .is_some_and(|author| author.eq_ignore_ascii_case(&event.actor))

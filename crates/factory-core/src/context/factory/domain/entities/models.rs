@@ -4,19 +4,14 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 
 mod default_prompts;
+mod issue_titles;
 mod settings_input;
+pub(crate) use issue_titles::{
+    is_release_issue_title, issue_title_matches_trigger, normalize_issue_title_prefix,
+    DEFAULT_ISSUE_TITLE_PREFIX,
+};
 
 pub(crate) const TRIGGER_IDS: [&str; 4] = ["new_issue", "pr_approved", "pr_review", "release"];
-
-pub(crate) fn issue_trigger_for_title(title: &str) -> Option<&'static str> {
-    if title.starts_with("[AI]") {
-        Some("new_issue")
-    } else if title.starts_with("[Release]") {
-        Some("release")
-    } else {
-        None
-    }
-}
 
 pub(crate) const VERSION_BUMP_NODE_ID: &str = "version_bump";
 
@@ -29,6 +24,7 @@ pub struct Settings {
     pub codex_bindings: BTreeMap<String, String>,
     pub projects: Vec<Project>,
     pub commands: Commands,
+    pub issue_title_prefix: String,
     pub issue_node_comments_enabled: bool,
     pub codex_yolo: bool,
     pub poll_interval_seconds: u64,
@@ -160,6 +156,7 @@ impl Default for Settings {
                 opencode: "opencode".into(),
                 git: "git".into(),
             },
+            issue_title_prefix: DEFAULT_ISSUE_TITLE_PREFIX.into(),
             issue_node_comments_enabled: true,
             codex_yolo: false,
             poll_interval_seconds: 15,
@@ -315,6 +312,7 @@ impl Settings {
         Ok(source)
     }
     pub fn validate(&self) -> Result<()> {
+        normalize_issue_title_prefix(&self.issue_title_prefix)?;
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
         self.validate_concurrency()?;
         ensure!(

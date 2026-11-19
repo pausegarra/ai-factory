@@ -23,3 +23,12 @@ it("reacts to connector readiness without borrowing owners from another token", 
  view.rerender(<OverviewPage snapshot={attentionSnapshot([])} settings={base} onPage={onPage} onRun={()=>{}}/>);
  expect(screen.getByRole("button",{name:"Set up Factory"})).toBeTruthy();
 });
+
+it("shows the effective issue prefix and reacts to settings changes", () => {
+  const props = { snapshot: attentionSnapshot([]), settings: attentionSettings, onPage: vi.fn(), onRun: vi.fn() };
+  const view = render(<OverviewPage {...props} />);
+  expect(screen.getByText("Open an issue whose title starts with [AI] in a connected repository. Your workflow starts automatically.")).toBeTruthy();
+  view.rerender(<OverviewPage {...props} settings={{ ...attentionSettings, issue_title_prefix: "bot:" }} />);
+  expect(screen.getByText("Open an issue whose title starts with bot: in a connected repository. Your workflow starts automatically.")).toBeTruthy();
+  expect(screen.queryByText(/Open an issue.*\[AI\]/)).toBeNull();
+});
