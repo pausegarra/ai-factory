@@ -134,7 +134,7 @@ async fn owner_scopes_and_identity_are_grouped_per_token_across_triggers() {
         .iter()
         .filter(|r| r.path.starts_with("/search/"))
         .collect();
-    assert_eq!(searches.len(), 2);
+    assert_eq!(searches.len(), 3);
     for request in searches {
         let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
         let query = url

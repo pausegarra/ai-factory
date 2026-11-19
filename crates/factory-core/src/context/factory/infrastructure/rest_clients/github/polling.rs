@@ -314,30 +314,56 @@ impl Github {
         } else {
             format!("is:pr is:open review-requested:{reviewer}")
         };
-        let rows = self.scoped_search(profile, &query).await?;
+        let mut rows = self.scoped_search(profile, &query).await?;
+        if !factory.workflow_enabled_for("pr_review", &profile.id)? {
+            return Ok(());
+        }
+        if !profile.review_all_open_pull_requests {
+            // Submitted requests for changes no longer appear in review-requested.
+            rows.extend(
+                self.scoped_search(
+                    profile,
+                    &format!("is:pr is:open reviewed-by:{reviewer} review:changes_requested"),
+                )
+                .await?,
+            );
+        }
         let mut candidates = vec![];
+        let mut seen = HashSet::new();
         for row in rows {
             if !factory.workflow_enabled_for("pr_review", &profile.id)? {
                 return Ok(());
             }
             let repo = repository(&row)?;
             let n = row["number"].as_u64().context("Invalid PR number")?;
+            if !seen.insert((repo.clone(), n)) {
+                continue;
+            }
             let pr = self.pr(&repo, n).await?;
-            if pr["state"] != "open"
-                || (!profile.review_all_open_pull_requests
-                    && !pr["requested_reviewers"]
-                        .as_array()
-                        .is_some_and(|reviewers| {
-                            reviewers.iter().any(|r| {
-                                r["login"]
-                                    .as_str()
-                                    .is_some_and(|actor| actor.eq_ignore_ascii_case(reviewer))
-                            })
-                        }))
-            {
+            if pr["state"] != "open" {
                 continue;
             }
             if !profile.allows_pull_request_author(pr["user"]["login"].as_str()) {
+                continue;
+            }
+            if !factory.workflow_enabled_for("pr_review", &profile.id)? {
+                return Ok(());
+            }
+            let feedback = self.account_review_state(&repo, n, reviewer).await?;
+            let requested = pr["requested_reviewers"]
+                .as_array()
+                .is_some_and(|reviewers| {
+                    reviewers.iter().any(|r| {
+                        r["login"]
+                            .as_str()
+                            .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+                    })
+                });
+            if !feedback.allows_review(
+                pr["head"]["sha"].as_str().context("Missing PR head")?,
+                profile.review_all_open_pull_requests,
+                requested,
+            ) {
                 continue;
             }
             let mut event = pr_event(
@@ -347,7 +373,7 @@ impl Github {
                 n,
                 reviewer,
                 &pr,
-                json!({"pull_request":pr,"reviewer":reviewer}),
+                json!({"pull_request":pr,"reviewer":reviewer,"review_feedback":feedback}),
             )?;
             event.origin_token_profile_id = Some(profile.id.clone());
             candidates.push(event);

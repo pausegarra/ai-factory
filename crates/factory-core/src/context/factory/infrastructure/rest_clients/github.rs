@@ -10,6 +10,7 @@ mod node_comments;
 mod polling;
 mod pr_updates;
 mod release_issues;
+mod review_state;
 mod version_bumps;
 
 pub struct Github {

@@ -28,6 +28,8 @@ fn row(repo: &str, number: u64) -> Value {
 struct Discovery {
     rows: Vec<Value>,
     pulls: BTreeMap<String, Value>,
+    reviews: Vec<Value>,
+    review_status: u16,
     status: u16,
     incomplete: bool,
     login: String,
@@ -38,6 +40,8 @@ impl Default for Discovery {
         Self {
             rows: vec![row("acme/repo", 5)],
             pulls: BTreeMap::from([("/repos/acme/repo/pulls/5".into(), pull("acme/repo", 5))]),
+            reviews: vec![],
+            review_status: 200,
             status: 200,
             incomplete: false,
             login: "alice".into(),
@@ -85,6 +89,25 @@ async fn fixture(
             }
             if let Some(pr) = state.pulls.get(&request.path) {
                 return (200, pr.clone());
+            }
+            if request.path.contains("/reviews?") {
+                let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+                let page = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "page")
+                    .unwrap()
+                    .1
+                    .parse::<usize>()
+                    .unwrap();
+                return (
+                    state.review_status,
+                    json!(state
+                        .reviews
+                        .iter()
+                        .skip((page - 1) * 100)
+                        .take(100)
+                        .collect::<Vec<_>>()),
+                );
             }
             (500, json!({"unexpected":request.path}))
         }
@@ -142,6 +165,211 @@ fn queries(server: &Server) -> Vec<String> {
         .collect()
 }
 
+fn submitted_review(login: &str, state: &str, head: char) -> Value {
+    json!({"user":{"login":login},"state":state,"commit_id":head.to_string().repeat(40)})
+}
+
+fn set_head(state: &Arc<Mutex<Discovery>>, head: char) {
+    state
+        .lock()
+        .unwrap()
+        .pulls
+        .get_mut("/repos/acme/repo/pulls/5")
+        .unwrap()["head"]["sha"] = json!(head.to_string().repeat(40));
+}
+
+#[tokio::test]
+async fn changes_requested_rereviews_each_new_head_once_and_survives_restart() {
+    let (dir, factory, server, state) = fixture(true).await;
+    factory.poll_now().await.unwrap();
+    state.lock().unwrap().reviews = vec![submitted_review("ALICE", "CHANGES_REQUESTED", 'a')];
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        events(&factory).len(),
+        1,
+        "same reviewed head must not repeat"
+    );
+    set_head(&state, 'b');
+    factory.poll_now().await.unwrap();
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        events(&factory).len(),
+        2,
+        "new commits after changes requested need a new run"
+    );
+    factory.shutdown().await;
+    drop(factory);
+    let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 2);
+    set_head(&state, 'c');
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 3);
+    set_head(&state, 'b');
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        events(&factory).len(),
+        3,
+        "returning to a consumed head must not repeat it"
+    );
+    let heads: std::collections::BTreeSet<_> =
+        events(&factory).into_iter().map(|e| e.head_sha).collect();
+    assert_eq!(heads.len(), 3);
+}
+
+#[tokio::test]
+async fn active_account_review_state_controls_eligibility_in_both_modes() {
+    for all in [false, true] {
+        for (reviews, expected) in [
+            (vec![submitted_review("alice", "APPROVED", 'a')], 0),
+            (
+                vec![
+                    submitted_review("alice", "APPROVED", 'a'),
+                    submitted_review("alice", "COMMENTED", 'b'),
+                ],
+                0,
+            ),
+            (
+                vec![
+                    submitted_review("alice", "APPROVED", 'a'),
+                    submitted_review("alice", "PENDING", 'b'),
+                ],
+                0,
+            ),
+            (
+                vec![
+                    submitted_review("alice", "APPROVED", 'a'),
+                    submitted_review("alice", "DISMISSED", 'a'),
+                ],
+                1,
+            ),
+            (vec![submitted_review("alice", "CHANGES_REQUESTED", 'b')], 0),
+            (
+                vec![
+                    submitted_review("alice", "CHANGES_REQUESTED", 'a'),
+                    submitted_review("alice", "COMMENTED", 'b'),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    submitted_review("alice", "CHANGES_REQUESTED", 'a'),
+                    submitted_review("alice", "APPROVED", 'a'),
+                ],
+                0,
+            ),
+            (vec![submitted_review("someone-else", "APPROVED", 'b')], 1),
+        ] {
+            let (_dir, factory, _server, state) = fixture(all).await;
+            set_head(&state, 'b');
+            {
+                let mut state = state.lock().unwrap();
+                state.reviews = reviews.clone();
+                state.pulls.get_mut("/repos/acme/repo/pulls/5").unwrap()["requested_reviewers"] =
+                    json!([{"login":"alice"}]);
+            }
+            factory.poll_now().await.unwrap();
+            assert_eq!(
+                events(&factory).len(),
+                expected,
+                "all={all} reviews={reviews:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn assigned_mode_rediscovers_changed_pr_without_a_new_review_request() {
+    let (_dir, factory, server, state) = fixture(false).await;
+    set_head(&state, 'b');
+    state.lock().unwrap().reviews = vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 1);
+    assert!(
+        queries(&server)
+            .iter()
+            .any(|q| q.contains("reviewed-by:alice")),
+        "must discover outstanding changes after review-requested disappears"
+    );
+}
+
+#[tokio::test]
+async fn reviews_are_fully_paginated_and_errors_do_not_consume_review_edges() {
+    let (dir, factory, _server, state) = fixture(true).await;
+    {
+        let mut state = state.lock().unwrap();
+        state.reviews = vec![submitted_review("other", "COMMENTED", 'a'); 100];
+        state
+            .reviews
+            .push(submitted_review("alice", "APPROVED", 'a'));
+    }
+    factory.poll_now().await.unwrap();
+    assert!(
+        events(&factory).is_empty(),
+        "approval on the next page must suppress review"
+    );
+    state.lock().unwrap().review_status = 503;
+    let read_observations = || {
+        let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+        let mut q = db.prepare("SELECT key,json FROM observations WHERE key LIKE 'review:%' OR key LIKE 'review-source:%' ORDER BY key").unwrap();
+        q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before = read_observations();
+    assert!(factory.poll_now().await.is_err());
+    assert_eq!(read_observations(), before);
+    assert!(events(&factory).is_empty());
+}
+
+#[tokio::test]
+async fn rereview_does_not_duplicate_a_head_already_owned_by_an_attempt() {
+    let (_dir, factory, _server, state) = fixture(true).await;
+    set_head(&state, 'b');
+    factory.poll_now().await.unwrap();
+    state.lock().unwrap().reviews = vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 1);
+    state.lock().unwrap().reviews = vec![submitted_review("alice", "APPROVED", 'b')];
+    set_head(&state, 'c');
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        events(&factory).len(),
+        1,
+        "an active approval still suppresses subsequent pushes"
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_attempt_does_not_automatically_replay_its_unchanged_head() {
+    for legacy in [false, true] {
+        let (_dir, factory, _server, state) = fixture(true).await;
+        set_head(&state, 'b');
+        if !legacy {
+            state.lock().unwrap().reviews =
+                vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
+        }
+        factory.poll_now().await.unwrap();
+        if legacy {
+            state.lock().unwrap().reviews =
+                vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
+            factory.poll_now().await.unwrap();
+        }
+        let rid = factory.snapshot().unwrap().runs[0].id.clone();
+        factory.cancel(&rid).unwrap();
+        factory.delete_run(&rid).unwrap();
+        factory.poll_now().await.unwrap();
+        assert!(
+            events(&factory).is_empty(),
+            "deleted head must stay consumed; legacy={legacy}"
+        );
+        set_head(&state, 'c');
+        factory.poll_now().await.unwrap();
+        assert_eq!(events(&factory).len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn review_scope_query_and_detail_matrix() {
     for all in [false, true] {
@@ -170,7 +398,11 @@ async fn review_scope_query_and_detail_matrix() {
             for query in searches {
                 assert!(query.contains("is:pr") && query.contains("is:open"));
                 assert!(query.contains("user:acme"));
-                assert_eq!(query.contains("review-requested:alice"), !all);
+                assert_eq!(
+                    query.contains("review-requested:alice")
+                        || query.contains("reviewed-by:alice review:changes_requested"),
+                    !all
+                );
                 if all {
                     assert!(!query.contains("review-requested:"));
                 }
@@ -445,7 +677,11 @@ async fn pull_request_authors_polling_mode_and_login_matrix() {
                     }
                     for query in queries(&server) {
                         assert!(query.contains("user:acme"));
-                        assert_eq!(query.contains("review-requested:alice"), !all);
+                        assert_eq!(
+                            query.contains("review-requested:alice")
+                                || query.contains("reviewed-by:alice review:changes_requested"),
+                            !all
+                        );
                         assert!(!query.contains("author:"));
                     }
                     factory.shutdown().await;

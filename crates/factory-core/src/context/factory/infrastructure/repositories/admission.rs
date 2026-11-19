@@ -1,4 +1,5 @@
 use super::store::Store;
+use crate::context::factory::domain::entities::pull_request_review::PullRequestReviewState;
 use crate::*;
 use anyhow::{ensure, Context};
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -82,13 +83,42 @@ impl Store {
                 if !source.allows_pull_request_author(candidate.payload["pull_request"]["user"]["login"].as_str()) {
                     continue;
                 }
+                let feedback = candidate.payload.get("review_feedback")
+                    .map(|v| serde_json::from_value::<PullRequestReviewState>(v.clone())).transpose()?;
+                if let Some(feedback) = &feedback {
+                    let requested = candidate.payload["pull_request"]["requested_reviewers"].as_array().is_some_and(|reviewers| {
+                        reviewers.iter().any(|r| r["login"].as_str().is_some_and(|login| login.eq_ignore_ascii_case(&reviewer)))
+                    });
+                    if !feedback.allows_review(&candidate.head_sha, source.review_all_open_pull_requests, requested) {
+                        continue;
+                    }
+                }
                 let identity = format!("{}#{}", candidate.repository.to_lowercase(), candidate.number);
                 if !present.insert(identity.clone()) { continue; }
                 let (generation, advance) = review_generation(global.get(&identity), local.get(&identity))?;
-                if advance {
+                let updated_review = feedback.as_ref().is_some_and(|f| f.needs_updated_review(&candidate.head_sha));
+                if advance || updated_review {
                     let mut event = candidate.clone();
-                    event.event_id = format!("review:{identity}:{reviewer}:{generation}");
-                    if let Some(id) = Self::insert_in_tx(tx, &event, &flow, 1, true, None)? { created.push(id); }
+                    if updated_review {
+                        ensure!(candidate.head_sha.len() == 40 && candidate.head_sha.bytes().all(|c| c.is_ascii_hexdigit()), "Invalid review head");
+                        event.event_id = format!("review-head:{identity}:{reviewer}:{}", candidate.head_sha.to_ascii_lowercase());
+                    } else {
+                        event.event_id = format!("review:{identity}:{reviewer}:{generation}");
+                    }
+                    // Keep automatic head consumption independent of disposable
+                    // attempts, just like consumed approval-comment identities.
+                    let fresh_head = !updated_review || tx.execute(
+                        "INSERT OR IGNORE INTO observations(key,json) VALUES(?1,'true')", [&event.event_id]
+                    )? == 1;
+                    // Old numeric-generation attempts may already own this head.
+                    // Keep them authoritative when upgrading and across Sources.
+                    let existing_head = updated_review && fresh_head && tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runs WHERE json_extract(json,'$.trigger_id')='pr_review' AND lower(json_extract(json,'$.repository'))=?1 AND json_extract(json,'$.number')=?2 AND lower(json_extract(json,'$.actor'))=?3 AND lower(json_extract(event,'$.head_sha'))=?4)",
+                        params![candidate.repository.to_lowercase(), i64::try_from(candidate.number)?, reviewer, candidate.head_sha.to_ascii_lowercase()], |row| row.get::<_, bool>(0)
+                    )?;
+                    if fresh_head && !existing_head {
+                        if let Some(id) = Self::insert_in_tx(tx, &event, &flow, 1, true, None)? { created.push(id); }
+                    }
                 }
                 global.insert(identity.clone(), ReviewObservation { requested:true, generation });
                 local.insert(identity, ReviewObservation { requested:true, generation });
