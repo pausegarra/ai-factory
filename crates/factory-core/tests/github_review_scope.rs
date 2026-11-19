@@ -15,7 +15,7 @@ fn pull(repo: &str, number: u64) -> Value {
         "number": number, "title": "Review fixture", "body": "",
         "state": "open", "draft": true,
         "html_url": format!("https://github.com/{repo}/pull/{number}"),
-        "base": {"repo": {"full_name": repo}},
+        "base": {"ref":"main", "repo": {"full_name": repo}},
         "head": {"sha": "a".repeat(40), "ref": "feature"},
         "user": {"login": "contributor"}, "requested_reviewers": []
     })
@@ -30,6 +30,8 @@ struct Discovery {
     pulls: BTreeMap<String, Value>,
     reviews: Vec<Value>,
     review_status: u16,
+    repositories: BTreeMap<String, Value>,
+    repository_status: u16,
     status: u16,
     incomplete: bool,
     login: String,
@@ -42,6 +44,8 @@ impl Default for Discovery {
             pulls: BTreeMap::from([("/repos/acme/repo/pulls/5".into(), pull("acme/repo", 5))]),
             reviews: vec![],
             review_status: 200,
+            repositories: BTreeMap::new(),
+            repository_status: 200,
             status: 200,
             incomplete: false,
             login: "alice".into(),
@@ -89,6 +93,17 @@ async fn fixture(
             }
             if let Some(pr) = state.pulls.get(&request.path) {
                 return (200, pr.clone());
+            }
+            if request.path.starts_with("/repos/") && request.path.matches('/').count() == 3 {
+                let repo = request.path.trim_start_matches("/repos/");
+                return (
+                    state.repository_status,
+                    state
+                        .repositories
+                        .get(repo)
+                        .cloned()
+                        .unwrap_or_else(|| json!({"full_name":repo,"default_branch":"main"})),
+                );
             }
             if request.path.contains("/reviews?") {
                 let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
@@ -167,6 +182,141 @@ fn queries(server: &Server) -> Vec<String> {
 
 fn submitted_review(login: &str, state: &str, head: char) -> Value {
     json!({"user":{"login":login},"state":state,"commit_id":head.to_string().repeat(40)})
+}
+
+#[tokio::test]
+async fn reviews_only_target_each_repositories_actual_default_branch() {
+    for all in [false, true] {
+        for (default, target, head, expected) in [
+            ("develop", "develop", "feature", 1),
+            ("main", "main", "feature", 1),
+            ("master", "master", "feature", 1),
+            ("trunk/current", "trunk/current", "feature", 1),
+            ("develop", "master", "develop", 0),
+            ("develop", "release", "develop", 0),
+            ("main", "develop", "feature", 0),
+            ("main", "MAIN", "feature", 0),
+        ] {
+            let (_dir, factory, server, state) = fixture(all).await;
+            {
+                let mut state = state.lock().unwrap();
+                state.repositories.insert(
+                    "acme/repo".into(),
+                    json!({"full_name":"acme/repo","default_branch":default}),
+                );
+                let pr = state.pulls.get_mut("/repos/acme/repo/pulls/5").unwrap();
+                pr["base"]["ref"] = json!(target);
+                pr["head"]["ref"] = json!(head);
+                pr["requested_reviewers"] = json!([{"login":"alice"}]);
+            }
+            factory.poll_now().await.unwrap();
+            assert_eq!(
+                events(&factory).len(),
+                expected,
+                "{all}/{default}/{head}->{target}"
+            );
+            if expected == 0 {
+                assert!(
+                    !server
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r.path.contains("/reviews?")),
+                    "excluded branch must not fetch reviews"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_default_rereview_does_not_consume_head_before_retargeting_to_default() {
+    let (_dir, factory, _server, state) = fixture(true).await;
+    set_head(&state, 'b');
+    {
+        let mut state = state.lock().unwrap();
+        state.reviews = vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
+        state.pulls.get_mut("/repos/acme/repo/pulls/5").unwrap()["base"]["ref"] = json!("release");
+    }
+    factory.poll_now().await.unwrap();
+    assert!(events(&factory).is_empty());
+    state
+        .lock()
+        .unwrap()
+        .pulls
+        .get_mut("/repos/acme/repo/pulls/5")
+        .unwrap()["base"]["ref"] = json!("main");
+    factory.poll_now().await.unwrap();
+    factory.poll_now().await.unwrap();
+    assert_eq!(
+        events(&factory).len(),
+        1,
+        "excluded target must not consume the new head"
+    );
+}
+
+#[tokio::test]
+async fn default_branch_metadata_is_authenticated_and_failure_does_not_admit() {
+    for response in [
+        json!({"full_name":"acme/repo"}),
+        json!({"full_name":"wrong/repo","default_branch":"main"}),
+        json!({"full_name":"acme/repo","default_branch":"bad..branch"}),
+    ] {
+        let (_dir, factory, _server, state) = fixture(true).await;
+        state
+            .lock()
+            .unwrap()
+            .repositories
+            .insert("acme/repo".into(), response);
+        assert!(factory.poll_now().await.is_err());
+        assert!(events(&factory).is_empty());
+        state.lock().unwrap().repositories.clear();
+        factory.poll_now().await.unwrap();
+        assert_eq!(events(&factory).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn default_branch_is_resolved_once_per_repository_in_a_scan() {
+    let (_dir, factory, server, state) = fixture(true).await;
+    let mut settings = factory.settings().unwrap();
+    settings.source_connectors[0].owners.push("other".into());
+    factory.save_settings(settings).unwrap();
+    {
+        let mut state = state.lock().unwrap();
+        state
+            .rows
+            .extend([row("acme/repo", 6), row("other/repo", 7)]);
+        state
+            .pulls
+            .insert("/repos/acme/repo/pulls/6".into(), pull("acme/repo", 6));
+        state
+            .pulls
+            .insert("/repos/other/repo/pulls/7".into(), pull("other/repo", 7));
+        state.repositories.insert(
+            "acme/repo".into(),
+            json!({"full_name":"acme/repo","default_branch":"develop"}),
+        );
+        for number in [5, 6] {
+            state
+                .pulls
+                .get_mut(&format!("/repos/acme/repo/pulls/{number}"))
+                .unwrap()["base"]["ref"] = json!("develop");
+        }
+    }
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 3);
+    let calls = server.calls.lock().unwrap();
+    for repo in ["acme/repo", "other/repo"] {
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|r| r.path == format!("/repos/{repo}"))
+                .count(),
+            1
+        );
+    }
 }
 
 fn set_head(state: &Arc<Mutex<Discovery>>, head: char) {

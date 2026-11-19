@@ -750,6 +750,38 @@ async fn update_pr_rejects_read_only_nodes_and_unapproved_triggers() {
 }
 
 #[tokio::test]
+async fn review_execution_rejects_a_non_principal_target_before_agents() {
+    let mut f = Fixture::new().await;
+    f.event.trigger_id = "pr_review".into();
+    let mut s = f.factory.settings().unwrap();
+    let mut node = s.flows[1].nodes[0].clone();
+    node.id = "review".into();
+    node.depends_on.clear();
+    node.result_schema = json!({"type":"object"});
+    s.flows[2].nodes = vec![node];
+    f.factory.save_settings(s).unwrap();
+    f.agent("", json!({}));
+    std::fs::write(f.dir.path().join("source-is-target"), "").unwrap();
+    let d = f.run().await;
+    assert_eq!(d.run.status, "failed");
+    assert!(
+        d.run
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("default branch"),
+        "{d:?}"
+    );
+    assert!(f.writes.lock().unwrap().is_empty());
+    let root = PathBuf::from(f.factory.snapshot().unwrap().service.app_data_dir);
+    assert!(!root
+        .join("memory/acme/repo/runs")
+        .join(&d.run.id)
+        .join("review.prompt")
+        .exists());
+}
+
+#[tokio::test]
 async fn update_pr_rejects_head_or_base_changes_since_preparation() {
     for branch in ["main", "feature"] {
         let f = Fixture::new().await;

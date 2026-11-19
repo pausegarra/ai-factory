@@ -45,7 +45,7 @@ fn settings() -> Settings {
     }
 }
 fn pr() -> Value {
-    json!({"number":5,"title":"PR","body":"Closes #1","state":"open","html_url":"https://github.com/acme/repo/pull/5","base":{"repo":{"full_name":"acme/repo"}},"head":{"sha":"a".repeat(40),"ref":"feature"},"user":{"login":"alice"},"requested_reviewers":[{"login":"alice"}]})
+    json!({"number":5,"title":"PR","body":"Closes #1","state":"open","html_url":"https://github.com/acme/repo/pull/5","base":{"ref":"main","repo":{"full_name":"acme/repo"}},"head":{"sha":"a".repeat(40),"ref":"feature"},"user":{"login":"alice"},"requested_reviewers":[{"login":"alice"}]})
 }
 fn search(present: bool, number: u64) -> Value {
     json!({"incomplete_results":false,"total_count":if present {1}else{0},"items":if present {vec![json!({"number":number,"repository_url":"https://api.github.com/repos/acme/repo"})]}else{vec![]}})
@@ -89,7 +89,8 @@ async fn issue_approval_and_review_save_races_do_not_consume_events() {
                             if r.path == "/user" { return (200,json!({"login":"alice"})); }
                             if r.path.starts_with("/search/") { return (200, search(true, if trigger == "new_issue" {1}else{5})); }
                             if r.path == "/repos/acme/repo/issues/1" { return (200,json!({"state":"open","title":"[AI] fixture","user":{"login":"alice"},"html_url":"https://github.com/acme/repo/issues/1"})); }
-                            if r.path == "/repos/acme/repo/pulls/5" { return (200,pr()); }
+                            if r.path == "/repos/acme/repo" { return (200,json!({"full_name":"acme/repo","default_branch":"main"})); }
+if r.path == "/repos/acme/repo/pulls/5" { return (200,pr()); }
                             if r.path.contains("/reviews?") { return (200,if approved_signal { json!([{"id":1,"state":"APPROVED","commit_id":"a".repeat(40),"user":{"login":"bob"}}]) } else {json!([])}); }
                             if r.path.contains("/comments?") { return (200,if approved_signal {json!([])}else{json!([{"id":7,"body":"OK","user":{"login":"alice"}}])}); }
                             (500,json!({"unexpected":r.path}))
@@ -217,7 +218,8 @@ async fn disabled_pairs_skip_keychain_and_http_for_each_trigger() {
             if r.path == "/user" { return (200,json!({"login":"bob"})); }
             if r.path.starts_with("/search/") { return (200,search(true,if trigger=="new_issue" {2}else{5})); }
             if r.path == "/repos/acme/repo/issues/2" { return (200,json!({"state":"open","title":"[AI] Bob","user":{"login":"bob"},"html_url":"https://github.com/acme/repo/issues/2"})); }
-            if r.path == "/repos/acme/repo/pulls/5" { let mut p=pr(); p["user"]["login"]=json!("bob"); p["requested_reviewers"]=json!([{"login":"bob"}]); return (200,p); }
+            if r.path == "/repos/acme/repo" { return (200,json!({"full_name":"acme/repo","default_branch":"main"})); }
+if r.path == "/repos/acme/repo/pulls/5" { let mut p=pr(); p["user"]["login"]=json!("bob"); p["requested_reviewers"]=json!([{"login":"bob"}]); return (200,p); }
             if r.path.contains("/reviews?") { return (200,json!([{"state":"APPROVED","commit_id":"a".repeat(40),"user":{"login":"alice"}}])); }
             if r.path.contains("/comments?") { return (200,json!([])); }
             (500,json!({"unexpected":r.path}))
@@ -329,6 +331,12 @@ async fn review_withdrawal_race_and_unobserved_edges_preserve_generation() {
                         return (503, json!({}));
                     }
                     return (200, search(m == 0 || m == 4, 5));
+                }
+                if r.path == "/repos/acme/repo" {
+                    return (
+                        200,
+                        json!({"full_name":"acme/repo","default_branch":"main"}),
+                    );
                 }
                 if r.path == "/repos/acme/repo/pulls/5" {
                     if mode.load(Ordering::SeqCst) == 4 {
@@ -476,6 +484,12 @@ async fn active_other_trigger_may_use_same_token() {
         if r.path.contains("/reviews?") {
             return (200, json!([]));
         }
+        if r.path == "/repos/acme/repo" {
+            return (
+                200,
+                json!({"full_name":"acme/repo","default_branch":"main"}),
+            );
+        }
         if r.path == "/repos/acme/repo/pulls/5" {
             return (200, pr());
         }
@@ -513,7 +527,8 @@ async fn removed_origin_profile_during_polling_cannot_admit_any_trigger() {
                 if r.path=="/user" {return (200,json!({"login":"alice"}));}
                 if r.path.starts_with("/search/") {return (200,search(true,if trigger=="new_issue"{1}else{5}));}
                 if r.path=="/repos/acme/repo/issues/1" {return (200,json!({"state":"open","title":"[AI] fixture","user":{"login":"alice"},"html_url":"https://github.com/acme/repo/issues/1"}));}
-                if r.path=="/repos/acme/repo/pulls/5" {return (200,pr());}
+                if r.path == "/repos/acme/repo" { return (200,json!({"full_name":"acme/repo","default_branch":"main"})); }
+if r.path=="/repos/acme/repo/pulls/5" {return (200,pr());}
                 if r.path.contains("/reviews?"){return (200,json!([]));}
                 if r.path.contains("/comments?"){return (200,json!([{"id":7,"body":"OK","user":{"login":"alice"}}]));}
                 (500,json!({}))

@@ -32,6 +32,13 @@ impl Github {
             valid_branch(base_ref) && valid_branch(head_ref),
             "Invalid PR branch reference"
         );
+        if event.trigger_id == "pr_review" {
+            let default = self.repository_default(&event.repository).await?;
+            ensure!(
+                Self::review_targets_branch(&pr, &default)?,
+                "PR review target is not the repository default branch"
+            );
+        }
         let head_repository = pr["head"]["repo"]["full_name"]
             .as_str()
             .context("Missing PR head repository")?;

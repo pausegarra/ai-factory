@@ -160,6 +160,8 @@ async fn server(fail_personal: bool, calls: Arc<Mutex<Vec<(String, String)>>>) -
                             json!({"incomplete_results":false,"total_count":1,"items":[item]}),
                         )
                     }
+                } else if path == format!("/repos/{repo}") {
+                    (200, json!({"full_name":repo,"default_branch":"main"}))
                 } else if path.contains("/reviews?") {
                     (200, json!([]))
                 } else if path.contains("/issues/") {
@@ -172,7 +174,7 @@ async fn server(fail_personal: bool, calls: Arc<Mutex<Vec<(String, String)>>>) -
                     let number = if actor == "alice" { 10 } else { 20 };
                     (
                         200,
-                        json!({"number":number,"state":"open","title":"Review","body":"","user":{"login":"contributor"},"html_url":format!("https://github.com/{repo}/pull/{number}"),"base":{"repo":{"full_name":repo}},"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"requested_reviewers":[{"login":actor}]}),
+                        json!({"number":number,"state":"open","title":"Review","body":"","user":{"login":"contributor"},"html_url":format!("https://github.com/{repo}/pull/{number}"),"base":{"ref":"main","repo":{"full_name":repo}},"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"requested_reviewers":[{"login":actor}]}),
                     )
                 };
                 let body = body.to_string();

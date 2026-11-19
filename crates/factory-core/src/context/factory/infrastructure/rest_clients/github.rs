@@ -446,6 +446,20 @@ impl Github {
                 factory.store.record_action_receipt(&key, &receipt)?;
                 continue;
             }
+            if kind == "review" {
+                // Recheck after reading history: a PR may be retargeted while
+                // its nodes or the reconciliation request are in flight.
+                let current = self.pr(&event.repository, event.number).await?;
+                ensure!(
+                    current["head"]["sha"] == event.head_sha && current["state"] == "open",
+                    "PR changed since review request"
+                );
+                let default = self.repository_default(&event.repository).await?;
+                ensure!(
+                    Self::review_targets_branch(&current, &default)?,
+                    "PR review target is not the repository default branch"
+                );
+            }
             check_active()?;
             let body = if kind == "review" {
                 value["body"].as_str().unwrap()
