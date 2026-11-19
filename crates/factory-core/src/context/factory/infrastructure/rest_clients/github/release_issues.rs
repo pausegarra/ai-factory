@@ -5,7 +5,7 @@ use anyhow::{ensure, Context};
 use reqwest::Method;
 use serde_json::{json, Value};
 
-fn validate_issue(issue: &Value, event: &TriggerEvent) -> Result<()> {
+fn validate_issue(issue: &Value, event: &TriggerEvent, release_prefix: &str) -> Result<()> {
     ensure!(
         issue["number"] == event.number
             && issue["html_url"]
@@ -15,7 +15,9 @@ fn validate_issue(issue: &Value, event: &TriggerEvent) -> Result<()> {
                     event.repository, event.number
                 )))
             && issue.get("pull_request").is_none_or(Value::is_null)
-            && issue["title"].as_str().is_some_and(is_release_issue_title)
+            && issue["title"]
+                .as_str()
+                .is_some_and(|title| is_release_issue_title(title, release_prefix))
             && issue["user"]["login"]
                 .as_str()
                 .is_some_and(|author| author.eq_ignore_ascii_case(&event.actor))
@@ -38,7 +40,7 @@ impl Github {
                 && event.number > 0,
             "Invalid release issue"
         );
-        let check_active = || -> Result<()> {
+        let check_active = || -> Result<String> {
             ensure!(!factory.stop.is_cancelled(), "Factory is stopping");
             let detail = factory.store.detail(run)?;
             ensure!(detail.run.status == "running", "Run is already terminal");
@@ -53,16 +55,18 @@ impl Github {
                     && profile.allows_owner(event.repository.split('/').next().unwrap()),
                 "Release actor or repository no longer authorized"
             );
-            Ok(())
+            Ok(settings.release_issue_title_prefix)
         };
         check_active()?;
         self.verify_actor(&event.actor).await?;
         check_active()?;
         let path = format!("/repos/{}/issues/{}", event.repository, event.number);
         let mut issue = self.request(Method::GET, &path, None).await?;
-        validate_issue(&issue, event)?;
+        let release_prefix = check_active()?;
+        validate_issue(&issue, event, &release_prefix)?;
         if issue["state"] == "open" {
-            check_active()?;
+            let release_prefix = check_active()?;
+            validate_issue(&issue, event, &release_prefix)?;
             let response = self
                 .request(
                     Method::PATCH,
@@ -77,7 +81,8 @@ impl Github {
                 .request(Method::GET, &path, None)
                 .await
                 .context("Cannot confirm release issue closure")?;
-            validate_issue(&issue, event)?;
+            let release_prefix = check_active()?;
+            validate_issue(&issue, event, &release_prefix)?;
             if issue["state"] != "closed" {
                 response?;
                 anyhow::bail!("GitHub did not close the release issue");

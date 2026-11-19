@@ -19,14 +19,14 @@ async fn release_poll_is_durable_and_keeps_profile_and_frozen_flow() {
                 200,
                 json!({"incomplete_results":false,"total_count":1,"items":[{
                     "number":80,"repository_url":"https://api.github.com/repos/acme/repo",
-                    "title":"[Release] 2.0.0","user":{"login":"alice"}
+                    "title":"[RELEASE] 2.0.0","user":{"login":"alice"}
                 }]}),
             );
         }
         if r.path == "/repos/acme/repo/issues/80" {
             return (
                 200,
-                json!({"number":80,"state":"open","title":"[Release] 2.0.0",
+                json!({"number":80,"state":"open","title":"[RELEASE] 2.0.0",
                 "body":"Publish app","user":{"login":"alice"},
                 "html_url":"https://github.com/acme/repo/issues/80"}),
             );
@@ -119,19 +119,20 @@ fn detail(title: &str) -> serde_json::Value {
 #[tokio::test]
 async fn release_requires_exact_prefix_fresh_identity_state_and_author() {
     for (title, field, value, want, fetch, error) in [
-        ("[Release]", "title", json!("[Release]"), 1, true, false),
-        ("[Release] 2", "title", json!("[Release] 2"), 1, true, false),
-        ("x [Release]", "title", json!("[Release]"), 0, false, false),
-        ("[release]", "title", json!("[Release]"), 0, false, false),
-        (" [Release]", "title", json!("[Release]"), 0, false, false),
-        ("[Release", "title", json!("[Release]"), 0, false, false),
-        ("[Release]", "title", json!("normal"), 0, true, false),
-        ("[Release]", "title", json!("[AI] changed"), 0, true, false),
-        ("[Release]", "state", json!("closed"), 0, true, false),
-        ("[Release]", "pull_request", json!({}), 0, true, false),
-        ("[Release]", "user", json!({"login":"bob"}), 0, true, false),
+        ("[RELEASE]", "title", json!("[RELEASE]"), 1, true, false),
+        ("[RELEASE] 2", "title", json!("[RELEASE] 2"), 1, true, false),
+        ("x [RELEASE]", "title", json!("[RELEASE]"), 0, false, false),
+        ("[release]", "title", json!("[RELEASE]"), 0, false, false),
+        (" [RELEASE]", "title", json!("[RELEASE]"), 1, true, false),
+        ("[Release]", "title", json!("[RELEASE]"), 0, false, false),
+        ("[RELEASE", "title", json!("[RELEASE]"), 0, false, false),
+        ("[RELEASE]", "title", json!("normal"), 0, true, false),
+        ("[RELEASE]", "title", json!("[AI] changed"), 0, true, false),
+        ("[RELEASE]", "state", json!("closed"), 0, true, false),
+        ("[RELEASE]", "pull_request", json!({}), 0, true, false),
+        ("[RELEASE]", "user", json!({"login":"bob"}), 0, true, false),
         (
-            "[Release]",
+            "[RELEASE]",
             "html_url",
             json!("https://github.com/acme/other/issues/80"),
             0,
@@ -230,8 +231,8 @@ async fn activation_changes_during_release_detail_do_not_consume_event() {
         let resume = Arc::new(Notify::new());
         let server=Server::start({let reached=reached.clone();let resume=resume.clone();move|r|{let reached=reached.clone();let resume=resume.clone();async move {
             if r.path=="/user" {return (200,json!({"login":"alice"}));}
-            if r.path.starts_with("/search/") {return (200,json!({"incomplete_results":false,"total_count":1,"items":[row("[Release]")]}));}
-            if r.path.ends_with("/issues/80") {reached.notify_one();resume.notified().await;return (200,detail("[Release]"));}
+            if r.path.starts_with("/search/") {return (200,json!({"incomplete_results":false,"total_count":1,"items":[row("[RELEASE]")]}));}
+            if r.path.ends_with("/issues/80") {reached.notify_one();resume.notified().await;return (200,detail("[RELEASE]"));}
             (500,json!({}))
         }}}).await;
         let dir = tempfile::tempdir().unwrap();
@@ -327,7 +328,7 @@ async fn shared_scan_and_distinct_issue_keys_preserve_frozen_release_configurati
     );
     f.save_settings(s).unwrap();
     f.poll_now().await.unwrap();
-    *title.lock().unwrap() = "[Release]";
+    *title.lock().unwrap() = "[RELEASE]";
     f.poll_now().await.unwrap();
     f.poll_now().await.unwrap();
     let runs = f.snapshot().unwrap().runs;
@@ -369,7 +370,7 @@ async fn shared_scan_and_distinct_issue_keys_preserve_frozen_release_configurati
 #[tokio::test]
 async fn release_rejects_ineligible_search_rows_before_fetching_detail() {
     for mode in ["closed", "pr", "author", "owner"] {
-        let mut search = row("[Release]");
+        let mut search = row("[RELEASE]");
         match mode {
             "closed" => search["state"] = json!("closed"),
             "pr" => search["pull_request"] = json!({}),
@@ -420,11 +421,11 @@ async fn release_and_ai_share_one_scan_per_profile_without_crossing_credentials(
         let actor=if r.authorization=="Bearer fixture-a" {"alice"}else if r.authorization=="Bearer fixture-b" {"bob"}else{panic!("unexpected credentials")};
         if r.path=="/user" {return (200,json!({"login":actor}));}
         if r.path.starts_with("/search/") {
-            let rows:Vec<_>=[(81,"[AI] task"),(82,"[Release] app")].into_iter().map(|(n,title)|json!({"number":n,"repository_url":format!("https://api.github.com/repos/{actor}/repo"),"title":title,"user":{"login":actor}})).collect();
+            let rows:Vec<_>=[(81,"[AI] task"),(82,"[RELEASE] app")].into_iter().map(|(n,title)|json!({"number":n,"repository_url":format!("https://api.github.com/repos/{actor}/repo"),"title":title,"user":{"login":actor}})).collect();
             return (200,json!({"incomplete_results":false,"total_count":2,"items":rows}));
         }
         if r.path==format!("/repos/{actor}/repo/issues/81") || r.path==format!("/repos/{actor}/repo/issues/82") {
-            let n=if r.path.ends_with("81") {81}else{82};let title=if n==81 {"[AI] task"}else{"[Release] app"};
+            let n=if r.path.ends_with("81") {81}else{82};let title=if n==81 {"[AI] task"}else{"[RELEASE] app"};
             return (200,json!({"state":"open","title":title,"user":{"login":actor},"html_url":format!("https://github.com/{actor}/repo/issues/{n}")}));
         }
         (500,json!({}))
@@ -480,4 +481,150 @@ async fn release_and_ai_share_one_scan_per_profile_without_crossing_credentials(
         calls.iter().filter(|r| r.path.contains("/issues/")).count(),
         3
     );
+}
+
+#[tokio::test]
+async fn release_prefix_polling_uses_configured_literal_and_fresh_title() {
+    for (prefix, searched, fresh, expected, fetched) in [
+        ("ship:", "ship:candidate", "ship:fresh", 1, true),
+        (
+            " ship: ",
+            " \tship:candidate",
+            "\u{2003}ship:fresh\n",
+            1,
+            true,
+        ),
+        ("ship:", "ship:candidate", "Ship:fresh", 0, true),
+        ("ship:", "ship:candidate", "note ship:fresh", 0, true),
+        ("ship:", "ship:candidate", "[AI] task", 0, true),
+        ("ship:", "[AI] candidate", "ship:fresh", 0, false),
+        ("[RELEASE]", "[RELEASE]", "[RELEASE]", 1, true),
+        ("[RELEASE]", "[Release]", "[Release]", 0, false),
+        ("[.*]", "[.*]candidate", "[.*]fresh", 1, true),
+        (
+            "Team Release:",
+            "Team  Release:2",
+            "Team  Release:2",
+            0,
+            false,
+        ),
+    ] {
+        let server = Server::start(move |r| async move {
+            assert_eq!(r.method, "GET");
+            assert_eq!(r.authorization, "Bearer fixture-a");
+            if r.path == "/user" {
+                return (200, json!({"login":"alice"}));
+            }
+            if r.path.starts_with("/search/") {
+                return (
+                    200,
+                    json!({"incomplete_results":false,"total_count":1,"items":[row(searched)]}),
+                );
+            }
+            if r.path == "/repos/acme/repo/issues/80" {
+                return (200, detail(fresh));
+            }
+            panic!("unexpected {}", r.path);
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
+        let mut s = release_settings();
+        s.issue_title_prefix = "task:".into();
+        s.release_issue_title_prefix = prefix.into();
+        factory.save_settings(s).unwrap();
+        factory.poll_now().await.unwrap();
+        factory.poll_now().await.unwrap();
+        let runs = factory.snapshot().unwrap().runs;
+        assert_eq!(runs.len(), expected, "{prefix:?} {searched:?} {fresh:?}");
+        assert_eq!(
+            server
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.path.ends_with("/issues/80")),
+            fetched
+        );
+        let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM dedup", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            expected as i64
+        );
+        if expected == 1 {
+            let event = factory.run_detail(&runs[0].id).unwrap().event;
+            assert_eq!(event.trigger_id, "release");
+            assert_eq!(event.event_id, "release:acme/repo#80");
+            assert_eq!(event.title, fresh);
+            assert_eq!(event.payload["issue"]["title"], fresh);
+            assert_eq!(event.origin_token_profile_id.as_deref(), Some("work"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn release_prefix_polling_reads_settings_after_detail_await() {
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Notify;
+    let reached = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let server = Server::start({
+        let reached = reached.clone();
+        let resume = resume.clone();
+        move |r| {
+            let reached = reached.clone();
+            let resume = resume.clone();
+            async move {
+                if r.path == "/user" {
+                    return (200, json!({"login":"alice"}));
+                }
+                if r.path.starts_with("/search/") {
+                    return (
+                        200,
+                        json!({"incomplete_results":false,"total_count":1,"items":[row("ship:2")]}),
+                    );
+                }
+                if r.path.ends_with("/issues/80") {
+                    reached.notify_one();
+                    resume.notified().await;
+                    return (200, detail("ship:2"));
+                }
+                panic!("unexpected {}", r.path);
+            }
+        }
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    let mut original = release_settings();
+    original.release_issue_title_prefix = "ship:".into();
+    factory.save_settings(original.clone()).unwrap();
+    let polling = {
+        let factory = factory.clone();
+        tokio::spawn(async move { factory.poll_now().await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), reached.notified())
+        .await
+        .unwrap();
+    let mut changed = factory.settings().unwrap();
+    changed.release_issue_title_prefix = "deploy:".into();
+    factory.save_settings(changed).unwrap();
+    resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), polling)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(factory.snapshot().unwrap().runs.is_empty());
+    let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM dedup", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    factory.save_settings(original).unwrap();
+    resume.notify_one();
+    factory.poll_now().await.unwrap();
+    assert_eq!(factory.snapshot().unwrap().runs.len(), 1);
 }

@@ -8,7 +8,8 @@ mod issue_titles;
 mod settings_input;
 pub(crate) use issue_titles::{
     is_release_issue_title, issue_title_matches_trigger, normalize_issue_title_prefix,
-    DEFAULT_ISSUE_TITLE_PREFIX,
+    normalize_release_issue_title_prefix, DEFAULT_ISSUE_TITLE_PREFIX,
+    DEFAULT_RELEASE_ISSUE_TITLE_PREFIX,
 };
 
 pub(crate) const TRIGGER_IDS: [&str; 4] = ["new_issue", "pr_approved", "pr_review", "release"];
@@ -25,6 +26,7 @@ pub struct Settings {
     pub projects: Vec<Project>,
     pub commands: Commands,
     pub issue_title_prefix: String,
+    pub release_issue_title_prefix: String,
     pub issue_node_comments_enabled: bool,
     pub codex_yolo: bool,
     pub poll_interval_seconds: u64,
@@ -157,6 +159,7 @@ impl Default for Settings {
                 git: "git".into(),
             },
             issue_title_prefix: DEFAULT_ISSUE_TITLE_PREFIX.into(),
+            release_issue_title_prefix: DEFAULT_RELEASE_ISSUE_TITLE_PREFIX.into(),
             issue_node_comments_enabled: true,
             codex_yolo: false,
             poll_interval_seconds: 15,
@@ -313,6 +316,7 @@ impl Settings {
     }
     pub fn validate(&self) -> Result<()> {
         normalize_issue_title_prefix(&self.issue_title_prefix)?;
+        normalize_release_issue_title_prefix(&self.release_issue_title_prefix)?;
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
         self.validate_concurrency()?;
         ensure!(

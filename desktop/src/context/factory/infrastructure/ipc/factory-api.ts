@@ -15,10 +15,11 @@ import type {
   CodexLogin,
   InstalledSkill,
 } from "../../domain/types";
-import { DEFAULT_ISSUE_TITLE_PREFIX } from "../../domain/types";
+import { DEFAULT_RELEASE_ISSUE_TITLE_PREFIX, DEFAULT_ISSUE_TITLE_PREFIX } from "../../domain/types";
 export const native = isTauri();
 const previewSettings: Settings = {
   issue_title_prefix: DEFAULT_ISSUE_TITLE_PREFIX,
+  release_issue_title_prefix: DEFAULT_RELEASE_ISSUE_TITLE_PREFIX,
   notification_connectors: [],
   source_connectors: [],
   projects: [],
