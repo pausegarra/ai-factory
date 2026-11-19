@@ -1,5 +1,5 @@
 use super::*;
-use crate::context::factory::domain::entities::models::issue_trigger_for_title;
+use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 use crate::context::factory::infrastructure::repositories::pr_origins::TrackedPrOrigin;
 use std::collections::{HashMap, HashSet};
 
@@ -132,11 +132,16 @@ impl Github {
             }
             let repo = repository(&row)?;
             let n = row["number"].as_u64().context("Invalid issue number")?;
-            let candidates = match row["title"].as_str().map(issue_trigger_for_title) {
-                Some(Some(id)) if active.contains(&id) => vec![id],
-                Some(_) => continue,
-                None => active.clone(),
-            };
+            let current = factory.store.public_settings()?;
+            let candidates: Vec<&str> = active
+                .iter()
+                .copied()
+                .filter(|trigger| {
+                    row["title"].as_str().is_none_or(|title| {
+                        issue_title_matches_trigger(title, trigger, &current.issue_title_prefix)
+                    })
+                })
+                .collect();
             let mut pending = vec![];
             for trigger in candidates {
                 let event = if trigger == "release" {
@@ -164,26 +169,28 @@ impl Github {
             {
                 continue;
             }
-            let Some(trigger) = fresh["title"].as_str().and_then(issue_trigger_for_title) else {
+            let current = factory.store.public_settings()?;
+            let Some(title) = fresh["title"].as_str() else {
                 continue;
             };
-            if !pending.contains(&trigger) {
-                continue;
-            }
-            let title = fresh["title"].as_str().unwrap();
             let body = fresh["body"].as_str().unwrap_or("");
-            let mut event = if trigger == "release" {
-                TriggerEvent::release_issue(&repo, n, title, actor, body)
-            } else {
-                TriggerEvent::issue(&repo, n, title, actor, body)
-            };
-            ensure!(
-                fresh["html_url"] == event.url,
-                "Issue URL identity mismatch"
-            );
-            event.payload = json!({"issue":fresh});
-            event.origin_token_profile_id = Some(profile.id.clone());
-            factory.enqueue(event)?;
+            for trigger in pending {
+                if !issue_title_matches_trigger(title, trigger, &current.issue_title_prefix) {
+                    continue;
+                }
+                let mut event = if trigger == "release" {
+                    TriggerEvent::release_issue(&repo, n, title, actor, body)
+                } else {
+                    TriggerEvent::issue(&repo, n, title, actor, body)
+                };
+                ensure!(
+                    fresh["html_url"] == event.url,
+                    "Issue URL identity mismatch"
+                );
+                event.payload = json!({"issue":fresh});
+                event.origin_token_profile_id = Some(profile.id.clone());
+                factory.enqueue(event)?;
+            }
         }
         Ok(())
     }

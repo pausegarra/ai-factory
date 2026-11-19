@@ -1,5 +1,5 @@
 import { validateSourceConnectors } from "./source-connectors";
-import { TRIGGERS, type Flow, type Settings } from "./types";
+import { DEFAULT_ISSUE_TITLE_PREFIX, TRIGGERS, type Flow, type Settings } from "./types";
 export type ActivationStatus = "Enabled" | "Disabled globally" | "Disabled for this account";
 export function profilePreference(flow: Flow, profileId: string): boolean {
   const map = flow.profile_activation;
@@ -104,6 +104,9 @@ export const removeNode = (flow: Flow, id: string): Flow => ({
 });
 export function validateSettings(s: Settings): string[] {
   const errors: string[] = [];
+  const prefix = s.issue_title_prefix === undefined ? DEFAULT_ISSUE_TITLE_PREFIX : s.issue_title_prefix;
+  if (typeof prefix !== "string" || !prefix.trim())
+    errors.push("Issue title prefix cannot be empty.");
   if (
     !Number.isInteger(s.max_concurrent) ||
     s.max_concurrent < 1 ||

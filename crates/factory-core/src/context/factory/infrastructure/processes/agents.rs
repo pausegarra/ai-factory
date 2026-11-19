@@ -1,4 +1,4 @@
-use crate::context::factory::domain::entities::models::issue_trigger_for_title;
+use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 mod artifact_repair;
 mod invocation;
 mod output;
@@ -209,10 +209,16 @@ async fn prepare(
                     None,
                 )
                 .await?;
+            let current = factory.store.public_settings()?;
             ensure!(
                 issue["state"] == "open"
-                    && issue["title"].as_str().and_then(issue_trigger_for_title)
-                        == Some(event.trigger_id.as_str())
+                    && issue["title"].as_str().is_some_and(|title| {
+                        issue_title_matches_trigger(
+                            title,
+                            &event.trigger_id,
+                            &current.issue_title_prefix,
+                        )
+                    })
                     && issue["user"]["login"]
                         .as_str()
                         .is_some_and(|v| v.eq_ignore_ascii_case(&event.actor))

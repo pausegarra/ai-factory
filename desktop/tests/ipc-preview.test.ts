@@ -60,3 +60,10 @@ it("provides an isolated disabled Release flow in preview",async()=>{
  expect((await factoryApi.settings()).flows.find(f=>f.id==="release")!.enabled).toBe(false);
  expect((await factoryApi.snapshot()).capacity.by_trigger.release).toEqual({active:0,limit:4});
 });
+
+it("defaults the issue prefix in isolated preview settings", async () => {
+  const first = await factoryApi.settings();
+  expect(first.issue_title_prefix).toBe("[AI]");
+  first.issue_title_prefix = "bot:";
+  expect((await factoryApi.settings()).issue_title_prefix).toBe("[AI]");
+});

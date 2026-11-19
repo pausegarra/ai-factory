@@ -14,7 +14,7 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import type { Settings, Snapshot } from "../../domain/types";
-import { TRIGGERS } from "../../domain/types";
+import { DEFAULT_ISSUE_TITLE_PREFIX, TRIGGERS } from "../../domain/types";
 import { countNeedsAttention } from "../../application/services/needs-attention";
 import { RunTable } from "./runs";
 import { date, Empty } from "./ui";
@@ -154,7 +154,11 @@ export function OverviewPage({
             <Empty
               icon={<Tray size={32} />}
               title="Ready for the first task"
-              description="Open an issue with [AI] in a connected repository. Your workflow starts automatically."
+              description={
+                "Open an issue whose title starts with " +
+                (settings.issue_title_prefix ?? DEFAULT_ISSUE_TITLE_PREFIX) +
+                " in a connected repository. Your workflow starts automatically."
+              }
             />
           )}
           <div className="panel-footer">

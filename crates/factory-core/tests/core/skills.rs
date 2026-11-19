@@ -779,6 +779,9 @@ async fn release_issue_closure_rechecks_identity_and_accepts_already_closed() {
         let script = format!("{AGENT}\ntouch \"$(dirname \"$0\")/publication-ready\"\nwhile [ ! -f \"$(dirname \"$0\")/publication-finish\" ]; do sleep 0.01; done\n");
         let (root, factory) = fixture(&script, 4);
         configure_release(&root, &factory, "codex", None);
+        let mut settings = factory.settings().unwrap();
+        settings.issue_title_prefix = "bot:".into();
+        factory.save_settings(settings).unwrap();
         let id = factory
             .enqueue(common::from_source(
                 TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
@@ -885,6 +888,9 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
     for failure in ["permission", "confirmation"] {
         let (root, factory) = fixture(AGENT, 4);
         configure_release(&root, &factory, "codex", None);
+        let mut settings = factory.settings().unwrap();
+        settings.issue_title_prefix = "bot:".into();
+        factory.save_settings(settings).unwrap();
         if failure == "permission" {
             root.issue_close_status
                 .store(403, std::sync::atomic::Ordering::SeqCst);

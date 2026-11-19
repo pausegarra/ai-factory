@@ -92,3 +92,12 @@ it("preserves both automatic issue comment values through settings IPC", async (
     expect(invoke).toHaveBeenLastCalledWith("get_settings");
   }
 });
+
+it("preserves the configured issue prefix through existing IPC", async () => {
+  const settings = { ...noticeSettings(), issue_title_prefix: "Bot:" };
+  vi.mocked(invoke).mockResolvedValueOnce(settings);
+  expect((await factoryApi.saveSettings(settings)).issue_title_prefix).toBe("Bot:");
+  expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
+  vi.mocked(invoke).mockResolvedValueOnce(settings);
+  expect((await factoryApi.settings()).issue_title_prefix).toBe("Bot:");
+});

@@ -1,4 +1,5 @@
 use super::store::Store;
+use crate::context::factory::domain::entities::models::normalize_issue_title_prefix;
 use crate::*;
 use anyhow::ensure;
 use rusqlite::OptionalExtension;
@@ -219,10 +220,11 @@ impl Store {
         &self,
         settings: &Settings,
     ) -> Result<(Settings, HashMap<String, Reference>)> {
-        settings.validate()?;
+        let mut clean = settings.clone();
+        clean.issue_title_prefix = normalize_issue_title_prefix(&clean.issue_title_prefix)?;
+        clean.validate()?;
         let old = self.raw_settings()?;
         let old_refs = self.source_credential_refs()?;
-        let mut clean = settings.clone();
         let mut refs = HashMap::new();
         for profile in &mut clean.source_connectors {
             let existing = old_refs

@@ -1,3 +1,4 @@
+import { noticeSettings } from "./fixtures/notices";
 import { describe, it, expect } from "vitest";
 import {
   validateFlow,
@@ -113,3 +114,16 @@ describe("settings validation", () => {
     expect(validateSettings(settings).join(" ")).toMatch(/token/i);
   });
 });
+
+
+it.each([undefined, "[AI]", " bot: ", "Team Bot:", "[.*]", "[Release]"])(
+  "accepts a literal nonempty prefix %j", issue_title_prefix => {
+    expect(validateSettings({ ...noticeSettings(), issue_title_prefix })).toEqual([]);
+  }
+);
+it.each(["", " \t\n", null, 0, false, [], {}])(
+  "rejects an explicit invalid issue prefix %j", issue_title_prefix => {
+    const value = { ...noticeSettings(), issue_title_prefix } as unknown as Settings;
+    expect(validateSettings(value)).toContain("Issue title prefix cannot be empty.");
+  }
+);

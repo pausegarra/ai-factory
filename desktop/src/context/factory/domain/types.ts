@@ -66,7 +66,9 @@ export interface Project {
   repository: string;
   source_path: string;
 }
+export const DEFAULT_ISSUE_TITLE_PREFIX = "[AI]";
 export interface Settings {
+  issue_title_prefix?: string;
   notification_connectors?: NotificationConnector[];
   source_connectors: SourceConnector[];
   // Keys are SourceConnector IDs; removed sources remain inactive.
@@ -93,9 +95,9 @@ export const TRIGGERS: Record<
 > = {
   new_issue: {
     label: "New task",
-    short: "[AI] issue",
+    short: "Prefixed issue",
     description:
-      "Open issues with [AI] in the title, created by allowed authors.",
+      "Open issues whose titles start with the configured prefix in Settings, created by allowed authors.",
   },
   pr_approved: {
     label: "PR approved",
