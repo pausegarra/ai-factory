@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -476,6 +476,7 @@ async fn review_receipt_prevents_duplicate_and_reconciles_actor_and_head() {
     let e = event("pr_review");
     let served = e.clone();
     let base=server(move|method,path,body|{if path=="/user"{return(200,json!({"login":"alice"}))}
+if path=="/repos/acme/repo"{return(200,json!({"full_name":"acme/repo","default_branch":"main"}))}
 if method=="POST"{w.fetch_add(1,Ordering::SeqCst);let review=json!({"id":9,"body":body["body"],"commit_id":body["commit_id"],"state":"CHANGES_REQUESTED","user":{"login":"alice"}});saved.lock().unwrap().push(review.clone());return(200,review)}
 if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(&served,"feature",&served.head_sha))}).await;
     let (dir, f) = factory(&base);
@@ -508,6 +509,64 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn review_retargeted_away_from_principal_is_not_published() {
+    for during_history_read in [false, true] {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let captured = writes.clone();
+        let retargeted = Arc::new(AtomicBool::new(!during_history_read));
+        let e = event("pr_review");
+        let served = e.clone();
+        let base = server(move |method, path, body| {
+            if path == "/user" {
+                return (200, json!({"login":"alice"}));
+            }
+            if path == "/repos/acme/repo" {
+                return (
+                    200,
+                    json!({"full_name":"acme/repo","default_branch":"main"}),
+                );
+            }
+            if path == "/repos/acme/repo/pulls/5" {
+                let mut pr = pr(&served, "feature", &served.head_sha);
+                pr["base"]["ref"] = json!(if retargeted.load(Ordering::SeqCst) {
+                    "release"
+                } else {
+                    "main"
+                });
+                return (200, pr);
+            }
+            if method == "POST" {
+                captured.fetch_add(1, Ordering::SeqCst);
+                return (
+                    200,
+                    json!({"id":19,"body":body["body"],"user":{"login":"alice"}}),
+                );
+            }
+            if path.contains("/reviews?") {
+                retargeted.store(true, Ordering::SeqCst);
+                return (200, json!([]));
+            }
+            panic!("unexpected {method} {path}")
+        })
+        .await;
+        let (dir, f) = factory(&base);
+        seed_run(&f, &e, "retargeted-review");
+        let api = Github::with_base("alice-token", &base).unwrap();
+        let r = result(
+            json!({"head_sha":e.head_sha,"review":{"event":"APPROVE","body":"Review completed"}}),
+        );
+        let outcome = api
+            .publish_actions(&f, &e, "retargeted-review", "review", dir.path(), &r)
+            .await;
+        assert!(
+            outcome.is_err(),
+            "a retargeted PR must not receive a review"
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
 }
 
 fn assert_compact_receipts(f: &Factory, remote_id: u64) {
@@ -553,6 +612,21 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
             &format!("{path}?per_page=100&page=1"),
             Reply::Json(200, json!([])),
         ));
+        if review {
+            steps.push(Step::new(
+                "GET",
+                PR_PATH,
+                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
+            ));
+            steps.push(Step::new(
+                "GET",
+                "/repos/acme/repo",
+                Reply::Json(
+                    200,
+                    json!({"full_name":"acme/repo","default_branch":"main"}),
+                ),
+            ));
+        }
         steps.push(Step::new(
             "POST",
             path,

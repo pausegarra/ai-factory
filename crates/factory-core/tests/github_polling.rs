@@ -53,7 +53,7 @@ fn setup(root: std::path::PathBuf, base: &str) -> Arc<Factory> {
     f
 }
 fn pr() -> Value {
-    json!({"number":5,"title":"PR title","body":"Closes #1","state":"open","html_url":"https://github.com/acme/repo/pull/5","base":{"repo":{"full_name":"acme/repo"}},"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"feature"},"user":{"login":"alice"},"requested_reviewers":[{"login":"alice"}]})
+    json!({"number":5,"title":"PR title","body":"Closes #1","state":"open","html_url":"https://github.com/acme/repo/pull/5","base":{"ref":"main","repo":{"full_name":"acme/repo"}},"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"feature"},"user":{"login":"alice"},"requested_reviewers":[{"login":"alice"}]})
 }
 
 type ApprovalState = Arc<Mutex<(Value, Vec<Value>, Vec<Value>)>>;
@@ -287,6 +287,7 @@ async fn review_requests_use_durable_rising_edges_and_do_not_clear_on_search_err
     let mode = Arc::new(Mutex::new(0u8));
     let state = mode.clone();
     let base=server(move|path,req|{assert!(req.to_lowercase().contains("bearer alice-token"));if path=="/user"{return(200,json!({"login":"alice"}))}
+if path=="/repos/acme/repo"{return(200,json!({"full_name":"acme/repo","default_branch":"main"}))}
 if path=="/repos/acme/repo/pulls/5"{return(200,pr())}
 if path.contains("/reviews?"){return(200,json!([]))}
 if path.starts_with("/search/"){let m=*state.lock().unwrap();if m==2{return(503,json!({}))}return(200,json!({"incomplete_results":false,"total_count":if m==1{0}else{1},"items":if m==1{vec![]}else{vec![json!({"number":5,"repository_url":"https://api.github.com/repos/acme/repo"})]}}))}panic!("unexpected {path}")}).await;

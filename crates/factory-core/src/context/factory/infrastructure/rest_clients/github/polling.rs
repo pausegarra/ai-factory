@@ -330,6 +330,7 @@ impl Github {
         }
         let mut candidates = vec![];
         let mut seen = HashSet::new();
+        let mut defaults = HashMap::<String, String>::new();
         for row in rows {
             if !factory.workflow_enabled_for("pr_review", &profile.id)? {
                 return Ok(());
@@ -348,6 +349,17 @@ impl Github {
             }
             if !factory.workflow_enabled_for("pr_review", &profile.id)? {
                 return Ok(());
+            }
+            let default = match defaults.get(&repo) {
+                Some(default) => default.clone(),
+                None => {
+                    let default = self.repository_default(&repo).await?;
+                    defaults.insert(repo.clone(), default.clone());
+                    default
+                }
+            };
+            if !Self::review_targets_branch(&pr, &default)? {
+                continue;
             }
             let feedback = self.account_review_state(&repo, n, reviewer).await?;
             let requested = pr["requested_reviewers"]

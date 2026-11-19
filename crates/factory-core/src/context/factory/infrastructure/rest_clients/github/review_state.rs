@@ -1,7 +1,14 @@
+use super::merge_cleanup::valid_branch;
 use super::*;
 use crate::context::factory::domain::entities::pull_request_review::PullRequestReviewState;
 
 impl Github {
+    pub(super) fn review_targets_branch(pr: &Value, default: &str) -> Result<bool> {
+        let target = pr["base"]["ref"].as_str().context("Missing PR base ref")?;
+        ensure!(valid_branch(target), "Invalid PR base ref");
+        Ok(target == default)
+    }
+
     pub(super) async fn account_review_state(
         &self,
         repo: &str,

@@ -76,6 +76,8 @@ async fn fixture() -> (
                     json!({"login":"alice"})
                 } else if path.starts_with("/search/issues?") {
                     json!({"total_count":0,"incomplete_results":false,"items":[]})
+                } else if path == "/repos/acme/repo" {
+                    json!({"full_name":"acme/repo","default_branch":"main"})
                 } else if path == "/repos/acme/repo/git/ref/heads/main" {
                     json!({"ref":"refs/heads/main","object":{"type":"commit","sha":sha}})
                 } else if path.starts_with("/repos/acme/repo/pulls/") {
