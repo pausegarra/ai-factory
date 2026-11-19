@@ -138,7 +138,12 @@ impl Github {
                 .copied()
                 .filter(|trigger| {
                     row["title"].as_str().is_none_or(|title| {
-                        issue_title_matches_trigger(title, trigger, &current.issue_title_prefix)
+                        issue_title_matches_trigger(
+                            title,
+                            trigger,
+                            &current.issue_title_prefix,
+                            &current.release_issue_title_prefix,
+                        )
                     })
                 })
                 .collect();
@@ -175,7 +180,12 @@ impl Github {
             };
             let body = fresh["body"].as_str().unwrap_or("");
             for trigger in pending {
-                if !issue_title_matches_trigger(title, trigger, &current.issue_title_prefix) {
+                if !issue_title_matches_trigger(
+                    title,
+                    trigger,
+                    &current.issue_title_prefix,
+                    &current.release_issue_title_prefix,
+                ) {
                     continue;
                 }
                 let mut event = if trigger == "release" {

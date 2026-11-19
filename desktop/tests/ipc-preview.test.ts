@@ -67,3 +67,10 @@ it("defaults the issue prefix in isolated preview settings", async () => {
   first.issue_title_prefix = "bot:";
   expect((await factoryApi.settings()).issue_title_prefix).toBe("[AI]");
 });
+
+it("defaults the Release prefix in isolated preview settings", async () => {
+  const first = await factoryApi.settings();
+  expect(first.release_issue_title_prefix).toBe("[RELEASE]");
+  first.release_issue_title_prefix = "ship:";
+  expect((await factoryApi.settings()).release_issue_title_prefix).toBe("[RELEASE]");
+});

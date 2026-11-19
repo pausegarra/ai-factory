@@ -1019,10 +1019,10 @@ async fn pull_request_authors_do_not_filter_issue_or_release_polling() {
             if request.path.starts_with("/search/issues?") {
                 return (200, json!({"incomplete_results":false,"total_count":2,"items":[
                     {"number":80,"repository_url":"https://api.github.com/repos/acme/repo","title":"[AI] Work","user":{"login":"alice"}},
-                    {"number":81,"repository_url":"https://api.github.com/repos/acme/repo","title":"[Release] Work","user":{"login":"alice"}}
+                    {"number":81,"repository_url":"https://api.github.com/repos/acme/repo","title":"[RELEASE] Work","user":{"login":"alice"}}
                 ]}));
             }
-            for (number, title) in [(80, "[AI] Work"), (81, "[Release] Work")] {
+            for (number, title) in [(80, "[AI] Work"), (81, "[RELEASE] Work")] {
                 if request.path == format!("/repos/acme/repo/issues/{number}") {
                     return (200, json!({"number":number,"title":title,"body":"fixture",
                         "state":"open","user":{"login":"alice"},

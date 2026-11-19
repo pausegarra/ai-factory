@@ -346,19 +346,19 @@ async fn issue_prefix_overlap_keeps_distinct_triggers_and_one_detail_fetch() {
     for (prefix, title, release, expected_ids) in [
         (
             "[",
-            "[Release]2",
+            "[RELEASE]2",
             true,
             vec!["issue:acme/repo#97", "release:acme/repo#97"],
         ),
         (
-            "[Release]",
-            "[Release]2",
+            "[RELEASE]",
+            "[RELEASE]2",
             true,
             vec!["issue:acme/repo#97", "release:acme/repo#97"],
         ),
-        ("[", "[Release]2", false, vec!["issue:acme/repo#97"]),
-        ("bot:", "[Release]2", true, vec!["release:acme/repo#97"]),
-        ("bot:", " [Release]2", true, vec![]),
+        ("[", "[RELEASE]2", false, vec!["issue:acme/repo#97"]),
+        ("bot:", "[RELEASE]2", true, vec!["release:acme/repo#97"]),
+        ("bot:", " [RELEASE]2", true, vec!["release:acme/repo#97"]),
     ] {
         let server = Server::start(move |r| async move {
             if r.path == "/user" {

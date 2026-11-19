@@ -127,3 +127,15 @@ it.each(["", " \t\n", null, 0, false, [], {}])(
     expect(validateSettings(value)).toContain("Issue title prefix cannot be empty.");
   }
 );
+
+it.each([undefined, "[RELEASE]", " ship: ", "Team Release:", "[.*]", "[Release]"])(
+  "accepts literal Release prefix %j", release_issue_title_prefix => {
+    expect(validateSettings({ ...noticeSettings(), release_issue_title_prefix })).toEqual([]);
+  }
+);
+it.each(["", " \t\n", null, 0, false, [], {}])(
+  "rejects explicit invalid Release prefix %j", release_issue_title_prefix => {
+    const settings = { ...noticeSettings(), release_issue_title_prefix } as unknown as Settings;
+    expect(validateSettings(settings)).toContain("Release issue title prefix cannot be empty.");
+  }
+);

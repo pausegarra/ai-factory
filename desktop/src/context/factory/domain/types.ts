@@ -67,8 +67,10 @@ export interface Project {
   source_path: string;
 }
 export const DEFAULT_ISSUE_TITLE_PREFIX = "[AI]";
+export const DEFAULT_RELEASE_ISSUE_TITLE_PREFIX = "[RELEASE]";
 export interface Settings {
   issue_title_prefix?: string;
+  release_issue_title_prefix?: string;
   notification_connectors?: NotificationConnector[];
   source_connectors: SourceConnector[];
   // Keys are SourceConnector IDs; removed sources remain inactive.
@@ -113,7 +115,7 @@ export const TRIGGERS: Record<
   release: {
     label: "Release",
     short: "Release",
-    description: "Open issues whose title starts with [Release], created by allowed authors. Disabled by default.",
+    description: "Open issues whose trimmed title starts with the configured Release prefix. Letter case matters. Created by allowed authors. Disabled by default.",
   },
 };
 export interface Run {

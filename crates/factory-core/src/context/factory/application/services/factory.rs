@@ -1,6 +1,8 @@
 use crate::context::factory::application::dto::connector_notification::ConnectorNotificationJob;
 use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
-use crate::context::factory::domain::entities::models::normalize_issue_title_prefix;
+use crate::context::factory::domain::entities::models::{
+    normalize_issue_title_prefix, normalize_release_issue_title_prefix,
+};
 use crate::context::factory::domain::entities::run_transition::RunTransition;
 use crate::context::factory::infrastructure::filesystem::run_cleanup::LocalRunCleanup;
 use crate::context::factory::infrastructure::{
@@ -311,6 +313,8 @@ impl Factory {
             p.repository = p.repository.to_lowercase();
         }
         s.issue_title_prefix = normalize_issue_title_prefix(&s.issue_title_prefix)?;
+        s.release_issue_title_prefix =
+            normalize_release_issue_title_prefix(&s.release_issue_title_prefix)?;
         s.validate()?;
         self.validate_codex_bindings(&s)?;
         self.store.save_settings(&s)?;

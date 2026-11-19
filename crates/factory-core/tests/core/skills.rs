@@ -399,7 +399,7 @@ touch "$(dirname "$0")/unexpected-execution"
 async fn run_release(factory: &std::sync::Arc<Factory>) -> RunDetail {
     let id = factory
         .enqueue(common::from_source(
-            TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
+            TriggerEvent::release_issue("acme/repo", 811, "[RELEASE] fixture", "alice", ""),
             "alice",
         ))
         .unwrap()
@@ -415,7 +415,7 @@ fn configure_release(
     agent: &str,
     skills: Option<Vec<String>>,
 ) {
-    *root.issue.lock().unwrap() = json!({"number":811,"html_url":"https://github.com/acme/repo/issues/811","state":"open","title":"[Release] fixture","user":{"login":"alice"}});
+    *root.issue.lock().unwrap() = json!({"number":811,"html_url":"https://github.com/acme/repo/issues/811","state":"open","title":"[RELEASE] fixture","user":{"login":"alice"}});
     let mut settings = factory.settings().unwrap();
     settings.issue_node_comments_enabled = false;
     for flow in &mut settings.flows {
@@ -496,7 +496,7 @@ async fn release_revalidates_fresh_issue_before_any_agent_execution() {
         configure_release(&root, &factory, "codex", None);
         let id = factory
             .enqueue(common::from_source(
-                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
+                TriggerEvent::release_issue("acme/repo", 811, "[RELEASE] fixture", "alice", ""),
                 "alice",
             ))
             .unwrap()
@@ -661,7 +661,7 @@ async fn release_publication_permissions_do_not_reach_readonly_or_other_roles() 
             factory.save_settings(settings).unwrap();
             let event = if trigger == "release" {
                 common::from_source(
-                    TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
+                    TriggerEvent::release_issue("acme/repo", 811, "[RELEASE] fixture", "alice", ""),
                     "alice",
                 )
             } else {
@@ -784,7 +784,7 @@ async fn release_issue_closure_rechecks_identity_and_accepts_already_closed() {
         factory.save_settings(settings).unwrap();
         let id = factory
             .enqueue(common::from_source(
-                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
+                TriggerEvent::release_issue("acme/repo", 811, "[RELEASE] fixture", "alice", ""),
                 "alice",
             ))
             .unwrap()
@@ -900,7 +900,7 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
         }
         let id = factory
             .enqueue(common::from_source(
-                TriggerEvent::release_issue("acme/repo", 811, "[Release] fixture", "alice", ""),
+                TriggerEvent::release_issue("acme/repo", 811, "[RELEASE] fixture", "alice", ""),
                 "alice",
             ))
             .unwrap()
@@ -951,5 +951,92 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
             expected_writes,
             "{failure}"
         );
+    }
+}
+
+#[tokio::test]
+async fn release_prefix_closure_uses_current_prefix_and_preserves_publication() {
+    for change in ["none", "prefix", "title", "both", "new_issue"] {
+        let script = format!("{AGENT}\ntouch \"$(dirname \"$0\")/publication-ready\"\nwhile [ ! -f \"$(dirname \"$0\")/publication-finish\" ]; do sleep 0.01; done\n");
+        let (root, factory) = fixture(&script, 4);
+        configure_release(&root, &factory, "codex", None);
+        root.issue.lock().unwrap()["title"] = json!(" \tship:fixture ");
+        let mut s = factory.settings().unwrap();
+        s.issue_title_prefix = "task:".into();
+        s.release_issue_title_prefix = " ship: ".into();
+        factory.save_settings(s).unwrap();
+        let id = factory
+            .enqueue(common::from_source(
+                TriggerEvent::release_issue("acme/repo", 811, "ship:queued", "alice", ""),
+                "alice",
+            ))
+            .unwrap()
+            .unwrap();
+        factory.start();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.path().join("publication-ready").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if matches!(change, "prefix" | "both" | "new_issue") {
+            let mut changed = factory.settings().unwrap();
+            if change == "new_issue" {
+                changed.issue_title_prefix = "other-task:".into();
+            } else {
+                changed.release_issue_title_prefix = "deploy:".into();
+            }
+            factory.save_settings(changed).unwrap();
+        }
+        if matches!(change, "title" | "both") {
+            root.issue.lock().unwrap()["title"] = json!("deploy:fresh");
+        }
+        std::fs::write(root.path().join("publication-finish"), "done").unwrap();
+        let result = terminal(&factory, &id).await;
+        factory.shutdown().await;
+        let accepted = matches!(change, "none" | "both" | "new_issue");
+        assert_eq!(
+            result.run.status,
+            if accepted { "succeeded" } else { "failed" },
+            "{change}: {:?}",
+            result.run.error
+        );
+        assert_eq!(result.nodes[0].status, "succeeded");
+        let writes = root
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _, _)| method == "PATCH")
+            .count();
+        assert_eq!(writes, usize::from(accepted), "{change}");
+        assert_eq!(
+            root.issue.lock().unwrap()["state"],
+            if accepted { "closed" } else { "open" }
+        );
+        let db = rusqlite::Connection::open(root.path().join("data/factory.sqlite3")).unwrap();
+        let proof: String = db
+            .query_row(
+                "SELECT json FROM observations WHERE key=?1",
+                [format!("release-issue-close:{}", id)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let proof: Value = serde_json::from_str(&proof).unwrap();
+        assert_eq!(proof["publication_confirmed"], true, "{change}");
+        assert_eq!(
+            proof["state"],
+            if accepted { "closed" } else { "pending" },
+            "{change}"
+        );
+        if !accepted {
+            assert!(result
+                .run
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Publication succeeded, but closing release issue failed"));
+        }
     }
 }

@@ -101,3 +101,15 @@ it("preserves the configured issue prefix through existing IPC", async () => {
   vi.mocked(invoke).mockResolvedValueOnce(settings);
   expect((await factoryApi.settings()).issue_title_prefix).toBe("Bot:");
 });
+
+it("preserves independent Release and New issue prefixes through IPC", async () => {
+  const settings = { ...noticeSettings(), issue_title_prefix: "task:", release_issue_title_prefix: "Ship:" };
+  vi.mocked(invoke).mockResolvedValueOnce(settings);
+  const stored = await factoryApi.saveSettings(settings);
+  expect(stored.release_issue_title_prefix).toBe("Ship:");
+  expect(stored.issue_title_prefix).toBe("task:");
+  expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
+  vi.mocked(invoke).mockResolvedValueOnce(settings);
+  expect((await factoryApi.settings()).release_issue_title_prefix).toBe("Ship:");
+  expect(invoke).toHaveBeenLastCalledWith("get_settings");
+});

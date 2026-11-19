@@ -9,7 +9,7 @@ import {
   Trash,
 } from "@phosphor-icons/react";
 import { cleanNotificationConnectors } from "../../domain/notification-connectors";
-import { DEFAULT_ISSUE_TITLE_PREFIX } from "../../domain/types";
+import { DEFAULT_RELEASE_ISSUE_TITLE_PREFIX, DEFAULT_ISSUE_TITLE_PREFIX } from "../../domain/types";
 import type { Settings } from "../../domain/types";
 import { validateFlowActivation, validateSettings } from "../../domain/rules";
 import { factoryApi } from "../ipc/factory-api";
@@ -92,6 +92,7 @@ export function SettingsPage({
       return;
     }
     next.issue_title_prefix = (next.issue_title_prefix ?? DEFAULT_ISSUE_TITLE_PREFIX).trim();
+    next.release_issue_title_prefix = (next.release_issue_title_prefix ?? DEFAULT_RELEASE_ISSUE_TITLE_PREFIX).trim();
     const ticket = ++saveSerial.current;
     const revision = editRevision.current;
     const current = () => mounted.current && saveSerial.current === ticket;
@@ -352,6 +353,19 @@ export function SettingsPage({
                 spellCheck={false}
                 value={draft.issue_title_prefix ?? DEFAULT_ISSUE_TITLE_PREFIX}
                 onChange={(e) => update({ issue_title_prefix: e.target.value })}
+              />
+            </Field>
+            <Field
+              label="Release issue title prefix"
+              hint="Titles must start with this exact text after trimming outer whitespace. Letter case matters. Applies to Release across all eligible GitHub Sources."
+            >
+              <input
+                type="text"
+                required
+                className="code-input"
+                spellCheck={false}
+                value={draft.release_issue_title_prefix ?? DEFAULT_RELEASE_ISSUE_TITLE_PREFIX}
+                onChange={(e) => update({ release_issue_title_prefix: e.target.value })}
               />
             </Field>
             <Field

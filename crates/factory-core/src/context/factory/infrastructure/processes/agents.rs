@@ -217,6 +217,7 @@ async fn prepare(
                             title,
                             &event.trigger_id,
                             &current.issue_title_prefix,
+                            &current.release_issue_title_prefix,
                         )
                     })
                     && issue["user"]["login"]
