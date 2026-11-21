@@ -12,7 +12,7 @@ fn settings(prefix: &str) -> Settings {
     let mut settings = common::configured_settings();
     settings.source_connectors[0].owners = vec!["acme".into()];
     settings.source_connectors[0].reviewers.clear();
-    settings.issue_title_prefix = prefix.into();
+    settings.source_connectors[0].issue_title_prefix = prefix.into();
     for flow in &mut settings.flows {
         flow.enabled = flow.id == "new_issue";
     }
@@ -29,6 +29,98 @@ fn issue_detail(title: &str) -> Value {
     json!({"number":97,"title":title,"state":"open","body":"fixture",
            "html_url":"https://github.com/acme/repo/issues/97",
            "user":{"login":"alice"}})
+}
+
+#[tokio::test]
+async fn same_account_sources_match_their_own_issue_and_release_prefixes() {
+    const TITLES: [&str; 6] = [
+        "Task A: issue",
+        "Ship A: release",
+        "Task B: issue",
+        "Ship B: release",
+        "[AI] unused",
+        "[RELEASE] unused",
+    ];
+    let server = Server::start(|request| async move {
+        if request.path == "/user" {
+            return (200, json!({"login":"alice"}));
+        }
+        if request.path.starts_with("/search/issues?") {
+            let items: Vec<_> = TITLES
+                .iter()
+                .enumerate()
+                .map(|(idx, title)| {
+                    let mut row = search_row(title);
+                    row["number"] = json!(idx + 1);
+                    row
+                })
+                .collect();
+            return (
+                200,
+                json!({"total_count":items.len(),"incomplete_results":false,"items":items}),
+            );
+        }
+        let number: usize = request
+            .path
+            .strip_prefix("/repos/acme/repo/issues/")
+            .expect("issue detail request")
+            .parse()
+            .unwrap();
+        assert_eq!(
+            request.authorization,
+            match number {
+                1 | 2 => "Bearer fixture-source-only",
+                3 | 4 => "Bearer fixture-second",
+                _ => panic!("Selected a title that matches neither source"),
+            }
+        );
+        let mut detail = issue_detail(TITLES[number - 1]);
+        detail["number"] = json!(number);
+        detail["html_url"] = json!(format!("https://github.com/acme/repo/issues/{number}"));
+        (200, detail)
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    let mut configured = settings("Task A:");
+    configured.source_connectors[0].release_issue_title_prefix = "Ship A:".into();
+    configured.source_connectors.push(SourceConnector {
+        id: "second".into(),
+        label: "Second source".into(),
+        issue_title_prefix: "Task B:".into(),
+        release_issue_title_prefix: "Ship B:".into(),
+        token: Some("fixture-second".into()),
+        ..configured.source_connectors[0].clone()
+    });
+    configured
+        .flows
+        .iter_mut()
+        .find(|flow| flow.id == "release")
+        .unwrap()
+        .enabled = true;
+    factory.save_settings(configured).unwrap();
+    factory.poll_now().await.unwrap();
+    let mut runs = factory.snapshot().unwrap().runs;
+    runs.sort_by_key(|run| run.number);
+    let actual: Vec<_> = runs
+        .iter()
+        .map(|run| {
+            (
+                run.number,
+                run.trigger_id.as_str(),
+                run.origin_token_profile_id.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            (1, "new_issue", Some("alice")),
+            (2, "release", Some("alice")),
+            (3, "new_issue", Some("second")),
+            (4, "release", Some("second"))
+        ]
+    );
 }
 
 #[tokio::test]
@@ -409,16 +501,17 @@ async fn issue_prefix_overlap_keeps_distinct_triggers_and_one_detail_fetch() {
 }
 
 #[tokio::test]
-async fn issue_prefix_is_global_across_sources_without_crossing_credentials() {
+async fn issue_prefix_does_not_cross_source_credentials() {
     let server = Server::start(|r| async move {
         assert_eq!(r.method, "GET");
         let actor = match r.authorization.as_str() { "Bearer fixture-source-only" => "alice", "Bearer fixture-b" => "bob", _ => panic!("unexpected credentials") };
+        let title = if actor == "alice" { "bot: scoped" } else { "personal: scoped" };
         if r.path == "/user" { return (200, json!({"login":actor})); }
         if r.path.starts_with("/search/") {
-            return (200, json!({"total_count":1,"incomplete_results":false,"items":[{"number":97,"title":"bot: global","state":"open","repository_url":format!("https://api.github.com/repos/{actor}/repo"),"user":{"login":actor}}]}));
+            return (200, json!({"total_count":1,"incomplete_results":false,"items":[{"number":97,"title":title,"state":"open","repository_url":format!("https://api.github.com/repos/{actor}/repo"),"user":{"login":actor}}]}));
         }
         assert_eq!(r.path, format!("/repos/{actor}/repo/issues/97"));
-        (200, json!({"number":97,"title":"bot: global","state":"open","user":{"login":actor},"html_url":format!("https://github.com/{actor}/repo/issues/97")}))
+        (200, json!({"number":97,"title":title,"state":"open","user":{"login":actor},"html_url":format!("https://github.com/{actor}/repo/issues/97")}))
     }).await;
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
@@ -428,6 +521,7 @@ async fn issue_prefix_is_global_across_sources_without_crossing_credentials() {
         id: "bob".into(),
         label: "Personal".into(),
         account: "bob".into(),
+        issue_title_prefix: "personal:".into(),
         owners: vec!["bob".into()],
         authors: vec!["bob".into()],
         token: Some("fixture-b".into()),
@@ -445,7 +539,11 @@ async fn issue_prefix_is_global_across_sources_without_crossing_credentials() {
         assert_eq!(run.repository, format!("{}/repo", run.actor));
         assert_eq!(
             factory.run_detail(&run.id).unwrap().event.title,
-            "bot: global"
+            if run.actor == "alice" {
+                "bot: scoped"
+            } else {
+                "personal: scoped"
+            }
         );
     }
     let calls = server.calls.lock().unwrap();
@@ -505,7 +603,7 @@ async fn issue_prefix_saved_while_detail_waits_is_used_after_response() {
             .await
             .unwrap();
         let mut changed = factory.settings().unwrap();
-        changed.issue_title_prefix = "bot:".into();
+        changed.source_connectors[0].issue_title_prefix = "bot:".into();
         factory.save_settings(changed).unwrap();
         resume.notify_one();
         tokio::time::timeout(Duration::from_secs(5), polling)

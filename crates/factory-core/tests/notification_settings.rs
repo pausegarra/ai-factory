@@ -1,4 +1,4 @@
-use factory_core::Settings;
+use factory_core::{Settings, SourceConnector};
 use serde_json::json;
 #[test]
 fn notification_settings_round_trip_retains_provider_and_preferences() {
@@ -211,14 +211,15 @@ fn notification_telegram_legacy_filters_are_canonical_and_do_not_expand_after_sa
     );
     assert_eq!(config["token_profile_ids"], json!([]));
     assert_eq!(canonical["notification_connectors"][0]["enabled"], true);
-    canonical["source_connectors"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({
-            "id":"other","label":"Other","type":"github_issues","account":"bob","has_token":false,
-            "owners":[],"authors":[],"reviewers":[],"review_all_open_pull_requests":false,
-            "pull_request_authors":[]
-        }));
+    canonical["source_connectors"].as_array_mut().unwrap().push(
+        serde_json::to_value(SourceConnector {
+            id: "other".into(),
+            label: "Other".into(),
+            account: "bob".into(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
     let reloaded: Settings = serde_json::from_value(canonical.clone()).unwrap();
     assert_eq!(serde_json::to_value(reloaded).unwrap(), canonical);
     assert_eq!(

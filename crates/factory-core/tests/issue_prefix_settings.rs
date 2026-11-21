@@ -3,14 +3,59 @@ use factory_core::Settings;
 use serde_json::{json, Value};
 
 #[test]
+fn legacy_global_prefixes_only_fill_missing_source_values() {
+    let mut wire = serde_json::to_value(common::configured_settings()).unwrap();
+    wire["issue_title_prefix"] = json!(" Bot: ");
+    wire["release_issue_title_prefix"] = json!(" Ship: ");
+    let first = wire["source_connectors"][0].as_object_mut().unwrap();
+    first.remove("issue_title_prefix");
+    first.remove("release_issue_title_prefix");
+    let mut second = wire["source_connectors"][0].clone();
+    second["id"] = json!("second");
+    second["issue_title_prefix"] = json!(" Local: ");
+    wire["source_connectors"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+
+    let upgraded = serde_json::to_value(serde_json::from_value::<Settings>(wire).unwrap()).unwrap();
+    assert!(upgraded.get("issue_title_prefix").is_none());
+    assert!(upgraded.get("release_issue_title_prefix").is_none());
+    assert_eq!(
+        upgraded["source_connectors"][0]["issue_title_prefix"],
+        "Bot:"
+    );
+    assert_eq!(
+        upgraded["source_connectors"][1]["issue_title_prefix"],
+        "Local:"
+    );
+    for source in upgraded["source_connectors"].as_array().unwrap() {
+        assert_eq!(source["release_issue_title_prefix"], "Ship:");
+    }
+}
+
+#[test]
 fn issue_prefix_defaults_and_legacy_input() {
-    let mut wire = serde_json::to_value(Settings::default()).unwrap();
-    assert_eq!(wire["issue_title_prefix"], json!("[AI]"));
-    wire.as_object_mut().unwrap().remove("issue_title_prefix");
+    let mut wire = serde_json::to_value(common::configured_settings()).unwrap();
+    assert_eq!(
+        wire["source_connectors"][0]["issue_title_prefix"],
+        json!("[AI]")
+    );
+    wire["source_connectors"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("issue_title_prefix");
     wire["poll_interval_seconds"] = json!(37);
+    wire["source_connectors"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("token");
     let loaded: Settings = serde_json::from_value(wire).unwrap();
     let loaded = serde_json::to_value(loaded).unwrap();
-    assert_eq!(loaded["issue_title_prefix"], json!("[AI]"));
+    assert_eq!(
+        loaded["source_connectors"][0]["issue_title_prefix"],
+        json!("[AI]")
+    );
     assert_eq!(loaded["poll_interval_seconds"], json!(37));
 }
 
@@ -22,11 +67,11 @@ fn issue_prefix_json_normalizes_and_preserves_literal_content() {
         (" [.*] ", "[.*]"),
         (" [Release] ", "[Release]"),
     ] {
-        let mut wire = serde_json::to_value(Settings::default()).unwrap();
-        wire["issue_title_prefix"] = json!(input);
+        let mut wire = serde_json::to_value(common::configured_settings()).unwrap();
+        wire["source_connectors"][0]["issue_title_prefix"] = json!(input);
         let loaded: Settings = serde_json::from_value(wire).unwrap();
         assert_eq!(
-            serde_json::to_value(loaded).unwrap()["issue_title_prefix"],
+            serde_json::to_value(loaded).unwrap()["source_connectors"][0]["issue_title_prefix"],
             json!(expected)
         );
     }
@@ -43,8 +88,8 @@ fn issue_prefix_json_rejects_explicit_invalid_values() {
         json!({}),
         json!(false),
     ] {
-        let mut wire = serde_json::to_value(Settings::default()).unwrap();
-        wire["issue_title_prefix"] = invalid;
+        let mut wire = serde_json::to_value(common::configured_settings()).unwrap();
+        wire["source_connectors"][0]["issue_title_prefix"] = invalid;
         assert!(serde_json::from_value::<Settings>(wire).is_err());
     }
 }
@@ -56,10 +101,8 @@ fn issue_prefix_store_normalizes_and_preserves_last_valid_value() {
     let dir = tempfile::tempdir().unwrap();
     let credentials = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
-    let mut input = Settings {
-        issue_title_prefix: " \tBot: \n".into(),
-        ..Default::default()
-    };
+    let mut input = common::configured_settings();
+    input.source_connectors[0].issue_title_prefix = " \tBot: \n".into();
     store.save_settings(&input).unwrap();
     let raw: String = store
         .db
@@ -68,11 +111,11 @@ fn issue_prefix_store_normalizes_and_preserves_last_valid_value() {
         .query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        serde_json::from_str::<Value>(&raw).unwrap()["issue_title_prefix"],
+        serde_json::from_str::<Value>(&raw).unwrap()["source_connectors"][0]["issue_title_prefix"],
         json!("Bot:")
     );
     for invalid in ["", " \t\n"] {
-        input.issue_title_prefix = invalid.into();
+        input.source_connectors[0].issue_title_prefix = invalid.into();
         assert!(store
             .save_settings(&input)
             .unwrap_err()
@@ -89,7 +132,7 @@ fn issue_prefix_store_normalizes_and_preserves_last_valid_value() {
     drop(store);
     let reopened = Store::open_with_credentials(dir.path(), credentials).unwrap();
     assert_eq!(
-        reopened.public_settings().unwrap().issue_title_prefix,
+        reopened.public_settings().unwrap().source_connectors[0].issue_title_prefix,
         "Bot:"
     );
 }
@@ -98,21 +141,28 @@ fn issue_prefix_store_normalizes_and_preserves_last_valid_value() {
 fn issue_prefix_factory_returns_canonical_value_and_rejects_direct_empty_input() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open_with_api(dir.path().into(), "http://127.0.0.1:1").unwrap();
-    let mut settings = factory.settings().unwrap();
-    settings.issue_title_prefix = " \tTeam Bot: \n".into();
+    let mut settings = common::configured_settings();
+    settings.source_connectors[0].issue_title_prefix = " \tTeam Bot: \n".into();
     assert_eq!(
         factory
             .save_settings(settings.clone())
             .unwrap()
+            .source_connectors[0]
             .issue_title_prefix,
         "Team Bot:"
     );
-    settings.issue_title_prefix = " \t".into();
+    settings.source_connectors[0].issue_title_prefix = " \t".into();
     assert!(factory.save_settings(settings).is_err());
-    assert_eq!(factory.settings().unwrap().issue_title_prefix, "Team Bot:");
+    assert_eq!(
+        factory.settings().unwrap().source_connectors[0].issue_title_prefix,
+        "Team Bot:"
+    );
     drop(factory);
     let reopened = common::open_with_api(dir.path().into(), "http://127.0.0.1:1").unwrap();
-    assert_eq!(reopened.settings().unwrap().issue_title_prefix, "Team Bot:");
+    assert_eq!(
+        reopened.settings().unwrap().source_connectors[0].issue_title_prefix,
+        "Team Bot:"
+    );
 }
 
 #[test]
@@ -122,9 +172,16 @@ fn issue_prefix_old_database_loads_default_without_rewriting_other_settings() {
     let dir = tempfile::tempdir().unwrap();
     let credentials = Arc::new(common::MemoryCredentials::default());
     let store = Store::open_with_credentials(dir.path(), credentials.clone()).unwrap();
-    let mut wire = serde_json::to_value(Settings::default()).unwrap();
-    wire.as_object_mut().unwrap().remove("issue_title_prefix");
+    let mut wire = serde_json::to_value(common::configured_settings()).unwrap();
+    wire["source_connectors"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("issue_title_prefix");
     wire["poll_interval_seconds"] = json!(37);
+    wire["source_connectors"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("token");
     let original = serde_json::to_string(&wire).unwrap();
     store
         .db
@@ -135,7 +192,7 @@ fn issue_prefix_old_database_loads_default_without_rewriting_other_settings() {
     drop(store);
     let reopened = Store::open_with_credentials(dir.path(), credentials).unwrap();
     let loaded = reopened.public_settings().unwrap();
-    assert_eq!(loaded.issue_title_prefix, "[AI]");
+    assert_eq!(loaded.source_connectors[0].issue_title_prefix, "[AI]");
     assert_eq!(loaded.poll_interval_seconds, 37);
     let raw: String = reopened
         .db

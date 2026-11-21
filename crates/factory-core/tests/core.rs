@@ -234,6 +234,7 @@ async fn durable_queue_dedup_redaction_and_immediate_events() {
         account: "alice".into(),
         token: Some("secret-example".into()),
         has_token: false,
+        ..Default::default()
     });
     f.save_settings(s).unwrap();
     assert!(!serde_json::to_string(&f.settings().unwrap())
@@ -534,6 +535,7 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
         has_token: false,
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
+        ..Default::default()
     });
     s.flows[1].enabled = false;
     s.flows[2].enabled = false;
@@ -1081,6 +1083,7 @@ fn settings_normalize_github_identity_case_and_preserve_blank_token_edits() {
         owners: vec!["Acme".into(), "acme".into()],
         authors: vec!["Alice".into()],
         reviewers: vec!["Alice".into()],
+        ..Default::default()
     });
     let s = f.save_settings(s).unwrap();
     assert_eq!(s.source_connectors[0].owners, vec!["acme"]);

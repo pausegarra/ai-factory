@@ -530,8 +530,8 @@ async fn release_prefix_polling_uses_configured_literal_and_fresh_title() {
         let dir = tempfile::tempdir().unwrap();
         let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
         let mut s = release_settings();
-        s.issue_title_prefix = "task:".into();
-        s.release_issue_title_prefix = prefix.into();
+        s.source_connectors[0].issue_title_prefix = "task:".into();
+        s.source_connectors[0].release_issue_title_prefix = prefix.into();
         factory.save_settings(s).unwrap();
         factory.poll_now().await.unwrap();
         factory.poll_now().await.unwrap();
@@ -598,7 +598,7 @@ async fn release_prefix_polling_reads_settings_after_detail_await() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut original = release_settings();
-    original.release_issue_title_prefix = "ship:".into();
+    original.source_connectors[0].release_issue_title_prefix = "ship:".into();
     factory.save_settings(original.clone()).unwrap();
     let polling = {
         let factory = factory.clone();
@@ -608,7 +608,7 @@ async fn release_prefix_polling_reads_settings_after_detail_await() {
         .await
         .unwrap();
     let mut changed = factory.settings().unwrap();
-    changed.release_issue_title_prefix = "deploy:".into();
+    changed.source_connectors[0].release_issue_title_prefix = "deploy:".into();
     factory.save_settings(changed).unwrap();
     resume.notify_one();
     tokio::time::timeout(Duration::from_secs(5), polling)

@@ -311,6 +311,7 @@ mod tests {
             reviewers: vec!["alice".into()],
             token: Some("fixture".into()),
             has_token: false,
+            ..Default::default()
         });
         store.save_settings(&s).unwrap();
         (dir, store, s)

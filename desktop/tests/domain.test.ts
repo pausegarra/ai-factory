@@ -1,4 +1,5 @@
 import { noticeSettings } from "./fixtures/notices";
+import { newGitHubIssuesSource } from "../src/context/factory/domain/source-connectors";
 import { describe, it, expect } from "vitest";
 import {
   validateFlow,
@@ -116,26 +117,28 @@ describe("settings validation", () => {
 });
 
 
+const source = {...newGitHubIssuesSource("work"), account: "alice", has_token: true};
+
 it.each([undefined, "[AI]", " bot: ", "Team Bot:", "[.*]", "[Release]"])(
   "accepts a literal nonempty prefix %j", issue_title_prefix => {
-    expect(validateSettings({ ...noticeSettings(), issue_title_prefix })).toEqual([]);
+    expect(validateSettings({ ...noticeSettings(), source_connectors: [{ ...source, issue_title_prefix }] })).toEqual([]);
   }
 );
 it.each(["", " \t\n", null, 0, false, [], {}])(
   "rejects an explicit invalid issue prefix %j", issue_title_prefix => {
-    const value = { ...noticeSettings(), issue_title_prefix } as unknown as Settings;
+    const value = { ...noticeSettings(), source_connectors: [{ ...source, issue_title_prefix }] } as unknown as Settings;
     expect(validateSettings(value)).toContain("Issue title prefix cannot be empty.");
   }
 );
 
 it.each([undefined, "[RELEASE]", " ship: ", "Team Release:", "[.*]", "[Release]"])(
   "accepts literal Release prefix %j", release_issue_title_prefix => {
-    expect(validateSettings({ ...noticeSettings(), release_issue_title_prefix })).toEqual([]);
+    expect(validateSettings({ ...noticeSettings(), source_connectors: [{ ...source, release_issue_title_prefix }] })).toEqual([]);
   }
 );
 it.each(["", " \t\n", null, 0, false, [], {}])(
   "rejects explicit invalid Release prefix %j", release_issue_title_prefix => {
-    const settings = { ...noticeSettings(), release_issue_title_prefix } as unknown as Settings;
+    const settings = { ...noticeSettings(), source_connectors: [{ ...source, release_issue_title_prefix }] } as unknown as Settings;
     expect(validateSettings(settings)).toContain("Release issue title prefix cannot be empty.");
   }
 );

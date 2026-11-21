@@ -6,9 +6,10 @@ El diseño completo está en [desktop](docs/superpowers/specs/2026-11-11-desktop
 
 ## Triggers GitHub
 
-- `new_issue`: issues abiertas cuyo título empieza por `[AI]`, con owner y autor permitidos. El autor selecciona el perfil de token GitHub de ejecución.
+- `new_issue`: issues abiertas cuyo título empieza por el prefijo de la source, `[AI]` por defecto, con owner y autor permitidos. El autor selecciona el perfil de token GitHub de ejecución.
 - `pr_approved`: únicamente PRs publicadas y verificadas por un workflow de issue. Requiere una review `APPROVED` del head SHA actual o un comentario nuevo exactamente `OK`, tras quitar espacios e ignorar mayúsculas. El autor del comentario debe coincidir con el autor de la PR y el autor de la issue origen. Se ejecuta con la identidad del autor de la issue.
 - `pr_review`: PRs abiertas con una review solicitada a un reviewer permitido. Esta lista es independiente de los autores de issues y no exige procedencia de `new_issue`. El reviewer selecciona su perfil GitHub. Tras observar retirada de una solicitud, una solicitud nueva puede generar otro evento. Una lista vacía de reviewers omite la consulta.
+- `release`: issues abiertas cuyo título empieza por el prefijo de Release de la source, `[RELEASE]` por defecto, con owner y autor permitidos.
 
 La deduplicación es duradera en SQLite. Aprobación y comentario sobre el mismo head comparten un evento. Los IDs de comentarios consumidos no se reutilizan tras reinicios ni cambios de head. Un head distinto requiere una aprobación de ese commit o un comentario nuevo. Un error al consultar comentarios no consume sus IDs; una señal válida de aprobación o comentario puede crear el evento aunque falle la otra consulta.
 

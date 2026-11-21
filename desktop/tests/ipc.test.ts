@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { factoryApi } from "../src/context/factory/infrastructure/ipc/factory-api";
+import { newGitHubIssuesSource } from "../src/context/factory/domain/source-connectors";
 import type { Settings } from "../src/context/factory/domain/types";
 it("deletes exactly one run using the host argument contract", async () => {
   vi.mocked(invoke).mockResolvedValueOnce({ state: "deleted", run_id: "run-1" });
@@ -93,23 +94,17 @@ it("preserves both automatic issue comment values through settings IPC", async (
   }
 });
 
-it("preserves the configured issue prefix through existing IPC", async () => {
-  const settings = { ...noticeSettings(), issue_title_prefix: "Bot:" };
-  vi.mocked(invoke).mockResolvedValueOnce(settings);
-  expect((await factoryApi.saveSettings(settings)).issue_title_prefix).toBe("Bot:");
-  expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
-  vi.mocked(invoke).mockResolvedValueOnce(settings);
-  expect((await factoryApi.settings()).issue_title_prefix).toBe("Bot:");
-});
-
-it("preserves independent Release and New issue prefixes through IPC", async () => {
-  const settings = { ...noticeSettings(), issue_title_prefix: "task:", release_issue_title_prefix: "Ship:" };
+it("preserves independent Release and New issue prefixes per source through IPC", async () => {
+  const source = {...newGitHubIssuesSource("work"), account: "alice", has_token: true};
+  const settings = { ...noticeSettings(), source_connectors: [
+    {...source, issue_title_prefix: "task:", release_issue_title_prefix: "Ship:"},
+    {...source, id: "other", issue_title_prefix: "bot:", release_issue_title_prefix: "Deploy:"},
+  ] };
   vi.mocked(invoke).mockResolvedValueOnce(settings);
   const stored = await factoryApi.saveSettings(settings);
-  expect(stored.release_issue_title_prefix).toBe("Ship:");
-  expect(stored.issue_title_prefix).toBe("task:");
+  expect(stored.source_connectors).toEqual(settings.source_connectors);
   expect(invoke).toHaveBeenLastCalledWith("save_settings", { settings });
   vi.mocked(invoke).mockResolvedValueOnce(settings);
-  expect((await factoryApi.settings()).release_issue_title_prefix).toBe("Ship:");
+  expect((await factoryApi.settings()).source_connectors).toEqual(settings.source_connectors);
   expect(invoke).toHaveBeenLastCalledWith("get_settings");
 });

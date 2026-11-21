@@ -1,5 +1,4 @@
 use super::*;
-use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 use crate::context::factory::infrastructure::repositories::pr_origins::TrackedPrOrigin;
 use std::collections::{HashMap, HashSet};
 
@@ -157,18 +156,16 @@ impl Github {
             let repo = repository(&row)?;
             let n = row["number"].as_u64().context("Invalid issue number")?;
             let current = factory.store.public_settings()?;
+            let Some(source) = current.source_by_id(&profile.id) else {
+                return Ok(());
+            };
             let candidates: Vec<&str> = active
                 .iter()
                 .copied()
                 .filter(|trigger| {
-                    row["title"].as_str().is_none_or(|title| {
-                        issue_title_matches_trigger(
-                            title,
-                            trigger,
-                            &current.issue_title_prefix,
-                            &current.release_issue_title_prefix,
-                        )
-                    })
+                    row["title"]
+                        .as_str()
+                        .is_none_or(|title| source.matches_issue_title(title, trigger))
                 })
                 .collect();
             let mut pending = vec![];
@@ -199,17 +196,15 @@ impl Github {
                 continue;
             }
             let current = factory.store.public_settings()?;
+            let Some(source) = current.source_by_id(&profile.id) else {
+                return Ok(());
+            };
             let Some(title) = fresh["title"].as_str() else {
                 continue;
             };
             let body = fresh["body"].as_str().unwrap_or("");
             for trigger in pending {
-                if !issue_title_matches_trigger(
-                    title,
-                    trigger,
-                    &current.issue_title_prefix,
-                    &current.release_issue_title_prefix,
-                ) {
+                if !source.matches_issue_title(title, trigger) {
                     continue;
                 }
                 let mut event = if trigger == "release" {

@@ -1,4 +1,3 @@
-use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 mod artifact_repair;
 mod invocation;
 pub(crate) mod issue_workspace;
@@ -212,15 +211,11 @@ async fn prepare(
                 )
                 .await?;
             let current = factory.store.public_settings()?;
+            let current_source = current.source_for_event(event)?;
             ensure!(
                 issue["state"] == "open"
                     && issue["title"].as_str().is_some_and(|title| {
-                        issue_title_matches_trigger(
-                            title,
-                            &event.trigger_id,
-                            &current.issue_title_prefix,
-                            &current.release_issue_title_prefix,
-                        )
+                        current_source.matches_issue_title(title, &event.trigger_id)
                     })
                     && issue["user"]["login"]
                         .as_str()

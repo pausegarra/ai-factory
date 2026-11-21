@@ -118,6 +118,8 @@ export function SourcesPage({ settings, onSave, onDirtyChange, onBusyChange }: {
     const connectors = structuredClone(draft).map(c => {
       c.has_token = baseline.some(saved => saved.id === c.id && saved.account.toLowerCase() === c.account.trim().toLowerCase() && saved.has_token);
       c.label = c.label.trim(); c.account = c.account.trim().toLowerCase();
+      if (typeof c.issue_title_prefix === "string") c.issue_title_prefix = c.issue_title_prefix.trim();
+      if (typeof c.release_issue_title_prefix === "string") c.release_issue_title_prefix = c.release_issue_title_prefix.trim();
       for (const field of ["owners", "authors", "reviewers"] as const) c[field] = [...new Set(c[field].map(v => v.trim().toLowerCase()))];
       c.pull_request_authors = normalizePullRequestAuthors(c.pull_request_authors ?? []);
       const token = c.token?.trim(); if (token) c.token=token; else delete c.token;

@@ -253,6 +253,7 @@ sys.exit(code)
             owners: vec!["acme".into()],
             authors: vec!["alice".into()],
             reviewers: vec!["alice".into()],
+            ..Default::default()
         }];
         s.commands.git = wrapper.to_string_lossy().into();
         s.commands.opencode = dir.path().join("agent").to_string_lossy().into();

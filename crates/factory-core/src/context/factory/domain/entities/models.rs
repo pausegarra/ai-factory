@@ -25,8 +25,6 @@ pub struct Settings {
     pub codex_bindings: BTreeMap<String, String>,
     pub projects: Vec<Project>,
     pub commands: Commands,
-    pub issue_title_prefix: String,
-    pub release_issue_title_prefix: String,
     pub issue_node_comments_enabled: bool,
     pub codex_yolo: bool,
     pub poll_interval_seconds: u64,
@@ -158,8 +156,6 @@ impl Default for Settings {
                 opencode: "opencode".into(),
                 git: "git".into(),
             },
-            issue_title_prefix: DEFAULT_ISSUE_TITLE_PREFIX.into(),
-            release_issue_title_prefix: DEFAULT_RELEASE_ISSUE_TITLE_PREFIX.into(),
             issue_node_comments_enabled: true,
             codex_yolo: false,
             poll_interval_seconds: 15,
@@ -315,8 +311,6 @@ impl Settings {
         Ok(source)
     }
     pub fn validate(&self) -> Result<()> {
-        normalize_issue_title_prefix(&self.issue_title_prefix)?;
-        normalize_release_issue_title_prefix(&self.release_issue_title_prefix)?;
         super::notification_connector::validate_connectors(&self.notification_connectors)?;
         self.validate_concurrency()?;
         ensure!(

@@ -19,7 +19,7 @@ fn configure(factory: &Factory, root: &Path, prefix: &str) -> Settings {
     .unwrap();
     std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut settings = common::configured_settings();
-    settings.issue_title_prefix = prefix.into();
+    settings.source_connectors[0].issue_title_prefix = prefix.into();
     settings.commands.git = git.to_string_lossy().into();
     settings.issue_node_comments_enabled = false;
     factory.save_settings(settings).unwrap()
@@ -64,7 +64,7 @@ async fn issue_prefix_execution_uses_saved_prefix_instead_of_queued_snapshot() {
         .unwrap()
         .unwrap();
     let mut changed = factory.settings().unwrap();
-    changed.issue_title_prefix = "bot:".into();
+    changed.source_connectors[0].issue_title_prefix = "bot:".into();
     factory.save_settings(changed).unwrap();
     let error = tokio::time::timeout(Duration::from_secs(5), run(factory.clone(), id.clone()))
         .await
@@ -131,7 +131,7 @@ async fn issue_prefix_execution_reads_settings_after_detail_await() {
         .await
         .unwrap();
     let mut changed = factory.settings().unwrap();
-    changed.issue_title_prefix = "bot:".into();
+    changed.source_connectors[0].issue_title_prefix = "bot:".into();
     factory.save_settings(changed).unwrap();
     resume.notify_one();
     let error = tokio::time::timeout(Duration::from_secs(5), executing)
@@ -193,7 +193,7 @@ async fn issue_prefix_execution_checks_custom_title_case_trim_and_release_indepe
         let dir = tempfile::tempdir().unwrap();
         let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
         let mut settings = configure(&factory, dir.path(), prefix);
-        settings.release_issue_title_prefix = release_prefix.into();
+        settings.source_connectors[0].release_issue_title_prefix = release_prefix.into();
         settings
             .flows
             .iter_mut()
@@ -252,7 +252,7 @@ async fn release_prefix_execution_uses_current_settings_after_detail_await() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = configure(&factory, dir.path(), "task:");
-    s.release_issue_title_prefix = "ship:".into();
+    s.source_connectors[0].release_issue_title_prefix = "ship:".into();
     s.flows
         .iter_mut()
         .find(|f| f.id == "release")
@@ -271,7 +271,7 @@ async fn release_prefix_execution_uses_current_settings_after_detail_await() {
         .await
         .unwrap();
     let mut changed = factory.settings().unwrap();
-    changed.release_issue_title_prefix = "deploy:".into();
+    changed.source_connectors[0].release_issue_title_prefix = "deploy:".into();
     factory.save_settings(changed).unwrap();
     resume.notify_one();
     let error = tokio::time::timeout(Duration::from_secs(5), executing)
@@ -302,7 +302,7 @@ async fn release_prefix_execution_does_not_use_queued_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let factory = common::open_with_api(dir.path().into(), &server.base).unwrap();
     let mut s = configure(&factory, dir.path(), "task:");
-    s.release_issue_title_prefix = "ship:".into();
+    s.source_connectors[0].release_issue_title_prefix = "ship:".into();
     s.flows
         .iter_mut()
         .find(|f| f.id == "release")
@@ -317,7 +317,7 @@ async fn release_prefix_execution_does_not_use_queued_snapshot() {
         .unwrap()
         .unwrap();
     let mut changed = factory.settings().unwrap();
-    changed.release_issue_title_prefix = "deploy:".into();
+    changed.source_connectors[0].release_issue_title_prefix = "deploy:".into();
     factory.save_settings(changed).unwrap();
     let error = tokio::time::timeout(Duration::from_secs(5), run(factory, id.clone()))
         .await

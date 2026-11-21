@@ -1,4 +1,8 @@
-use super::models::{safe_id, valid_login};
+use super::models::{
+    issue_title_matches_trigger, normalize_issue_title_prefix,
+    normalize_release_issue_title_prefix, safe_id, valid_login, DEFAULT_ISSUE_TITLE_PREFIX,
+    DEFAULT_RELEASE_ISSUE_TITLE_PREFIX,
+};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
@@ -9,13 +13,17 @@ pub enum SourceKind {
     GithubIssues,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SourceConnector {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
     pub kind: SourceKind,
     pub account: String,
+    #[serde(default = "default_issue_title_prefix")]
+    pub issue_title_prefix: String,
+    #[serde(default = "default_release_issue_title_prefix")]
+    pub release_issue_title_prefix: String,
     #[serde(default)]
     pub owners: Vec<String>,
     #[serde(default)]
@@ -32,7 +40,51 @@ pub struct SourceConnector {
     pub has_token: bool,
 }
 
+fn default_issue_title_prefix() -> String {
+    DEFAULT_ISSUE_TITLE_PREFIX.into()
+}
+
+fn default_release_issue_title_prefix() -> String {
+    DEFAULT_RELEASE_ISSUE_TITLE_PREFIX.into()
+}
+
+impl Default for SourceConnector {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            kind: SourceKind::default(),
+            account: String::new(),
+            issue_title_prefix: default_issue_title_prefix(),
+            release_issue_title_prefix: default_release_issue_title_prefix(),
+            owners: vec![],
+            authors: vec![],
+            reviewers: vec![],
+            review_all_open_pull_requests: false,
+            pull_request_authors: vec![],
+            token: None,
+            has_token: false,
+        }
+    }
+}
+
 impl SourceConnector {
+    pub(crate) fn matches_issue_title(&self, title: &str, trigger: &str) -> bool {
+        issue_title_matches_trigger(
+            title,
+            trigger,
+            &self.issue_title_prefix,
+            &self.release_issue_title_prefix,
+        )
+    }
+
+    pub(crate) fn normalize_title_prefixes(&mut self) -> Result<()> {
+        self.issue_title_prefix = normalize_issue_title_prefix(&self.issue_title_prefix)?;
+        self.release_issue_title_prefix =
+            normalize_release_issue_title_prefix(&self.release_issue_title_prefix)?;
+        Ok(())
+    }
+
     pub fn allows_owner(&self, owner: &str) -> bool {
         self.owners
             .iter()
@@ -63,6 +115,8 @@ impl SourceConnector {
     }
 
     pub fn validate(&self) -> Result<()> {
+        normalize_issue_title_prefix(&self.issue_title_prefix)?;
+        normalize_release_issue_title_prefix(&self.release_issue_title_prefix)?;
         ensure!(safe_id(&self.id), "Invalid source connector ID");
         ensure!(
             !self.label.trim().is_empty(),

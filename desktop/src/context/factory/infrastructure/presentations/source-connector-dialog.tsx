@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { SourceConnector } from "../../domain/types";
-import { parseSourceScope, validateSourceConnectors, type SourceScopeField } from "../../domain/source-connectors";
+import { DEFAULT_ISSUE_TITLE_PREFIX, DEFAULT_RELEASE_ISSUE_TITLE_PREFIX, type SourceConnector } from "../../domain/types";
+import { isInvalidSourceTitlePrefix, parseSourceScope, validateSourceConnectors, type SourceScopeField } from "../../domain/source-connectors";
 import { Field, Notice } from "./ui";
 
 type SourceConnectorDialogProps = {
@@ -92,6 +92,21 @@ export function SourceConnectorDialog({id, connector: c, mode, attempted, busy, 
         <p>{c.has_token ? "Token configured" : "Token not configured"}</p>
         <div className="form-grid">
           {([ ["owners", "GitHub owners"], ["authors", "Allowed authors"], ["reviewers", "Allowed reviewers"] ] as const).map(([field,label]) => <SourceScopeInput key={field} field={field} label={label} source={c} onChange={onChange} />)}
+        </div>
+        <div className="form-grid">
+          {([
+            ["issue_title_prefix", "New issue title prefix", DEFAULT_ISSUE_TITLE_PREFIX, "New task"],
+            ["release_issue_title_prefix", "Release issue title prefix", DEFAULT_RELEASE_ISSUE_TITLE_PREFIX, "Release"],
+          ] as const).map(([field, label, fallback, workflow]) => {
+            const value = c[field] === undefined ? fallback : c[field];
+            return <Field key={field} label={label}
+              hint={`For ${workflow} on this source. Titles must start with this exact text after trimming outer whitespace. Letter case matters.`}>
+              <input type="text" required className="code-input" spellCheck={false} autoCapitalize="none"
+                value={typeof value === "string" ? value : ""}
+                aria-invalid={attempted && isInvalidSourceTitlePrefix(value)}
+                onChange={e => onChange({[field]: e.target.value})} />
+            </Field>;
+          })}
         </div>
       </fieldset>
       <div className="notifications-connector-actions" role="group" aria-label="Connector actions">

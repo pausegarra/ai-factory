@@ -3,7 +3,6 @@ use super::Github;
 use crate::context::factory::domain::entities::issue_work::{
     IssuePublication, IssueWork, PublicationTarget, WorkRepository,
 };
-use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 use crate::context::factory::infrastructure::processes::agents::{
     event_branch, git_output, issue_workspace::checkout_path,
 };
@@ -185,17 +184,13 @@ impl Github {
                 .request(Method::GET, &parent_issue_path(scope), None)
                 .await?;
             let settings = factory.store.public_settings()?;
+            let profile = settings.source_for_event(event)?;
             ensure!(
                 parent["state"] == "open"
                     && parent_matches(&parent, scope)
                     && parent["title"]
                         .as_str()
-                        .is_some_and(|title| issue_title_matches_trigger(
-                            title,
-                            "new_issue",
-                            &settings.issue_title_prefix,
-                            &settings.release_issue_title_prefix
-                        )),
+                        .is_some_and(|title| profile.matches_issue_title(title, "new_issue")),
                 "Parent issue is no longer eligible for publication"
             );
         }

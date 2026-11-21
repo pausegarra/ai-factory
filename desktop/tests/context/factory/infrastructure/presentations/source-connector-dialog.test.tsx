@@ -24,11 +24,14 @@ it("contains keyboard focus through StrictMode edits and restores the opener on 
 it("keeps local secret edits during refresh and adopts deferred clean metadata on cancel",()=>{
  const original=initial(),onSave=vi.fn();const view=render(<SourcesPage settings={original} onSave={onSave}/>);open();
  fireEvent.change(screen.getByLabelText("API token"),{target:{value:"PRIVATE_LOCAL"}});
- const incoming={...original,source_connectors:[{...source,label:"Incoming",token:"PRIVATE_REMOTE"}]};
+ fireEvent.change(screen.getByLabelText("New issue title prefix"),{target:{value:"Local:"}});
+ const incoming={...original,source_connectors:[{...source,label:"Incoming",token:"PRIVATE_REMOTE",issue_title_prefix:"Incoming:"}]};
  view.rerender(<SourcesPage settings={incoming} onSave={onSave}/>);
  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Work");
+ expect(screen.getByLabelText<HTMLInputElement>("New issue title prefix").value).toBe("Local:");
  expect((screen.getByLabelText("API token") as HTMLInputElement).value).toBe("PRIVATE_LOCAL");expect(document.body.innerHTML).not.toContain("PRIVATE_REMOTE");
  fireEvent.click(screen.getByRole("button",{name:"Cancel"}));fireEvent.click(screen.getByRole("button",{name:"Edit connector Incoming"}));
+ expect(screen.getByLabelText<HTMLInputElement>("New issue title prefix").value).toBe("Incoming:");
  expect((screen.getByLabelText("API token") as HTMLInputElement).value).toBe("");expect(onSave).not.toHaveBeenCalled();
 });
 it("adopts untouched external scopes and closes an editor after external removal",async()=>{

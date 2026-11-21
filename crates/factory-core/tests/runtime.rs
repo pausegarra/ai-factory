@@ -127,6 +127,7 @@ async fn fixture() -> (
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
         reviewers: vec!["alice".into()],
+        ..Default::default()
     }];
     settings.projects = vec![Project {
         id: "repo".into(),

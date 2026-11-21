@@ -1,7 +1,9 @@
-import type { SourceConnector } from "./types";
+import { DEFAULT_ISSUE_TITLE_PREFIX, DEFAULT_RELEASE_ISSUE_TITLE_PREFIX, type SourceConnector } from "./types";
 export type SourceScopeField = "owners" | "authors" | "reviewers" | "pull_request_authors";
 export function newGitHubIssuesSource(id: string): SourceConnector {
-  return {id, label:"GitHub Issues", type:"github_issues", account:"", owners:[], authors:[], reviewers:[], has_token:false, review_all_open_pull_requests:false, pull_request_authors:[]};
+  return {id, label:"GitHub Issues", type:"github_issues", account:"", owners:[], authors:[], reviewers:[], has_token:false,
+    issue_title_prefix: DEFAULT_ISSUE_TITLE_PREFIX, release_issue_title_prefix: DEFAULT_RELEASE_ISSUE_TITLE_PREFIX,
+    review_all_open_pull_requests:false, pull_request_authors:[]};
 }
 export function cleanSourceConnectors(items: SourceConnector[]): SourceConnector[] {
   return structuredClone(items).map(source => {
@@ -17,6 +19,9 @@ export function parseSourceScope(value: string): string[] {
 export function normalizePullRequestAuthors(values: readonly string[]): string[] {
   return [...new Set(values.map(value => value.trim().toLowerCase()).filter(Boolean))];
 }
+export function isInvalidSourceTitlePrefix(value: unknown): boolean {
+  return value !== undefined && (typeof value !== "string" || !value.trim());
+}
 export function validateSourceConnectors(items: SourceConnector[]): string[] {
   const errors: string[] = [], ids = new Set<string>();
   for (const source of items) {
@@ -26,6 +31,8 @@ export function validateSourceConnectors(items: SourceConnector[]): string[] {
     if (source.review_all_open_pull_requests !== undefined && typeof source.review_all_open_pull_requests !== "boolean") errors.push("PR review scope must be a boolean.");
     if (!source.label.trim()) errors.push("Source connector name is required.");
     if (!/^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(source.account)) errors.push("Enter a valid GitHub account.");
+    if (isInvalidSourceTitlePrefix(source.issue_title_prefix)) errors.push("Issue title prefix cannot be empty.");
+    if (isInvalidSourceTitlePrefix(source.release_issue_title_prefix)) errors.push("Release issue title prefix cannot be empty.");
     for (const field of ["owners", "authors", "reviewers"] as const) {
       const values = source[field];
       if (!Array.isArray(values) || values.some(value => typeof value !== "string" || !/^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(value))) errors.push(`${field} must contain valid GitHub logins.`);

@@ -48,6 +48,7 @@ fn setup(root: std::path::PathBuf, base: &str) -> Arc<Factory> {
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
         reviewers: vec![],
+        ..Default::default()
     }];
     f.save_settings(s).unwrap();
     f
