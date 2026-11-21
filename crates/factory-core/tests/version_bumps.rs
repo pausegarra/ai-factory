@@ -894,12 +894,8 @@ printf '%s' '{"status":"succeeded","summary":"Prepared version bump","artifacts"
         std::fs::write(&agent_path, r#"#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
 if 'app-server' in sys.argv:
-    for line in sys.stdin:
-        request = json.loads(line)
-        if 'id' in request:
-            response = {'data':[{'skills':[]}]} if request.get('method') == 'skills/list' else {}
-            print(json.dumps({'id':request['id'],'result':response}), flush=True)
-    sys.exit(0)
+    pathlib.Path(sys.argv[0]).resolve().with_name('unexpected-skill-discovery').touch()
+    sys.exit(87)
 prompt = sys.stdin.read()
 memory = pathlib.Path(os.environ['AI_FACTORY_MEMORY_DIR'])
 result = pathlib.Path(os.environ['AI_FACTORY_RESULT_PATH'])
@@ -919,6 +915,10 @@ if node == 'merge':
     result.write_text(json.dumps(value))
     sys.exit(0)
 assert node == 'version_bump'
+(memory / 'version-work.prompt').write_text(prompt)
+(memory / 'version-work-launch.json').write_text(json.dumps({
+    'argv': sys.argv[1:], 'config': os.environ.get('OPENCODE_CONFIG_CONTENT', ''),
+}))
 def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 assert git('branch', '--show-current').startswith('ai-factory/version/')
@@ -1013,6 +1013,54 @@ result.write_text((memory / 'invalid-version-result.json').read_text())
                 detail.run.error, detail.nodes
             );
             let memory = assert_single_preparation(&f, 1);
+            let prompt = std::fs::read_to_string(memory.join("version-work.prompt")).unwrap();
+            assert!(prompt.contains("Authenticated version workspace"));
+            assert!(
+                !prompt.contains("No skills are enabled for this node"),
+                "{agent} version work disabled native skills"
+            );
+            assert!(!prompt.contains("AI Factory skill selection"));
+            assert!(!f.dir.path().join("unexpected-skill-discovery").exists());
+            let launch: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(memory.join("version-work-launch.json")).unwrap(),
+            )
+            .unwrap();
+            let args: Vec<_> = launch["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|arg| arg.as_str().unwrap())
+                .collect();
+            if agent == "codex" {
+                assert!(args.contains(&"--output-schema"));
+                assert!(!args
+                    .iter()
+                    .any(|arg| *arg == "--strict-config" || arg.starts_with("skills.")));
+            } else {
+                assert_eq!(
+                    &args[..7],
+                    [
+                        "run",
+                        "--format",
+                        "json",
+                        "--standalone",
+                        "--auto",
+                        "--agent",
+                        "ai-factory"
+                    ]
+                );
+                let config: serde_json::Value =
+                    serde_json::from_str(launch["config"].as_str().unwrap()).unwrap();
+                for permissions in [
+                    &config["permission"],
+                    &config["agent"]["ai-factory"]["permission"],
+                ] {
+                    assert_eq!(permissions["*"], "allow");
+                    assert!(permissions.get("skill").is_none());
+                }
+                assert!(config.get("plugin").is_none());
+                assert!(config.get("plugins").is_none());
+            }
             let prepared = std::fs::read_to_string(memory.join("prepared-commit")).unwrap();
             let receipt = f.observation(&format!("pr-version:{}", f.run)).unwrap();
             assert_eq!(receipt["commit_sha"], prepared);

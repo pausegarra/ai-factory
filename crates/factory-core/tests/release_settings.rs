@@ -15,7 +15,10 @@ fn release_defaults_are_disabled_and_old_flows_stay_enabled() {
     assert_eq!(f.nodes.len(), 1);
     assert_eq!(f.nodes[0].id, "publish_app");
     assert_eq!(f.nodes[0].access, "write");
-    assert_eq!(f.nodes[0].skills, None);
+    assert!(serde_json::to_value(&f.nodes[0])
+        .unwrap()
+        .get("skills")
+        .is_none());
     assert!(f.nodes[0].depends_on.is_empty());
 }
 
@@ -80,6 +83,10 @@ fn migration_preserves_reversed_legacy_and_custom_release_without_repairing_inva
     custom["flows"][3]["nodes"][0]["prompt"] = json!("custom release");
     custom["flows"][3]["nodes"][0]["skills"] = json!(["fixture-publish"]);
     let settings: Settings = serde_json::from_value(custom.clone()).unwrap();
+    custom["flows"][3]["nodes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("skills");
     assert_eq!(serde_json::to_value(settings).unwrap(), custom);
     for ids in [
         vec![],
@@ -141,6 +148,13 @@ fn legacy_stored_flows_are_migrated_on_read_and_persisted_on_save() {
         .retain(|f| f["id"] != "release");
     wire["flows"][0]["nodes"][0]["prompt"] = json!("stored custom prompt");
     f.save_settings(f.settings().unwrap()).unwrap();
+    wire["flows"][0]["nodes"][0]["skills"] = json!(["retired"]);
+    wire["flows"][1]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "version_bump")
+        .unwrap()["skills"] = json!([]);
     let raw = wire.to_string();
     let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
     assert_eq!(
@@ -155,7 +169,12 @@ fn legacy_stored_flows_are_migrated_on_read_and_persisted_on_save() {
         .query_row("SELECT json FROM settings", [], |r| r.get(0))
         .unwrap();
     assert_eq!(unchanged, raw);
+    assert_no_node_skills(&serde_json::to_value(&loaded).unwrap());
     f.save_settings(loaded).unwrap();
+    let saved: String = db
+        .query_row("SELECT json FROM settings", [], |r| r.get(0))
+        .unwrap();
+    assert_no_node_skills(&serde_json::from_str(&saved).unwrap());
     drop(db);
     drop(f);
     let reopened = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
@@ -163,4 +182,77 @@ fn legacy_stored_flows_are_migrated_on_read_and_persisted_on_save() {
     assert_eq!(s.flows.len(), 4);
     assert!(!s.flows[3].enabled);
     assert_eq!(s.flows[0].nodes[0].prompt, "stored custom prompt");
+}
+
+fn assert_no_node_skills(settings: &serde_json::Value) {
+    for flow in settings["flows"].as_array().unwrap() {
+        for node in flow["nodes"].as_array().unwrap() {
+            assert!(node.get("skills").is_none(), "{node}");
+        }
+    }
+}
+
+#[test]
+fn saved_release_prompt_updates_only_the_exact_legacy_default() {
+    let legacy =
+        include_str!("../src/context/factory/domain/entities/models/release_prompt_legacy.txt");
+    let custom = format!("{legacy}\nRepositorio Acme usa su procedimiento propio.\n");
+    let new_default = Settings::default()
+        .flows
+        .into_iter()
+        .find(|flow| flow.id == "release")
+        .unwrap()
+        .nodes
+        .remove(0)
+        .prompt;
+    assert!(new_default.contains("a suitable installed publishing skill available to the agent"));
+    assert!(!new_default.contains("skill selection"));
+
+    for (stored, expected_prompt) in [(legacy, new_default.as_str()), (&custom, custom.as_str())] {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+        let factory = open();
+        factory.save_settings(factory.settings().unwrap()).unwrap();
+        let mut wire = serde_json::to_value(factory.settings().unwrap()).unwrap();
+        let release = &mut wire["flows"][3];
+        release["enabled"] = json!(true);
+        release["profile_activation"] = json!({"fixture":true});
+        let node = &mut release["nodes"][0];
+        node["agent"] = json!("opencode");
+        node["model"] = json!("fixture/test");
+        node["position"] = json!({"x":80.0,"y":120.0});
+        node["prompt"] = json!(stored);
+        node["skills"] = json!(["fixture-publish"]);
+        let raw = wire.to_string();
+        let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+        assert_eq!(
+            db.execute("UPDATE settings SET json=?1 WHERE id=1", [&raw])
+                .unwrap(),
+            1
+        );
+        let read = || {
+            db.query_row("SELECT json FROM settings WHERE id=1", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+        };
+        let loaded = factory.settings().unwrap();
+        let node = &mut wire["flows"][3]["nodes"][0];
+        node.as_object_mut().unwrap().remove("skills");
+        node["prompt"] = json!(expected_prompt);
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["flows"],
+            wire["flows"]
+        );
+        assert_eq!(read(), raw);
+        factory.save_settings(loaded).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&read()).unwrap();
+        assert_no_node_skills(&saved);
+        assert_eq!(saved["flows"], wire["flows"]);
+        drop(factory);
+        assert_eq!(
+            serde_json::to_value(open().settings().unwrap()).unwrap()["flows"],
+            wire["flows"]
+        );
+    }
 }

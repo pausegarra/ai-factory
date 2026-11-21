@@ -17,11 +17,6 @@ export interface AgentModel {
   name: string;
   efforts: string[];
 }
-export interface InstalledSkill {
-  id: string;
-  name: string;
-  description: string;
-}
 export interface AgentConfig {
   agent: Agent;
   model: string;
@@ -31,8 +26,6 @@ export interface FlowNode extends AgentConfig {
   id: string;
   name: string;
   token_overrides?: Record<string, AgentConfig>;
-  /** Undefined means all installed skills; a list stores an explicit selection. */
-  skills?: string[];
   access: "read" | "write";
   prompt: string;
   result_schema: unknown;

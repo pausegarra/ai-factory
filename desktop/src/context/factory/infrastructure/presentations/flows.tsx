@@ -25,7 +25,6 @@ import {
 import type {
   Flow,
   FlowNode,
-  InstalledSkill,
   Settings,
   Trigger,
 } from "../../domain/types";
@@ -36,42 +35,8 @@ import { noticeText } from "./notice-content";
 import { AgentModelFields } from "./agent-model-fields";
 import { TokenAgentFields } from "./token-agent-fields";
 import { WorkflowActivationFields } from "./workflow-activation-fields";
-import { SkillSelectorDialog } from "./skill-selector-dialog";
 import { arrangeFlow, displayFlow, flowConnections, hasAutomaticLayout } from "../../application/flow-layout";
 type AgentNode = Node<{ step: FlowNode; index: number }, "agent">;
-type SkillCatalogState = {
-  contextKey: string;
-  skills: InstalledSkill[] | null;
-  loading: boolean;
-  error: string;
-};
-type SkillOpening = { ticket: number; nodeId: string; contextKey: string };
-const emptySkillCatalog: SkillCatalogState = {
-  contextKey: "",
-  skills: null,
-  loading: false,
-  error: "",
-};
-function makeSkillContextKey(
-  trigger: Trigger,
-  nodeId: string,
-  settings: Settings,
-  node?: FlowNode,
-) {
-  return JSON.stringify([
-    trigger,
-    nodeId,
-    settings.commands.codex,
-    settings.codex_bindings ?? {},
-    settings.source_connectors.map((profile) => profile.id),
-    node ? {
-      agent: node.agent,
-      model: node.model,
-      effort: node.effort,
-      token_overrides: node.token_overrides ?? {},
-    } : null,
-  ]);
-}
 function AgentBox({ data, selected }: NodeProps<AgentNode>) {
   return (
     <div className={`agent-node ${selected ? "selected" : ""}`}>
@@ -110,13 +75,11 @@ export function FlowsPage({
   onSave,
   onDirtyChange,
   onBusyChange,
-  onLoadSkills,
 }: {
   settings: Settings;
   onSave: (s: Settings) => Promise<Settings | void>;
   onDirtyChange?: (dirty: boolean) => void;
   onBusyChange?: (busy: boolean) => void;
-  onLoadSkills?: () => Promise<InstalledSkill[]>;
 }) {
   const [trigger, setTrigger] = useState<Trigger>("new_issue");
   const [draft, setDraft] = useState<Flow | null>(null);
@@ -129,101 +92,20 @@ export function FlowsPage({
   const [busy, setBusy] = useState(false);
   const [schemaText, setSchemaText] = useState("");
   const [schemas, setSchemas] = useState<Record<string, string>>({});
-  const [skillCatalog, setSkillCatalog] = useState<SkillCatalogState>(emptySkillCatalog);
-  const [skillDialogNodeId, setSkillDialogNodeId] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
   const schemaField = useRef<HTMLTextAreaElement>(null);
   const mounted = useRef(true);
   const saveSerial = useRef(0);
   const triggerVisit = useRef(0);
-  const skillVisit = useRef(0);
-  const skillRequest = useRef(0);
-  const skillOpening = useRef<SkillOpening | null>(null);
-  const latestSettings = useRef(settings);
-  const latestTrigger = useRef(trigger);
-  latestSettings.current = settings;
-  latestTrigger.current = trigger;
   const original = settings.flows.find((f) => f.id === trigger)!;
   const flow = displayFlow(draft?.id === trigger ? draft : original);
   // React Flow can emit node and edge removals in the same event.
   const latestFlow = useRef(flow);
   latestFlow.current = flow;
-  const latestFlowRef = latestFlow;
   const node = flow.nodes.find((n) => n.id === selected);
   const defaultCodexAccountId = settings.source_connectors
     .map((profile) => settings.codex_bindings && Object.hasOwn(settings.codex_bindings, profile.id) ? settings.codex_bindings[profile.id] : undefined)
     .find(Boolean);
-  const skillDialogNode = flow.nodes.find((n) => n.id === skillDialogNodeId);
-  const currentSkillContext = skillDialogNodeId
-    ? makeSkillContextKey(trigger, skillDialogNodeId, settings, skillDialogNode)
-    : "";
-  const catalogIsCurrent = !!skillDialogNode && skillCatalog.contextKey === currentSkillContext;
-  const visibleSkillCatalog = catalogIsCurrent ? skillCatalog : emptySkillCatalog;
-  const skillCatalogLoading = !!skillDialogNode && (!catalogIsCurrent || visibleSkillCatalog.loading);
-  const skillCatalogError = visibleSkillCatalog.error;
-  const currentSkills = catalogIsCurrent ? skillCatalog.skills : null;
-
-  function currentSkillContextKey(nodeId: string) {
-    const currentNode = latestFlowRef.current.nodes.find((step) => step.id === nodeId);
-    return makeSkillContextKey(latestTrigger.current, nodeId, latestSettings.current, currentNode);
-  }
-
-  function invalidateSkillDialog() {
-    skillVisit.current += 1;
-    skillRequest.current += 1;
-    skillOpening.current = null;
-    setSkillDialogNodeId("");
-    setSkillCatalog(emptySkillCatalog);
-  }
-
-  async function refreshSkillCatalog() {
-    const opening = skillOpening.current;
-    if (!opening) return;
-    const request = ++skillRequest.current;
-    const current = () =>
-      mounted.current &&
-      skillOpening.current?.ticket === opening.ticket &&
-      skillRequest.current === request &&
-      currentSkillContextKey(opening.nodeId) === opening.contextKey &&
-      latestFlowRef.current.nodes.some((step) => step.id === opening.nodeId);
-    setSkillCatalog({ contextKey: opening.contextKey, skills: null, loading: true, error: "" });
-    if (!onLoadSkills) {
-      if (current()) {
-        setSkillCatalog({
-          contextKey: opening.contextKey,
-          skills: null,
-          loading: false,
-          error: noticeText("Could not load installed skills.", "Open AI Factory desktop to list installed skills."),
-        });
-      }
-      return;
-    }
-    try {
-      const skills = await onLoadSkills();
-      if (current()) setSkillCatalog({ contextKey: opening.contextKey, skills, loading: false, error: "" });
-    } catch (reason) {
-      if (current()) {
-        setSkillCatalog({
-          contextKey: opening.contextKey,
-          skills: null,
-          loading: false,
-          error: noticeText("Could not load installed skills.", reason),
-        });
-      }
-    }
-  }
-
-  function openSkillSelector(nodeId: string) {
-    if (busy) return;
-    const selectedNode = latestFlow.current.nodes.find((step) => step.id === nodeId);
-    if (!selectedNode) return;
-    const contextKey = makeSkillContextKey(trigger, nodeId, settings, selectedNode);
-    const opening = { ticket: ++skillVisit.current, nodeId, contextKey };
-    skillOpening.current = opening;
-    setSkillDialogNodeId(nodeId);
-    setSkillCatalog({ contextKey, skills: null, loading: true, error: "" });
-    void refreshSkillCatalog();
-  }
   const dirty = draft != null;
   useEffect(() => {
     mounted.current = true;
@@ -231,17 +113,8 @@ export function FlowsPage({
       mounted.current = false;
       saveSerial.current += 1;
       triggerVisit.current += 1;
-      skillVisit.current += 1;
-      skillRequest.current += 1;
-      skillOpening.current = null;
     };
   }, []);
-  useEffect(() => {
-    const opening = skillOpening.current;
-    if (opening && (!skillDialogNode || opening.contextKey !== currentSkillContext)) {
-      invalidateSkillDialog();
-    }
-  }, [currentSkillContext, skillDialogNodeId]);
   useEffect(() => {
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
@@ -274,26 +147,18 @@ export function FlowsPage({
     } catch (error) { setError(noticeText("Could not update workflow.", error)); }
   }
   function updateNode(patch: Partial<FlowNode>) {
-    updateNodeById(selected, patch);
-  }
-  function updateNodeById(id: string, patch: Partial<FlowNode>) {
     if (busy) return;
-    if (
-      skillDialogNodeId === id &&
-      !Object.keys(patch).every((key) => key === "skills")
-    ) invalidateSkillDialog();
     const current = latestFlow.current;
     update({
       ...current,
-      nodes: current.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n)),
+      nodes: current.nodes.map((node) => node.id === selected ? { ...node, ...patch } : node),
     });
   }
+
   function select(id: string) {
     if (busy) return;
-    invalidateSkillDialog();
     setSelectedEdges([]);
     setSelected(id);
-    setSkillDialogNodeId("");
     const n = flow.nodes.find((n) => n.id === id);
     setSchemaText(
       schemas[id] ?? JSON.stringify(n?.result_schema || {}, null, 2),
@@ -306,12 +171,10 @@ export function FlowsPage({
       setError("Save or discard your changes before switching triggers.");
       return;
     }
-    invalidateSkillDialog();
     setTrigger(id);
     triggerVisit.current += 1;
     saveSerial.current += 1;
     setSelectedEdges([]);
-    setSkillDialogNodeId("");
     setDraft(null);
     setSchemas({});
     setSelected("");
@@ -321,7 +184,6 @@ export function FlowsPage({
   }
   function add() {
     if (busy) return;
-    invalidateSkillDialog();
     const id = `step_${crypto.randomUUID().slice(0, 8)}`;
     const next: FlowNode = {
       id,
@@ -508,8 +370,8 @@ export function FlowsPage({
                 edges={edges}
                 nodeTypes={nodeTypes}
                 onNodeClick={(_, n) => select(n.id)}
-                onPaneClick={() => { if (busy) return; invalidateSkillDialog(); setSelected(""); setSelectedEdges([]); setStepError(null); }}
-                onEdgeClick={() => { if (!busy) { invalidateSkillDialog(); setSelected(""); setStepError(null); } }}
+                onPaneClick={() => { if (busy) return; setSelected(""); setSelectedEdges([]); setStepError(null); }}
+                onEdgeClick={() => { if (!busy) { setSelected(""); setStepError(null); } }}
                 onConnect={connect}
                 isValidConnection={(connection) => {
                   if (!connection.source || !connection.target || !flow.nodes.some((n) => n.id === connection.source) || !flow.nodes.some((n) => n.id === connection.target)) return false;
@@ -597,7 +459,7 @@ export function FlowsPage({
                 <button
                   className="icon-button"
                   aria-label="Close inspector"
-                  onClick={() => { if (!busy) { invalidateSkillDialog(); setSelected(""); setStepError(null); } }}
+                  onClick={() => { if (!busy) { setSelected(""); setStepError(null); } }}
                 >
                   <X size={18} />
                 </button>
@@ -649,14 +511,6 @@ export function FlowsPage({
                     onChange={(e) => updateNode({ prompt: e.target.value })}
                   />
                 </Field>
-                <button
-                  type="button"
-                  className="button button-secondary skill-selector-trigger"
-                  onClick={() => openSkillSelector(node.id)}
-                >
-                  <span>Select skills</span>
-                  <small>{node.skills === undefined ? "All" : node.skills.length}</small>
-                </button>
                 <Field label="Result schema · JSON">
                   <textarea
                     ref={schemaField}
@@ -696,7 +550,7 @@ export function FlowsPage({
                   className="button button-danger w-full"
                   onClick={() => {
                     if (busy) return;
-                    invalidateSkillDialog();
+
                     updateTopology(removeNode(flow, node.id));
                     setSelected("");
                     setStepError(null);
@@ -727,28 +581,6 @@ export function FlowsPage({
         </div>
       </section>
       </fieldset>
-      {skillDialogNode && (
-        <SkillSelectorDialog
-          key={skillDialogNode.id}
-          skills={currentSkills}
-          selectedSkills={skillDialogNode.skills}
-          loading={skillCatalogLoading}
-          error={skillCatalogError}
-          onRetry={() => void refreshSkillCatalog()}
-          onCancel={invalidateSkillDialog}
-          onApply={(skills) => {
-            const previous = skillDialogNode.skills;
-            const unchanged =
-              previous === undefined
-                ? skills === undefined
-                : skills !== undefined &&
-                  previous.length === skills.length &&
-                  previous.every((id) => skills.includes(id));
-            if (!unchanged) updateNodeById(skillDialogNode.id, { skills });
-            invalidateSkillDialog();
-          }}
-        />
-      )}
     </>
   );
 }

@@ -51,9 +51,38 @@ async fn release_poll_is_durable_and_keeps_profile_and_frozen_flow() {
     for flow in &mut s.flows {
         flow.enabled = flow.id == "release";
     }
-    let release = s.flows.iter_mut().find(|f| f.id == "release").unwrap();
-    release.nodes[0].prompt = "frozen release prompt".into();
+    let legacy =
+        include_str!("../src/context/factory/domain/entities/models/release_prompt_legacy.txt");
+    let default = Settings::default()
+        .flows
+        .into_iter()
+        .find(|flow| flow.id == "release")
+        .unwrap()
+        .nodes
+        .remove(0)
+        .prompt;
     f.save_settings(s).unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("factory.sqlite3")).unwrap();
+    let read_settings = || {
+        db.query_row("SELECT json FROM settings WHERE id=1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+    };
+    let mut stored: serde_json::Value = serde_json::from_str(&read_settings()).unwrap();
+    let release = stored["flows"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|flow| flow["id"] == "release")
+        .unwrap();
+    release["nodes"][0]["prompt"] = json!(legacy);
+    release["nodes"][0]["skills"] = json!(["fixture-publish"]);
+    db.execute(
+        "UPDATE settings SET json=?1 WHERE id=1",
+        [stored.to_string()],
+    )
+    .unwrap();
     f.poll_now().await.unwrap();
     f.poll_now().await.unwrap();
     let runs = f.snapshot().unwrap().runs;
@@ -66,9 +95,44 @@ async fn release_poll_is_durable_and_keeps_profile_and_frozen_flow() {
         serde_json::to_value(&d.run).unwrap()["origin_token_profile_id"],
         "work"
     );
-    assert_eq!(d.flow.nodes[0].prompt, "frozen release prompt");
+    assert!(d.flow.nodes[0]
+        .prompt
+        .contains("a suitable installed publishing skill available to the agent"));
+    assert_eq!(d.flow.nodes[0].prompt, default);
+    let id = &runs[0].id;
+    let snapshot_bytes = || {
+        db.query_row("SELECT flow FROM runs WHERE id=?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+    };
+    let mut snapshot: serde_json::Value = serde_json::from_str(&snapshot_bytes()).unwrap();
+    snapshot["nodes"][0]["prompt"] = json!(legacy);
+    snapshot["nodes"][0]["skills"] = json!([]);
+    let frozen = snapshot.to_string();
+    db.execute("UPDATE runs SET flow=?1 WHERE id=?2", [&frozen, id])
+        .unwrap();
+    let assert_history = |factory: &Factory| {
+        let flow = factory.run_detail(id).unwrap().flow;
+        assert_eq!(flow.nodes[0].prompt.as_bytes(), legacy.as_bytes());
+        assert!(serde_json::to_value(flow).unwrap()["nodes"][0]
+            .get("skills")
+            .is_none());
+        assert_eq!(snapshot_bytes(), frozen);
+    };
+    assert_history(&f);
     drop(f);
     let reopened = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    let mut changed = reopened.settings().unwrap();
+    changed
+        .flows
+        .iter_mut()
+        .find(|flow| flow.id == "release")
+        .unwrap()
+        .nodes[0]
+        .prompt = "another custom prompt".into();
+    reopened.save_settings(changed).unwrap();
+    assert_history(&reopened);
     reopened.poll_now().await.unwrap();
     assert_eq!(reopened.snapshot().unwrap().runs.len(), 1);
     assert_eq!(
@@ -317,7 +381,6 @@ async fn shared_scan_and_distinct_issue_keys_preserve_frozen_release_configurati
         .find(|f| f.id == "release")
         .unwrap()
         .nodes[0];
-    node.skills = Some(vec!["fixture-publish".into()]);
     node.token_overrides.insert(
         "work".into(),
         AgentConfig {
@@ -349,7 +412,6 @@ async fn shared_scan_and_distinct_issue_keys_preserve_frozen_release_configurati
     );
     assert_eq!(frozen.nodes[0].agent, "opencode");
     assert_eq!(frozen.nodes[0].model, "fixture");
-    assert_eq!(frozen.nodes[0].skills, Some(vec!["fixture-publish".into()]));
     let calls = server.calls.lock().unwrap();
     assert_eq!(
         calls

@@ -1,0 +1,10 @@
+{
+  "read": {
+    "agent": "{\"*\":\"deny\",\"external_directory\":{\"*\":\"deny\",\"__FACTORY_RUN_MEMORY__/**\":\"allow\"},\"glob\":\"allow\",\"grep\":\"allow\",\"list\":\"allow\",\"question\":\"deny\",\"read\":\"allow\",\"webfetch\":\"allow\",\"websearch\":\"allow\"}",
+    "global": "{\"*\":\"deny\",\"external_directory\":{\"*\":\"deny\",\"__FACTORY_RUN_MEMORY__/**\":\"allow\"},\"glob\":\"allow\",\"grep\":\"allow\",\"list\":\"allow\",\"question\":\"deny\",\"read\":\"allow\",\"webfetch\":\"allow\",\"websearch\":\"allow\"}"
+  },
+  "write": {
+    "agent": "{\"*\":\"allow\",\"external_directory\":{\"*\":\"deny\",\"__FACTORY_RUN_MEMORY__/**\":\"allow\"},\"question\":\"deny\"}",
+    "global": "{\"*\":\"allow\",\"external_directory\":{\"*\":\"deny\",\"__FACTORY_RUN_MEMORY__/**\":\"allow\"},\"question\":\"deny\"}"
+  }
+}

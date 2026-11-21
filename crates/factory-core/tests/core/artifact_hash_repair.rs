@@ -8,6 +8,9 @@ use std::path::Path;
 const SCRIPT: &str = r#"#!/usr/bin/env python3
 import copy, hashlib, json, os, pathlib, subprocess, sys, time
 scenario = SCENARIO
+if len(sys.argv) > 1 and sys.argv[1] == "app-server":
+    pathlib.Path(sys.argv[0]).resolve().with_name("unexpected-skill-discovery").touch()
+    sys.exit(87)
 prompt = sys.stdin.read()
 result = pathlib.Path(os.environ['AI_FACTORY_RESULT_PATH'])
 session = result.parent
@@ -347,7 +350,21 @@ async fn repair_launch_is_restricted_and_preserves_agent_binding() {
                 settings.codex_yolo = yolo;
                 settings.flows[0].nodes[0].access = access.into();
                 f.save_settings(settings).unwrap();
+                let db =
+                    rusqlite::Connection::open(dir.path().join("data/factory.sqlite3")).unwrap();
+                let raw: String = db
+                    .query_row("SELECT json FROM settings WHERE id=1", [], |row| row.get(0))
+                    .unwrap();
+                let mut wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                wire["flows"][0]["nodes"][0]["skills"] = json!([]);
+                assert_eq!(
+                    db.execute("UPDATE settings SET json=?1 WHERE id=1", [wire.to_string()])
+                        .unwrap(),
+                    1
+                );
+                drop(db);
                 let (id, d) = run(&f).await;
+                assert!(!dir.path().join("unexpected-skill-discovery").exists());
                 assert_eq!(d.run.status, "succeeded", "{:?}", d.nodes);
                 let s = session(&dir, &id);
                 let first: serde_json::Value =
@@ -363,10 +380,18 @@ async fn repair_launch_is_restricted_and_preserves_agent_binding() {
                 if agent == "codex" {
                     assert_eq!(first["home"], repair["home"]);
                     assert!(!repair["home"].is_null());
+                    assert!(
+                        !args
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .any(|arg| arg == "--strict-config" || arg.starts_with("skills.config")),
+                        "filtered hash repair: {args:?}"
+                    );
                     for arg in [
                         "read-only",
                         "approval_policy=\"never\"",
                         "--ephemeral",
+                        "skills.include_instructions=false",
                         "model_reasoning_effort=\"high\"",
                     ] {
                         assert!(args.contains(&json!(arg)), "{args:?}");
