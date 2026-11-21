@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 pub(crate) mod http;
+mod issue_work;
 mod merge_cleanup;
 mod node_comments;
 mod polling;
@@ -183,6 +184,11 @@ impl Github {
     ) -> Result<()> {
         let data = &result["data"];
         let action = |name| data.get(name).filter(|v| !v.is_null());
+        let issue_work = if action("publish").is_some() {
+            factory.store.issue_work(event)?
+        } else {
+            None
+        };
         ensure!(
             action("release").is_none(),
             "Release actions are no longer supported"
@@ -249,10 +255,11 @@ impl Github {
                 "PR title required"
             );
             ensure!(
-                closes_issue(
-                    p["body"].as_str().context("PR body required")?,
-                    event.number
-                ),
+                issue_work.is_some()
+                    || closes_issue(
+                        p["body"].as_str().context("PR body required")?,
+                        event.number
+                    ),
                 "PR body must close source issue"
             );
             ensure!(
@@ -322,7 +329,24 @@ impl Github {
             self.update_pr(factory, event, run, workspace, &check_active)
                 .await?;
         }
-        if let Some(p) = action("publish") {
+        if let Some(scope) = &issue_work {
+            scope.authorize(factory.store.public_settings()?.source_for_event(event)?)?;
+            if factory.store.issue_publication(scope)?.is_none() {
+                self.stage_issue_publish(
+                    factory,
+                    &factory.store.detail(run)?,
+                    scope,
+                    workspace,
+                    node_id,
+                    result,
+                )
+                .await?;
+                factory.emit("run_changed", Some(run), None);
+            }
+            self.resume_issue_publish(factory, event, scope, run, workspace)
+                .await?;
+        }
+        if let Some(p) = action("publish").filter(|_| issue_work.is_none()) {
             let branch = super::super::processes::agents::git_output(
                 factory,
                 workspace,

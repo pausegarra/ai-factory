@@ -182,6 +182,11 @@ async fn issue_prefix_execution_checks_custom_title_case_trim_and_release_indepe
                                    "html_url":"https://github.com/acme/repo/issues/97"}),
                 );
             }
+            if trigger == "new_issue"
+                && r.path.starts_with("/repos/acme/repo/issues/97/sub_issues?")
+            {
+                return (200, json!([]));
+            }
             panic!("unexpected {}", r.path);
         })
         .await;

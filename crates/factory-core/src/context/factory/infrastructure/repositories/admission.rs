@@ -256,7 +256,15 @@ impl Store {
                 .attempt
                 .checked_add(1)
                 .context("Run attempt limit reached")?;
-            let flow = settings.flow_for_source(flow, event.origin_token_profile_id.as_deref().context("Source connector unavailable")?)?;
+            let staged_flow = if event.trigger_id == "new_issue" {
+                super::issue_work::issue_publication(tx, &event.event_id)?.and_then(|publication| publication.flow)
+            } else {
+                None
+            };
+            let flow = match staged_flow {
+                Some(flow) => flow,
+                None => settings.flow_for_source(flow, event.origin_token_profile_id.as_deref().context("Source connector unavailable")?)?,
+            };
             Self::insert_in_tx(tx, &event, &flow, attempt, false, None)?
                 .context("Retry was not inserted")
         })

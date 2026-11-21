@@ -80,6 +80,8 @@ async fn fixture() -> (
                     json!({"full_name":"acme/repo","default_branch":"main"})
                 } else if path == "/repos/acme/repo/git/ref/heads/main" {
                     json!({"ref":"refs/heads/main","object":{"type":"commit","sha":sha}})
+                } else if path.contains("/sub_issues?") {
+                    json!([])
                 } else if path.starts_with("/repos/acme/repo/pulls/") {
                     let number = path.rsplit('/').next().unwrap().parse::<u64>().unwrap();
                     json!({"number":number,"state":"open","merged":false,"html_url":format!("https://github.com/acme/repo/pull/{number}"),"base":{"ref":"main","repo":{"full_name":"acme/repo"}},"head":{"ref":"feature","sha":sha,"repo":{"full_name":"acme/repo"}}})

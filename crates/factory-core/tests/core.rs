@@ -1,6 +1,9 @@
 #[path = "core/codex_yolo.rs"]
 mod codex_yolo;
 mod common;
+#[cfg(unix)]
+#[path = "core/multi_repo.rs"]
+mod multi_repo;
 use factory_core::*;
 use serde_json::json;
 
@@ -271,8 +274,14 @@ fn restart_interrupts_running_but_retains_history() {
 }
 
 #[cfg(unix)]
+type FixtureRoute =
+    Box<dyn Fn(&str, &str, &serde_json::Value) -> Option<(usize, serde_json::Value)> + Send>;
+
+#[cfg(unix)]
 struct FixtureDir {
     issue: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+    sub_issues: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+    route: std::sync::Arc<std::sync::Mutex<Option<FixtureRoute>>>,
     dir: tempfile::TempDir,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     server: Option<std::thread::JoinHandle<()>>,
@@ -347,6 +356,21 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
         json!({"state":"open","title":"[AI] work","user":{"login":"alice"}}),
     ));
     let issue_response = issue.clone();
+    let sub_issues = std::sync::Arc::new(std::sync::Mutex::new(json!([])));
+    let sub_issue_response = sub_issues.clone();
+    let route = std::sync::Arc::new(std::sync::Mutex::new(None::<FixtureRoute>));
+    let http_route = route.clone();
+    let base_sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
     let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
         let mut comments = Vec::new();
@@ -418,8 +442,25 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
             let is_comments =
                 path.starts_with("/repos/acme/repo/issues/") && path.contains("/comments");
             let mut code = 200;
-            let body = if path == "/user" {
+            let routed = http_route
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|route| route(&method, &path, &input));
+            let body = if let Some((status, body)) = routed {
+                code = status;
+                body
+            } else if path == "/user" {
                 json!({"login":"alice"})
+            } else if path.contains("/sub_issues?") {
+                sub_issue_response.lock().unwrap().clone()
+            } else if matches!(path.as_str(), "/repos/acme/api" | "/repos/acme/front") {
+                json!({"full_name":path.trim_start_matches("/repos/"),"default_branch":"main"})
+            } else if matches!(
+                path.as_str(),
+                "/repos/acme/api/git/ref/heads/main" | "/repos/acme/front/git/ref/heads/main"
+            ) {
+                json!({"ref":"refs/heads/main","object":{"type":"commit","sha":base_sha}})
             } else if is_comments {
                 code = status.load(std::sync::atomic::Ordering::SeqCst);
                 if code != 200 {
@@ -508,6 +549,8 @@ fn fixture(script: &str, limit: usize) -> (FixtureDir, std::sync::Arc<Factory>) 
     (
         FixtureDir {
             issue,
+            sub_issues,
+            route,
             dir,
             stop,
             server: Some(server),

@@ -599,6 +599,28 @@ pub struct RunDetail {
     pub event: TriggerEvent,
     pub flow: Flow,
     pub nodes: Vec<NodeRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_work: Option<IssueWorkSummary>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueWorkSummary {
+    pub repositories: Vec<IssueRepositorySummary>,
+    pub parent_closed: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueRepositorySummary {
+    pub repository: String,
+    pub sub_issues: Vec<u64>,
+    pub pull_request: Option<u64>,
+    pub status: IssueRepositoryStatus,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueRepositoryStatus {
+    Selected,
+    Pending,
+    Published,
+    NoChanges,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Metrics {

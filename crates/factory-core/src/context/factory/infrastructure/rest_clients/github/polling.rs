@@ -7,6 +7,7 @@ impl Github {
     pub(crate) async fn poll(factory: &Factory) -> Result<()> {
         let settings = factory.store.public_settings()?;
         let origins = factory.store.tracked_prs()?;
+        let pending_closures = factory.store.pending_issue_closures()?;
         let mut failures = vec![];
         for profile in &settings.source_connectors {
             let actor = &profile.account;
@@ -24,10 +25,22 @@ impl Github {
                     origin.source_connector_id.as_deref() == Some(profile.id.as_str())
                         && origin.actor.eq_ignore_ascii_case(actor)
                         && profile.allows_owner(origin.repository.split('/').next().unwrap_or(""))
+                        && profile
+                            .allows_owner(origin.issue_repository.split('/').next().unwrap_or(""))
+                })
+                .collect();
+            let closures: Vec<_> = pending_closures
+                .iter()
+                .filter(|(scope, _)| {
+                    scope.source_id == profile.id && scope.authorize(profile).is_ok()
                 })
                 .collect();
             if profile.owners.is_empty()
-                || !(issue || release || (approval && !tracked.is_empty()) || review)
+                || !(issue
+                    || release
+                    || (approval && !tracked.is_empty())
+                    || review
+                    || !closures.is_empty())
             {
                 continue;
             }
@@ -59,6 +72,17 @@ impl Github {
             if review {
                 if let Err(error) = api.poll_reviews(factory, profile).await {
                     failures.push(format!("Reviews @{actor}: {error}"));
+                }
+            }
+            for (scope, publication) in closures {
+                if let Err(error) = api
+                    .close_completed_issue_work(factory, profile, scope, publication)
+                    .await
+                {
+                    failures.push(format!(
+                        "Parent issue {}#{}: {error}",
+                        scope.parent_repository, scope.parent_number
+                    ));
                 }
             }
         }

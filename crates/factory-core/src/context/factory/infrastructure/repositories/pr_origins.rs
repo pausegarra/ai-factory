@@ -15,9 +15,9 @@ pub(crate) struct TrackedPrOrigin {
     pub source_connector_id: Option<String>,
 }
 
-fn trusted_event(repo: &str, event: &TriggerEvent) -> bool {
+fn trusted_event(repo: &str, event: &TriggerEvent, verified_scope: bool) -> bool {
     valid_repository(repo)
-        && event.repository.eq_ignore_ascii_case(repo)
+        && (verified_scope || event.repository.eq_ignore_ascii_case(repo))
         && valid_repository(&event.repository)
         && event.trigger_id == "new_issue"
         && event.number > 0
@@ -33,7 +33,21 @@ pub(super) fn project(
     source: &str,
     event: Option<&TriggerEvent>,
 ) -> Result<()> {
-    project_number(tx, repo, i64::try_from(number)?, source, event)
+    project_number(tx, repo, i64::try_from(number)?, source, event, false)
+}
+
+pub(super) fn project_issue_work(
+    tx: &Transaction<'_>,
+    repo: &str,
+    number: u64,
+    source: &str,
+    event: &TriggerEvent,
+) -> Result<()> {
+    ensure!(
+        number > 0 && trusted_event(repo, event, true),
+        "Invalid issue work PR origin"
+    );
+    project_number(tx, repo, i64::try_from(number)?, source, Some(event), true)
 }
 
 fn project_number(
@@ -42,8 +56,9 @@ fn project_number(
     number: i64,
     source: &str,
     event: Option<&TriggerEvent>,
+    verified_scope: bool,
 ) -> Result<()> {
-    let valid = number > 0 && event.is_some_and(|e| trusted_event(repo, e));
+    let valid = number > 0 && event.is_some_and(|e| trusted_event(repo, e, verified_scope));
     let event = event.filter(|_| valid);
     tx.execute(
         // Conflict evidence can revoke trust but later imports cannot restore it.
@@ -109,7 +124,7 @@ pub(super) fn backfill(tx: &Transaction<'_>) -> Result<()> {
                     && run.repository == event.repository)
                     .then_some(event)
             });
-            project_number(tx, &repo, number, &source, event.as_ref())?;
+            project_number(tx, &repo, number, &source, event.as_ref(), false)?;
         }
         tx.execute_batch("DROP TABLE tracked_prs;")?;
     }
@@ -158,7 +173,7 @@ impl Store {
                 && detail.run.trigger_id == detail.event.trigger_id
                 && detail.run.number == detail.event.number
                 && detail.run.actor.eq_ignore_ascii_case(&detail.event.actor)
-                && trusted_event(repo, &detail.event),
+                && trusted_event(repo, &detail.event, false),
             "Invalid PR origin"
         );
         project(&tx, repo, number, source_run, Some(&detail.event))?;
@@ -192,7 +207,7 @@ impl Store {
                 valid_repository(&o.repository)
                     && o.number > 0
                     && o.issue_number > 0
-                    && o.issue_repository == o.repository
+                    && valid_repository(&o.issue_repository)
                     && !o.actor.is_empty()
                     && !o.event_id.is_empty()
             })

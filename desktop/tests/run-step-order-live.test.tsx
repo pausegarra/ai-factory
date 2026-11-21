@@ -84,6 +84,23 @@ it("renders issue order, consecutive numbers and first ordered selection", async
   expect(factoryApi.deleteRun).not.toHaveBeenCalled();
 });
 
+it("shows each subissue repository and its publication progress", async () => {
+  const detail = makeDetail();
+  detail.issue_work = {
+    parent_closed: false,
+    repositories: [
+      { repository: "acme/api", sub_issues: [18, 19], pull_request: 7, status: "published" },
+      { repository: "acme/front", sub_issues: [31], pull_request: null, status: "pending" },
+    ],
+  };
+  await open(detail);
+  const panel = screen.getByRole("region", { name: "Affected repositories" });
+  expect(within(panel).getByText("acme/api")).toBeTruthy();
+  expect(within(panel).getByText("Subissues #18, #19")).toBeTruthy();
+  expect(within(panel).getByText("PR #7")).toBeTruthy();
+  expect(within(panel).getByText("Publication pending")).toBeTruthy();
+});
+
 it.each([
   [null, "Check conflicts"], ["absent", "Check conflicts"],
   ["publish", "Publish"], ["check_conflicts", "Check conflicts"],

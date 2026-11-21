@@ -753,6 +753,7 @@ fn read_database(
                 event: event.clone(),
                 flow,
                 nodes: node_runs,
+                issue_work: None,
             },
             log_text: log,
             raw,

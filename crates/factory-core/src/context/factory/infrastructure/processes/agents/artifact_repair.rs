@@ -18,6 +18,7 @@ pub(super) struct RecoveryContext<'a> {
     pub session: &'a Path,
     pub codex_home: Option<&'a Path>,
     pub skill_policy: &'a SkillPolicy,
+    pub multi_repo: bool,
     pub transport_schema: &'a Value,
     pub validator: &'a jsonschema::Validator,
     pub cancel: &'a CancellationToken,
@@ -189,6 +190,9 @@ fn build_repair_command(
         .arg("--cd")
         .arg(ctx.workspace)
         .arg("--ephemeral");
+        if ctx.multi_repo {
+            cmd.arg("--skip-git-repo-check");
+        }
         if !ctx.node.model.is_empty() {
             cmd.arg("--model").arg(&ctx.node.model);
         }

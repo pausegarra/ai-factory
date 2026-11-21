@@ -423,7 +423,9 @@ impl Factory {
         })
     }
     pub fn run_detail(&self, id: &str) -> Result<RunDetail> {
-        self.store.detail(id)
+        let mut detail = self.store.detail(id)?;
+        detail.issue_work = self.store.issue_work_summary(&detail.event)?;
+        Ok(detail)
     }
     pub fn enqueue(&self, e: TriggerEvent) -> Result<Option<String>> {
         ensure!(

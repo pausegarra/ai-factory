@@ -153,6 +153,15 @@ export interface RunDetail {
   event: unknown;
   flow: Flow;
   nodes: NodeRun[];
+  issue_work?: {
+    parent_closed: boolean;
+    repositories: {
+      repository: string;
+      sub_issues: number[];
+      pull_request: number | null;
+      status: "selected" | "pending" | "published" | "no_changes";
+    }[];
+  };
 }
 export interface CapacityUsage { active: number; limit: number }
 export interface ExecutionCapacity {
