@@ -1,4 +1,5 @@
 use super::super::source_connector::SourceConnector;
+use super::default_prompts::refresh_release_prompt;
 use super::{
     Commands, Flow, Project, Settings, DEFAULT_ISSUE_TITLE_PREFIX,
     DEFAULT_RELEASE_ISSUE_TITLE_PREFIX,
@@ -93,6 +94,9 @@ impl TryFrom<SettingsInput> for Settings {
                     .find(|f| f.id == "release")
                     .unwrap(),
             );
+        }
+        for flow in &mut flows {
+            refresh_release_prompt(flow);
         }
         let settings = Self {
             notification_connectors: decode_notification_connectors(input.notification_connectors)?,

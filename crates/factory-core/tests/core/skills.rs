@@ -7,12 +7,7 @@ use std::path::Path;
 const AGENT: &str = r#"
 if [ "$1" = app-server ]; then
   printf 'discovered\n' >> "$(dirname "$0")/skill-discovery.calls"
-  read -r line
-  printf '%s\n' '{"id":1,"result":{}}'
-  read -r line
-  read -r line
-  printf '{"id":2,"result":{"data":[{"cwd":"%s","skills":[{"name":"factory-selected","path":"%s/.agents/skills/factory-selected/SKILL.md","enabled":true},{"name":"factory-unselected","path":"%s/.agents/skills/factory-unselected/SKILL.md","enabled":true}],"errors":[]}]}}\n' "$PWD" "$PWD" "$PWD"
-  exit 0
+  exit 87
 fi
 if [ "${AI_FACTORY_RESPONSE_MODE:-initial}" = repair ]; then
   printf 'corrected\n' >> "$(dirname "$0")/skill-correction.calls"
@@ -27,41 +22,6 @@ if [ "$AI_FACTORY_NODE_ID" = publish_app ]; then
   printf '%s' '{"status":"succeeded","summary":"published","artifacts":[],"data":{"distribution_result":{"published":true}}}' > "$AI_FACTORY_RESULT_PATH"
 fi
 "#;
-
-fn install_project_skills(root: &Path) {
-    let source = root.join("source");
-    for id in ["factory-selected", "factory-unselected"] {
-        let directory = source.join(".agents/skills").join(id);
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
-            directory.join("SKILL.md"),
-            format!(
-                "---\nname: {id}\ndescription: Fixture skill\n---\nUnique instructions for {id}.\n"
-            ),
-        )
-        .unwrap();
-    }
-    for args in [
-        vec!["add", ".agents"],
-        vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-m",
-            "fixture skills",
-        ],
-    ] {
-        assert!(std::process::Command::new("git")
-            .args(args)
-            .current_dir(&source)
-            .output()
-            .unwrap()
-            .status
-            .success());
-    }
-}
 
 async fn run(factory: &std::sync::Arc<Factory>, number: u64) -> RunDetail {
     let id = factory
@@ -86,169 +46,349 @@ fn capture(root: &Path, run: &str, extension: &str) -> String {
     .unwrap()
 }
 
-#[tokio::test]
-async fn selected_skills_reach_both_agents_without_exposing_unselected_skills() {
-    for agent in ["codex", "opencode"] {
-        let (root, factory) = fixture(AGENT, 4);
-        install_project_skills(root.path());
-        let mut settings = factory.settings().unwrap();
-        let node = &mut settings.flows[0].nodes[0];
-        node.agent = agent.into();
-        node.access = "read".into();
-        node.skills = Some(vec!["factory-selected".into()]);
-        factory.save_settings(settings).unwrap();
-        let detail = run(&factory, 211).await;
+fn json_member<'a>(object: &'a str, field: &str) -> &'a str {
+    let mut rest = object.trim_start().strip_prefix('{').unwrap().trim_start();
+    loop {
+        let mut key = serde_json::Deserializer::from_str(rest).into_iter::<String>();
+        let name = key
+            .next()
+            .expect("object member")
+            .expect("JSON member name");
+        let input = rest[key.byte_offset()..]
+            .trim_start()
+            .strip_prefix(':')
+            .expect("JSON member separator")
+            .trim_start();
+        let mut value = serde_json::Deserializer::from_str(input).into_iter::<Value>();
+        value
+            .next()
+            .expect("object value")
+            .expect("JSON member value");
+        let end = value.byte_offset();
+        if name == field {
+            return &input[..end];
+        }
+        rest = input[end..]
+            .trim_start()
+            .strip_prefix(',')
+            .unwrap_or_else(|| panic!("missing JSON member {field}"))
+            .trim_start();
+    }
+}
+
+fn opencode_permission_bytes(config: &str, memory: &Path) -> Value {
+    let agent = json_member(json_member(config, "agent"), "ai-factory");
+    let memory_rule = serde_json::to_string(&format!("{}/**", memory.display())).unwrap();
+    let normalize = |raw: &str| {
+        assert!(raw.starts_with('{') && raw.ends_with('}'));
+        let external = json_member(raw, "external_directory");
         assert_eq!(
-            detail.run.status, "succeeded",
-            "{agent}: {:?}",
-            detail.nodes
+            external.matches(memory_rule.as_str()).count(),
+            1,
+            "{external}"
         );
-        let prompt = capture(root.path(), &detail.run.id, "stdin.txt");
-        assert!(
-            prompt.contains("AI Factory skill selection"),
-            "{agent}: selection missing"
+        assert_eq!(raw.matches(memory_rule.as_str()).count(), 1, "{raw}");
+        raw.replacen(memory_rule.as_str(), r#""__FACTORY_RUN_MEMORY__/**""#, 1)
+    };
+    json!({
+        "global": normalize(json_member(config, "permission")),
+        "agent": normalize(json_member(agent, "permission")),
+    })
+}
+
+pub(super) fn assert_opencode_permissions(access: &str, config: &str, memory: &Path) {
+    let baseline: Value = serde_json::from_str(include_str!(
+        "fixtures/opencode_no_selection_permissions.json"
+    ))
+    .unwrap();
+    let actual = opencode_permission_bytes(config, memory);
+    for layer in ["global", "agent"] {
+        assert_eq!(
+            actual[layer].as_str().unwrap(),
+            baseline[access][layer].as_str().unwrap(),
+            "permission bytes changed for {access}/{layer}"
         );
-        assert!(prompt.contains("factory-selected/SKILL.md"));
-        assert!(!prompt.contains("factory-unselected/SKILL.md"));
-        assert!(
-            !prompt.contains("Unique instructions"),
-            "skills must remain lazy loaded"
-        );
-        if agent == "opencode" {
-            let config: Value =
-                serde_json::from_str(&capture(root.path(), &detail.run.id, "config.json")).unwrap();
-            for permissions in [
-                &config["permission"],
-                &config["agent"]["ai-factory"]["permission"],
+    }
+}
+
+#[test]
+fn opencode_permission_comparison_detects_rule_reordering() {
+    let reference: Value = serde_json::from_str(include_str!(
+        "fixtures/opencode_no_selection_permissions.json"
+    ))
+    .unwrap();
+    let memory = Path::new("__FACTORY_RUN_MEMORY__");
+    let reorder = |object: &str, left: &str, right: &str| {
+        let member = |key| {
+            format!(
+                "{}:{}",
+                serde_json::to_string(key).unwrap(),
+                json_member(object, key)
+            )
+        };
+        let left = member(left);
+        let right = member(right);
+        let mut replacements = object
+            .match_indices(&left)
+            .take(1)
+            .map(|(index, _)| (index, &left, &right))
+            .chain(
+                object
+                    .match_indices(&right)
+                    .take(1)
+                    .map(|(index, _)| (index, &right, &left)),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(replacements.len(), 2);
+        replacements.sort_unstable_by_key(|(index, _, _)| std::cmp::Reverse(*index));
+        let mut changed = object.to_owned();
+        for (at, from, to) in replacements {
+            changed.replace_range(at..at + from.len(), to);
+        }
+        changed
+    };
+    let parse = |wire: &str| serde_json::from_str::<Value>(wire).unwrap();
+    for access in ["read", "write"] {
+        let global = reference[access]["global"].as_str().unwrap();
+        let agent = reference[access]["agent"].as_str().unwrap();
+        let config = |global: &str, agent: &str| {
+            format!(
+                r#"{{"permission":{global},"agent":{{"ai-factory":{{"permission":{agent}}}}}}}"#
+            )
+        };
+        let original = config(global, agent);
+        for layer in ["global", "agent"] {
+            let raw = reference[access][layer].as_str().unwrap();
+            let external = json_member(raw, "external_directory");
+            let reversed_directory = reorder(external, "*", "__FACTORY_RUN_MEMORY__/**");
+            for reordered in [
+                reorder(raw, "question", "external_directory"),
+                raw.replacen(external, &reversed_directory, 1),
             ] {
-                assert_eq!(
-                    permissions["skill"],
-                    json!({"*":"deny","factory-selected":"allow"})
-                );
-                assert_eq!(permissions["question"], "deny");
-                assert_eq!(permissions["external_directory"]["*"], "deny");
+                let mutated = if layer == "global" {
+                    config(&reordered, agent)
+                } else {
+                    config(global, &reordered)
+                };
+                assert_eq!(parse(&original), parse(&mutated));
+                let actual = opencode_permission_bytes(&mutated, memory);
+                assert_ne!(actual[layer], reference[access][layer], "{access}/{layer}");
+                let other = if layer == "global" { "agent" } else { "global" };
+                assert_eq!(actual[other], reference[access][other], "{access}/{other}");
             }
-        } else {
-            let args = capture(root.path(), &detail.run.id, "args.txt");
-            assert!(args.contains("skills.config="));
-            assert!(args.contains("factory-selected/SKILL.md\",enabled=true"));
-            assert!(args.contains("factory-unselected/SKILL.md\",enabled=false"));
-            assert!(root.path().join("skill-discovery.calls").exists());
         }
     }
 }
 
 #[tokio::test]
-async fn opencode_filters_by_directory_id_when_manifest_name_differs() {
-    let (root, factory) = fixture(AGENT, 4);
-    install_project_skills(root.path());
-    let source = root.path().join("source");
-    std::fs::write(source.join(".agents/skills/factory-selected/SKILL.md"),
-        "---\nname: factory-display-name\ndescription: Different display name\n---\nSkill content.\n").unwrap();
-    assert!(std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-am",
-            "rename skill metadata"
-        ])
-        .current_dir(&source)
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let mut settings = factory.settings().unwrap();
-    settings.flows[0].nodes[0].agent = "opencode".into();
-    settings.flows[0].nodes[0].skills = Some(vec!["factory-display-name".into()]);
-    factory.save_settings(settings).unwrap();
-    let detail = run(&factory, 218).await;
-    assert_eq!(detail.run.status, "succeeded");
-    let config: Value =
-        serde_json::from_str(&capture(root.path(), &detail.run.id, "config.json")).unwrap();
-    assert_eq!(
-        config["permission"]["skill"],
-        json!({"*":"deny","factory-selected":"allow"})
-    );
-    assert!(capture(root.path(), &detail.run.id, "stdin.txt")
-        .contains("\"tool_id\": \"factory-selected\""));
+async fn legacy_snapshot_codex_removed_id() {
+    assert_legacy_snapshot_runs(
+        "codex",
+        "read",
+        json!(["factory-skill-no-longer-installed"]),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn empty_skill_selection_disables_skills_for_both_agents() {
-    for agent in ["codex", "opencode"] {
-        let (root, factory) = fixture(AGENT, 4);
-        let mut settings = factory.settings().unwrap();
-        settings.flows[0].nodes[0].agent = agent.into();
-        settings.flows[0].nodes[0].skills = Some(vec![]);
-        factory.save_settings(settings).unwrap();
-        let detail = run(&factory, 212).await;
-        assert_eq!(
-            detail.run.status, "succeeded",
-            "{agent}: {:?}",
+async fn legacy_snapshot_codex_empty_list() {
+    assert_legacy_snapshot_runs("codex", "write", json!([])).await;
+}
+
+#[tokio::test]
+async fn legacy_snapshot_opencode_removed_id() {
+    assert_legacy_snapshot_runs(
+        "opencode",
+        "read",
+        json!(["factory-skill-no-longer-installed"]),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_snapshot_opencode_empty_list() {
+    assert_legacy_snapshot_runs("opencode", "write", json!([])).await;
+}
+
+async fn assert_legacy_snapshot_runs(agent: &str, access: &str, legacy: Value) {
+    let (root, factory) = fixture(
+        &AGENT.replace(r#""data":{}"#, r#""data":{"verified":true}"#),
+        4,
+    );
+    let mut settings = factory.settings().unwrap();
+    let node = &mut settings.flows[0].nodes[0];
+    node.agent = agent.into();
+    node.access = access.into();
+    node.prompt = "NATIVE_SKILLS_PROMPT_SENTINEL".into();
+    node.result_schema = json!({"type":"object","properties":{"verified":{"type":"boolean"}},"required":["verified"]});
+    factory.save_settings(settings).unwrap();
+    let id = factory
+        .enqueue(common::from_source(
+            TriggerEvent::issue("acme/repo", 213, "[AI] legacy snapshot", "alice", ""),
+            "alice",
+        ))
+        .unwrap()
+        .unwrap();
+
+    let db = rusqlite::Connection::open(root.path().join("data/factory.sqlite3")).unwrap();
+    let raw: String = db
+        .query_row("SELECT flow FROM runs WHERE id=?1", [&id], |row| row.get(0))
+        .unwrap();
+    let mut wire: Value = serde_json::from_str(&raw).unwrap();
+    let removed_id = legacy.get(0).and_then(Value::as_str).map(str::to_owned);
+    wire["nodes"][0]["skills"] = legacy;
+    let legacy_snapshot = wire.to_string();
+    assert_eq!(
+        db.execute(
+            "UPDATE runs SET flow=?1 WHERE id=?2",
+            rusqlite::params![&legacy_snapshot, &id],
+        )
+        .unwrap(),
+        1,
+    );
+    drop(db);
+
+    factory.start();
+    let detail = terminal(&factory, &id).await;
+    factory.shutdown().await;
+    let launches = |marker| {
+        std::fs::read_to_string(root.path().join(marker))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    eprintln!(
+        "{agent}/{access} error={:?}; work={}, catalog={}, corrections={}",
+        detail.nodes[0].error,
+        launches("skill-execution.calls"),
+        launches("skill-discovery.calls"),
+        launches("skill-correction.calls")
+    );
+
+    if let Some(removed_id) = removed_id
+        .as_deref()
+        .filter(|_| detail.run.status == "failed")
+    {
+        let expected = format!(
+            "Selected skill is not installed: {removed_id}. Update this node's skill selection."
+        );
+        assert!(
+            detail.nodes[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&expected),
+            "{agent}/{access}: {:?}",
             detail.nodes
         );
-        let prompt = capture(root.path(), &detail.run.id, "stdin.txt");
-        assert!(prompt.contains("No skills are enabled for this node"));
-        if agent == "opencode" {
-            let config: Value =
-                serde_json::from_str(&capture(root.path(), &detail.run.id, "config.json")).unwrap();
-            assert_eq!(config["permission"]["skill"], json!({"*":"deny"}));
+        for marker in ["skill-execution.calls", "skill-discovery.calls"] {
+            assert!(
+                !root.path().join(marker).exists(),
+                "unexpected launch: {marker}"
+            );
+        }
+    }
+    assert_eq!(
+        detail.run.status, "succeeded",
+        "{agent}/{access}: {:?}",
+        detail.nodes
+    );
+    assert_eq!(
+        detail.nodes[0].result.as_ref().unwrap()["data"]["verified"],
+        true
+    );
+    let prompt = capture(root.path(), &id, "stdin.txt");
+    let args = capture(root.path(), &id, "args.txt");
+    let config_text = capture(root.path(), &id, "config.json");
+    if agent == "codex" {
+        assert!(
+            !args
+                .lines()
+                .any(|arg| arg == "--strict-config" || arg.starts_with("skills.")),
+            "Codex work launch still filters legacy skills: {args}"
+        );
+    } else {
+        let emitted: Value = serde_json::from_str(&config_text).unwrap();
+        let global = &emitted["permission"];
+        let local = &emitted["agent"]["ai-factory"]["permission"];
+        assert!(
+            global.get("skill").is_none() && local.get("skill").is_none(),
+            "OpenCode work launch still filters legacy skills: {:?} / {:?}",
+            global.get("skill"),
+            local.get("skill")
+        );
+    }
+    assert!(prompt.contains("NATIVE_SKILLS_PROMPT_SENTINEL"));
+    for removed in [
+        "AI Factory skill selection",
+        "No skills are enabled for this node",
+        "factory-skill-no-longer-installed",
+    ] {
+        assert!(
+            !prompt.contains(removed),
+            "legacy selection leaked: {removed}"
+        );
+    }
+
+    assert!(prompt.contains("Single-work-execution output contract"));
+    assert_eq!(launches("skill-execution.calls"), 1);
+    assert_eq!(launches("skill-discovery.calls"), 0);
+    assert_eq!(launches("skill-correction.calls"), 0);
+    assert!(serde_json::to_value(&detail.flow).unwrap()["nodes"][0]
+        .get("skills")
+        .is_none());
+    let db = rusqlite::Connection::open(root.path().join("data/factory.sqlite3")).unwrap();
+    let stored: String = db
+        .query_row("SELECT flow FROM runs WHERE id=?1", [&id], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, legacy_snapshot);
+
+    if agent == "codex" {
+        assert!(args.lines().any(|line| line == "--output-schema"));
+        assert!(args.lines().any(|line| line == "approval_policy=\"never\""));
+        let sandbox = if access == "read" {
+            "read-only"
         } else {
-            let args = capture(root.path(), &detail.run.id, "args.txt");
-            assert!(args.contains("skills.include_instructions=false"));
-            assert!(!args.contains("enabled=true"));
-            assert!(args.contains("enabled=false"));
+            "workspace-write"
+        };
+        assert!(args.lines().any(|line| line == sandbox));
+    } else {
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            [
+                "run",
+                "--format",
+                "json",
+                "--standalone",
+                "--auto",
+                "--agent",
+                "ai-factory"
+            ],
+        );
+        let config: Value = serde_json::from_str(&config_text).unwrap();
+        let memory = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("data/memory/acme/repo/runs")
+            .join(&id);
+        assert_opencode_permissions(access, &config_text, &memory);
+        assert_eq!(config["agent"]["ai-factory"]["mode"], "primary");
+        assert!(config["agent"]["ai-factory"]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("final response formatting"));
+        for key in ["plugin", "plugins", "skills"] {
+            assert!(config.get(key).is_none(), "{key}");
         }
     }
-}
-
-#[tokio::test]
-async fn select_all_retains_native_discovery_without_an_extra_catalog_process() {
-    for agent in ["codex", "opencode"] {
-        let (root, factory) = fixture(AGENT, 4);
-        let mut settings = factory.settings().unwrap();
-        settings.flows[0].nodes[0].agent = agent.into();
-        factory.save_settings(settings).unwrap();
-        let detail = run(&factory, 213).await;
-        assert_eq!(detail.run.status, "succeeded");
-        assert!(!root.path().join("skill-discovery.calls").exists());
-        let args = capture(root.path(), &detail.run.id, "args.txt");
-        assert!(!args.contains("skills.config="));
-        if agent == "opencode" {
-            let config: Value =
-                serde_json::from_str(&capture(root.path(), &detail.run.id, "config.json")).unwrap();
-            assert!(config["permission"].get("skill").is_none());
-        }
-    }
-}
-
-#[tokio::test]
-async fn unavailable_selection_fails_before_agent_execution() {
-    let (root, factory) = fixture(AGENT, 4);
-    let mut settings = factory.settings().unwrap();
-    settings.flows[0].nodes[0].skills = Some(vec!["factory-skill-no-longer-installed".into()]);
-    factory.save_settings(settings).unwrap();
-    let detail = run(&factory, 214).await;
-    assert_eq!(detail.run.status, "failed");
-    assert!(detail.nodes[0]
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("Selected skill is not installed"));
-    assert!(!root.path().join("skill-execution.calls").exists());
 }
 
 #[tokio::test]
 async fn output_correction_does_not_repeat_work_or_skill_discovery() {
     let success = r#"printf '%s' '{"status":"succeeded","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH""#;
     let repair = r#"
-attempt=$(wc -l < "$(dirname "$0")/skill-execution.calls" | tr -d ' ')
 base="${AI_FACTORY_RESULT_PATH%.result.json}"
-cp "$base.args.txt" "$base.attempt-$attempt.args.txt"
-cp "$base.config.json" "$base.attempt-$attempt.config.json"
 if [ "${AI_FACTORY_RESPONSE_MODE:-initial}" != repair ]; then
   printf '%s' '{"status":"invalid","summary":"done","artifacts":[],"data":{}}' > "$AI_FACTORY_RESULT_PATH"
 else
@@ -261,7 +401,6 @@ fi
         let (root, factory) = fixture(&AGENT.replace(success, repair), 4);
         let mut settings = factory.settings().unwrap();
         settings.flows[0].nodes[0].agent = agent.into();
-        settings.flows[0].nodes[0].skills = Some(vec![]);
         factory.save_settings(settings).unwrap();
         let detail = run(&factory, 215).await;
         assert_eq!(
@@ -269,25 +408,6 @@ fi
             "{agent}: {:?}",
             detail.nodes
         );
-        for attempt in [1] {
-            if agent == "codex" {
-                let args = capture(
-                    root.path(),
-                    &detail.run.id,
-                    &format!("attempt-{attempt}.args.txt"),
-                );
-                assert!(args.contains("skills.include_instructions=false"));
-                assert!(!args.contains("enabled=true"));
-            } else {
-                let config: Value = serde_json::from_str(&capture(
-                    root.path(),
-                    &detail.run.id,
-                    &format!("attempt-{attempt}.config.json"),
-                ))
-                .unwrap();
-                assert_eq!(config["permission"]["skill"], json!({"*":"deny"}));
-            }
-        }
         assert_eq!(
             std::fs::read_to_string(root.path().join("skill-execution.calls"))
                 .unwrap()
@@ -302,18 +422,12 @@ fi
                 .count(),
             1
         );
+        assert!(!root.path().join("skill-discovery.calls").exists());
         if agent == "codex" {
             let args = std::fs::read_to_string(root.path().join("correction.args.txt")).unwrap();
             assert!(args.contains("features.shell_tool=false"));
             assert!(args.contains("skills.include_instructions=false"));
             assert!(!args.contains("skills.config="));
-            assert_eq!(
-                std::fs::read_to_string(root.path().join("skill-discovery.calls"))
-                    .unwrap()
-                    .lines()
-                    .count(),
-                1
-            );
         } else {
             let config: Value = serde_json::from_slice(
                 &std::fs::read(root.path().join("correction.config.json")).unwrap(),
@@ -329,73 +443,6 @@ fi
     }
 }
 
-#[tokio::test]
-async fn codex_discovery_failure_never_falls_back_to_unrestricted_execution() {
-    let script = r#"
-if [ "$1" = app-server ]; then
-  read -r line
-  printf '%s\n' '{"id":1,"result":{}}'
-  read -r line
-  read -r line
-  printf '%s\n' '{"id":2,"error":{"code":-32601,"message":"unknown method"}}'
-  exit 0
-fi
-touch "$(dirname "$0")/unexpected-execution"
-"#;
-    let (root, factory) = fixture(script, 4);
-    let mut settings = factory.settings().unwrap();
-    settings.flows[0].nodes[0].skills = Some(vec![]);
-    factory.save_settings(settings).unwrap();
-    let detail = run(&factory, 216).await;
-    assert_eq!(detail.run.status, "failed");
-    assert!(detail.nodes[0]
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("update the configured CLI"));
-    assert!(!root.path().join("unexpected-execution").exists());
-}
-
-#[tokio::test]
-async fn cancelling_codex_skill_discovery_stops_before_execution() {
-    let (root, factory) = fixture(
-        r#"
-if [ "$1" = app-server ]; then
-  touch "$(dirname "$0")/skill-discovery-started"
-  sleep 30
-  exit 0
-fi
-touch "$(dirname "$0")/unexpected-execution"
-"#,
-        4,
-    );
-    let mut settings = factory.settings().unwrap();
-    settings.flows[0].nodes[0].skills = Some(vec![]);
-    factory.save_settings(settings).unwrap();
-    let id = factory
-        .enqueue(common::from_source(
-            TriggerEvent::issue("acme/repo", 217, "[AI] cancel skills", "alice", ""),
-            "alice",
-        ))
-        .unwrap()
-        .unwrap();
-    factory.start();
-    let started = root.path().join("skill-discovery-started");
-    for _ in 0..200 {
-        if started.exists() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(started.exists());
-    factory.cancel(&id).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), factory.shutdown())
-        .await
-        .unwrap();
-    assert_eq!(factory.run_detail(&id).unwrap().run.status, "cancelled");
-    assert!(!root.path().join("unexpected-execution").exists());
-}
-
 async fn run_release(factory: &std::sync::Arc<Factory>) -> RunDetail {
     let id = factory
         .enqueue(common::from_source(
@@ -409,12 +456,7 @@ async fn run_release(factory: &std::sync::Arc<Factory>) -> RunDetail {
     factory.shutdown().await;
     detail
 }
-fn configure_release(
-    root: &super::FixtureDir,
-    factory: &Factory,
-    agent: &str,
-    skills: Option<Vec<String>>,
-) {
+fn configure_release(root: &super::FixtureDir, factory: &Factory, agent: &str) {
     *root.issue.lock().unwrap() = json!({"number":811,"html_url":"https://github.com/acme/repo/issues/811","state":"open","title":"[RELEASE] fixture","user":{"login":"alice"}});
     let mut settings = factory.settings().unwrap();
     settings.issue_node_comments_enabled = false;
@@ -428,21 +470,14 @@ fn configure_release(
         .unwrap()
         .nodes[0];
     node.agent = agent.into();
-    node.skills = skills;
     factory.save_settings(settings).unwrap();
 }
 
 #[tokio::test]
-async fn release_selected_skill_reaches_both_agents_in_one_editable_step() {
+async fn release_uses_native_discovery_in_one_editable_step() {
     for agent in ["codex", "opencode"] {
         let (root, factory) = fixture(AGENT, 4);
-        install_project_skills(root.path());
-        configure_release(
-            &root,
-            &factory,
-            agent,
-            Some(vec!["factory-selected".into()]),
-        );
+        configure_release(&root, &factory, agent);
         let detail = run_release(&factory).await;
         assert_eq!(
             detail.run.status, "succeeded",
@@ -458,8 +493,8 @@ async fn release_selected_skill_reaches_both_agents_in_one_editable_step() {
                 .join("publish_app.stdin.txt"),
         )
         .unwrap();
-        assert!(prompt.contains("factory-selected/SKILL.md"));
-        assert!(!prompt.contains("factory-unselected/SKILL.md"));
+        assert!(!prompt.contains("AI Factory skill selection"));
+        assert!(!root.path().join("skill-discovery.calls").exists());
         assert!(prompt.contains("Adapt or omit pipeline phases"));
         assert!(prompt.contains("return blocked"));
         assert!(prompt.contains("Release publication authorization"));
@@ -493,7 +528,7 @@ async fn release_selected_skill_reaches_both_agents_in_one_editable_step() {
 async fn release_revalidates_fresh_issue_before_any_agent_execution() {
     for change in ["closed", "title", "author", "pr"] {
         let (root, factory) = fixture(AGENT, 4);
-        configure_release(&root, &factory, "codex", None);
+        configure_release(&root, &factory, "codex");
         let id = factory
             .enqueue(common::from_source(
                 TriggerEvent::release_issue("acme/repo", 811, "[RELEASE] fixture", "alice", ""),
@@ -524,25 +559,6 @@ async fn release_revalidates_fresh_issue_before_any_agent_execution() {
 }
 
 #[tokio::test]
-async fn release_missing_selected_skill_fails_without_running_agent() {
-    let (root, factory) = fixture(AGENT, 4);
-    configure_release(
-        &root,
-        &factory,
-        "codex",
-        Some(vec!["factory-skill-no-longer-installed".into()]),
-    );
-    let detail = run_release(&factory).await;
-    assert_eq!(detail.run.status, "failed");
-    assert!(detail.nodes[0]
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("Selected skill is not installed"));
-    assert!(!root.path().join("skill-execution.calls").exists());
-}
-
-#[tokio::test]
 async fn release_missing_prerequisites_block_and_reserved_release_action_fails() {
     for (status, data, want) in [
         (
@@ -557,7 +573,7 @@ async fn release_missing_prerequisites_block_and_reserved_release_action_fails()
             json!({"status":status,"summary":"Missing distribution credentials","artifacts":[],"data":data})
         );
         let (root, factory) = fixture(&script, 4);
-        configure_release(&root, &factory, "codex", None);
+        configure_release(&root, &factory, "codex");
         let detail = run_release(&factory).await;
         assert_eq!(detail.run.status, want, "{:?}", detail.nodes);
         if status == "blocked" {
@@ -599,7 +615,7 @@ async fn release_publication_allows_tag_pipeline_with_actor_auth_for_both_agents
     for agent in ["codex", "opencode"] {
         let script = format!("{AGENT}\n{PUBLICATION_PROBE}");
         let (root, factory) = fixture(&script, 4);
-        configure_release(&root, &factory, agent, None);
+        configure_release(&root, &factory, agent);
         let detail = run_release(&factory).await;
         assert_eq!(
             detail.run.status, "succeeded",
@@ -649,7 +665,7 @@ async fn release_publication_permissions_do_not_reach_readonly_or_other_roles() 
         for agent in ["codex", "opencode"] {
             let script = format!("{AGENT}\n{PUBLICATION_PROBE}");
             let (root, factory) = fixture(&script, 4);
-            configure_release(&root, &factory, agent, None);
+            configure_release(&root, &factory, agent);
             let mut settings = factory.settings().unwrap();
             for flow in &mut settings.flows {
                 flow.enabled = flow.id == trigger;
@@ -701,7 +717,7 @@ async fn release_publication_permissions_do_not_reach_readonly_or_other_roles() 
 #[tokio::test]
 async fn release_issue_closure_failure_preserves_publication_and_reports_error() {
     let (root, factory) = fixture(AGENT, 4);
-    configure_release(&root, &factory, "codex", None);
+    configure_release(&root, &factory, "codex");
     root.issue_close_status
         .store(403, std::sync::atomic::Ordering::SeqCst);
     let detail = run_release(&factory).await;
@@ -720,7 +736,7 @@ async fn release_issue_closure_failure_preserves_publication_and_reports_error()
 #[tokio::test]
 async fn release_issue_closure_reconciles_uncertain_response_without_second_write() {
     let (root, factory) = fixture(AGENT, 4);
-    configure_release(&root, &factory, "codex", None);
+    configure_release(&root, &factory, "codex");
     root.issue_close_status
         .store(500, std::sync::atomic::Ordering::SeqCst);
     let detail = run_release(&factory).await;
@@ -741,7 +757,7 @@ async fn release_issue_closure_reconciles_uncertain_response_without_second_writ
 async fn release_issue_closure_waits_for_all_workflow_steps() {
     let script = AGENT.replace("cat > \"${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt\"", "cat > \"${AI_FACTORY_RESULT_PATH%.result.json}.stdin.txt\"\nif [ \"$AI_FACTORY_NODE_ID\" = verify ]; then\n printf '%s' '{\"status\":\"blocked\",\"summary\":\"verification blocked\",\"artifacts\":[],\"data\":{}}' > \"$AI_FACTORY_RESULT_PATH\"\n exit 0\nfi");
     let (root, factory) = fixture(&script, 4);
-    configure_release(&root, &factory, "codex", None);
+    configure_release(&root, &factory, "codex");
     let mut settings = factory.settings().unwrap();
     let flow = settings
         .flows
@@ -778,7 +794,7 @@ async fn release_issue_closure_rechecks_identity_and_accepts_already_closed() {
     for change in ["author", "title", "pr", "url", "closed", "cancel"] {
         let script = format!("{AGENT}\ntouch \"$(dirname \"$0\")/publication-ready\"\nwhile [ ! -f \"$(dirname \"$0\")/publication-finish\" ]; do sleep 0.01; done\n");
         let (root, factory) = fixture(&script, 4);
-        configure_release(&root, &factory, "codex", None);
+        configure_release(&root, &factory, "codex");
         let mut settings = factory.settings().unwrap();
         settings.source_connectors[0].issue_title_prefix = "bot:".into();
         factory.save_settings(settings).unwrap();
@@ -862,7 +878,7 @@ async fn release_issue_closure_requires_explicit_publication_confirmation() {
             json!({"status":status,"summary":"inspection only","artifacts":[],"data":data})
         );
         let (root, factory) = fixture(&script, 4);
-        configure_release(&root, &factory, "codex", None);
+        configure_release(&root, &factory, "codex");
         let detail = run_release(&factory).await;
         assert_eq!(detail.run.status, expected);
         if status == "succeeded" {
@@ -885,9 +901,11 @@ async fn release_issue_closure_requires_explicit_publication_confirmation() {
 
 #[tokio::test]
 async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmation_error() {
+    let old_prompt =
+        include_str!("../../src/context/factory/domain/entities/models/release_prompt_legacy.txt");
     for failure in ["permission", "confirmation"] {
         let (root, factory) = fixture(AGENT, 4);
-        configure_release(&root, &factory, "codex", None);
+        configure_release(&root, &factory, "codex");
         let mut settings = factory.settings().unwrap();
         settings.source_connectors[0].issue_title_prefix = "bot:".into();
         factory.save_settings(settings).unwrap();
@@ -905,6 +923,15 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
             ))
             .unwrap()
             .unwrap();
+        let mut old_flow = factory.run_detail(&id).unwrap().flow;
+        old_flow.nodes[0].prompt = old_prompt.into();
+        let db = rusqlite::Connection::open(root.path().join("data/factory.sqlite3")).unwrap();
+        db.execute(
+            "UPDATE runs SET flow=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_string(&old_flow).unwrap(), id],
+        )
+        .unwrap();
+        drop(db);
         factory.start();
         let first = terminal(&factory, &id).await;
         assert_eq!(
@@ -913,6 +940,7 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
             first.run.error
         );
         assert_eq!(first.nodes[0].status, "succeeded");
+        assert_eq!(first.flow.nodes[0].prompt, old_prompt);
         root.issue_close_status
             .store(200, std::sync::atomic::Ordering::SeqCst);
         let mut retry = None;
@@ -940,6 +968,16 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
             1,
             "{failure}: publication repeated"
         );
+        let work_prompt = std::fs::read_to_string(
+            root.path()
+                .join("data/sessions")
+                .join(&id)
+                .join("publish_app.stdin.txt"),
+        )
+        .unwrap();
+        assert!(
+            work_prompt.contains("a suitable installed publishing skill available to the agent")
+        );
         let expected_writes = if failure == "permission" { 2 } else { 1 };
         assert_eq!(
             root.requests
@@ -959,7 +997,7 @@ async fn release_prefix_closure_uses_current_prefix_and_preserves_publication() 
     for change in ["none", "prefix", "title", "both", "new_issue"] {
         let script = format!("{AGENT}\ntouch \"$(dirname \"$0\")/publication-ready\"\nwhile [ ! -f \"$(dirname \"$0\")/publication-finish\" ]; do sleep 0.01; done\n");
         let (root, factory) = fixture(&script, 4);
-        configure_release(&root, &factory, "codex", None);
+        configure_release(&root, &factory, "codex");
         root.issue.lock().unwrap()["title"] = json!(" \tship:fixture ");
         let mut s = factory.settings().unwrap();
         s.source_connectors[0].issue_title_prefix = "task:".into();

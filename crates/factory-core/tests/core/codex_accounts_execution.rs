@@ -92,7 +92,7 @@ async fn unavailable_frozen_codex_account_blocks_without_launching_cli() {
 }
 
 #[tokio::test]
-async fn frozen_accounts_isolate_execution_and_skill_discovery_homes() {
+async fn frozen_accounts_isolate_execution_homes() {
     let (dir, factory) = fixture("exit 1", 4);
     common::seed_codex_account(&factory, ACCOUNT_A);
     common::seed_codex_account(&factory, ACCOUNT_B);
@@ -100,12 +100,8 @@ async fn frozen_accounts_isolate_execution_and_skill_discovery_homes() {
 import json,os,pathlib,sys
 home=os.environ['CODEX_HOME']
 if sys.argv[1]=='app-server':
-    for line in sys.stdin:
-        request=json.loads(line)
-        if request.get('method')=='initialize': print(json.dumps({'id':1,'result':{}}),flush=True)
-        elif request.get('method')=='skills/list':
-            pathlib.Path(home,'discovery-used').write_text(home)
-            print(json.dumps({'id':2,'result':{'data':[{'skills':[]}]}}),flush=True)
+    pathlib.Path(home,'discovery-used').write_text(home)
+    sys.exit(87)
 else:
     sys.stdin.read()
     value={'status':'succeeded','summary':'isolated account execution','artifacts':[],
@@ -113,7 +109,6 @@ else:
     pathlib.Path(os.environ['AI_FACTORY_RESULT_PATH']).write_text(json.dumps(value))
 "#).unwrap();
     let mut settings = factory.settings().unwrap();
-    settings.flows[0].nodes[0].skills = Some(vec![]);
     settings
         .codex_bindings
         .insert("alice".into(), ACCOUNT_A.into());
@@ -144,10 +139,7 @@ else:
         assert_eq!(data["auth_overrides"], json!([]));
         let home = std::path::Path::new(data["home"].as_str().unwrap());
         assert_eq!(home.file_name().unwrap(), account);
-        assert_eq!(
-            std::fs::read_to_string(home.join("discovery-used")).unwrap(),
-            home.to_str().unwrap()
-        );
+        assert!(!home.join("discovery-used").exists());
     }
     factory.shutdown().await;
 }

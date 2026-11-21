@@ -1,4 +1,4 @@
-use super::{clean_env, configure_codex_home, invocation, resolve_command, results, SkillPolicy};
+use super::{clean_env, configure_codex_home, invocation, resolve_command, results};
 use crate::*;
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
@@ -17,7 +17,6 @@ pub(super) struct RecoveryContext<'a> {
     pub memory: &'a Path,
     pub session: &'a Path,
     pub codex_home: Option<&'a Path>,
-    pub skill_policy: &'a SkillPolicy,
     pub multi_repo: bool,
     pub transport_schema: &'a Value,
     pub validator: &'a jsonschema::Validator,
@@ -182,6 +181,8 @@ fn build_repair_command(
             "read-only",
             "--config",
             "cli_auth_credentials_store=\"file\"",
+            "--config",
+            "skills.include_instructions=false",
             "--output-schema",
         ])
         .arg(schema_path)
@@ -202,7 +203,6 @@ fn build_repair_command(
                 serde_json::to_string(&ctx.node.effort)?
             ));
         }
-        ctx.skill_policy.configure_codex(&mut cmd)?;
         cmd.arg("-");
     } else {
         cmd.args([

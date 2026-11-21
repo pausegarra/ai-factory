@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 mod default_prompts;
 mod issue_titles;
 mod settings_input;
+pub(crate) use default_prompts::{refresh_release_prompt, release_prompt_override};
 pub(crate) use issue_titles::{
     is_release_issue_title, issue_title_matches_trigger, normalize_issue_title_prefix,
     normalize_release_issue_title_prefix, DEFAULT_ISSUE_TITLE_PREFIX,
@@ -87,9 +88,6 @@ pub struct FlowNode {
     pub codex_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub token_overrides: BTreeMap<String, AgentConfig>,
-    // None preserves native discovery; Some lists the only skills enabled for this node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skills: Option<Vec<String>>,
     pub access: String,
     pub prompt: String,
     #[serde(default = "empty_schema")]
@@ -132,7 +130,6 @@ impl Default for Settings {
                     model: String::new(),
                     effort: String::new(),
                     token_overrides: BTreeMap::new(),
-                    skills: if id == "version_bump" { Some(vec![]) } else { None },
                     codex_account_id: None,
                     access: access.into(),
                     prompt: prompt.into(),

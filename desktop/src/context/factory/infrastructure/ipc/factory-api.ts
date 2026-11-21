@@ -13,7 +13,6 @@ import type {
   AgentAccount,
   AgentUsage,
   CodexLogin,
-  InstalledSkill,
 } from "../../domain/types";
 export const native = isTauri();
 const previewSettings: Settings = {
@@ -79,12 +78,6 @@ export const factoryApi = {
   openCodexLogin: (accountId: string) => command<void>("open_codex_login", { accountId }),
   removeAgentAccount: (accountId: string) => command<void>("remove_agent_account", { accountId }),
   agentModels: (agent: Agent, tokenProfileId?: string) => command<AgentModel[]>("get_agent_models", { agent, ...(tokenProfileId === undefined ? {} : { tokenProfileId }) }),
-  installedSkills: () =>
-    native
-      ? invoke<InstalledSkill[]>("get_installed_skills")
-      : Promise.reject(
-          new Error("Open AI Factory desktop to view installed skills."),
-        ),
   settings: () =>
     native
       ? invoke<Settings>("get_settings")

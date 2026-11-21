@@ -386,7 +386,6 @@ export function App() {
             <FlowsPage
               settings={settings}
               onSave={saveSettings}
-              onLoadSkills={factoryApi.installedSkills}
               onDirtyChange={setHasUnsaved}
               onBusyChange={setSavingPage}
             />

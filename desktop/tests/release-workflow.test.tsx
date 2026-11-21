@@ -32,8 +32,7 @@ function original(): Settings {
 }
 it("activates, edits, connects and reloads Release independently of the other flows", async()=>{
   const initial=original();const save=vi.fn(async(_s:Settings)=>{});
-  const skills=async()=>[{id:"fixture-publish",name:"Fixture publish",description:"Fixture"},{id:"fixture-other",name:"Other",description:"Other skill"}];
-  const view=render(<FlowsPage settings={initial} onSave={save} onLoadSkills={skills}/>);
+  const view=render(<FlowsPage settings={initial} onSave={save}/>);
   fireEvent.click(screen.getByRole("button",{name:/Release/}));
   const global=screen.getByRole("checkbox",{name:"Enable workflow globally for release"});
   expect((global as HTMLInputElement).checked).toBe(false);fireEvent.click(global);
@@ -46,25 +45,24 @@ it("activates, edits, connects and reloads Release independently of the other fl
   const added=release.nodes.find(n=>n.id!=="publish_app")!.id;
   expect(release.nodes.find(n=>n.id===added)!.prompt).toBe("Verify distribution receipt");
   expect(first.flows.filter(f=>f.id!=="release")).toEqual(initial.flows.filter(f=>f.id!=="release"));
-  view.rerender(<FlowsPage settings={first} onSave={save} onLoadSkills={skills}/>);
+  view.rerender(<FlowsPage settings={first} onSave={save}/>);
   fireEvent.click(screen.getByTestId("node-publish_app"));
+  expect(screen.queryByRole("button", { name: /select skills/i })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: /select skills/i })).toBeNull();
   fireEvent.change(screen.getByLabelText("Prompt"),{target:{value:"Use configured distribution skill"}});
   await screen.findByRole("option",{name:"Fixture model"});
   fireEvent.change(screen.getByLabelText("Model"),{target:{value:"fixture-model"}});
   fireEvent.change(screen.getByLabelText("Workspace access"),{target:{value:"read"}});
-  fireEvent.click(screen.getByRole("button",{name:/Select skills/}));
-  await screen.findByRole("checkbox",{name:/fixture-publish/});
-  fireEvent.click(screen.getByRole("checkbox",{name:"Select all"}));
-  fireEvent.click(screen.getByRole("checkbox",{name:/fixture-publish/}));
-  fireEvent.click(screen.getByRole("button",{name:"Apply"}));
   fireEvent.click(screen.getByRole("button",{name:`Connect publish_app to ${added}`}));
   fireEvent.click(screen.getByRole("button",{name:"Save workflow"}));
   await waitFor(()=>expect(save).toHaveBeenCalledTimes(2));
   const second=save.mock.calls[1][0];expect(second.flows.find(f=>f.id==="release")!.nodes.find(n=>n.id===added)!.depends_on).toEqual(["publish_app"]);
   view.unmount();
-  render(<FlowsPage settings={second} onSave={save} onLoadSkills={skills}/>);
+  render(<FlowsPage settings={second} onSave={save}/>);
   fireEvent.click(screen.getByRole("button",{name:/Release/}));
   fireEvent.click(screen.getByTestId("node-publish_app"));
+  expect(screen.queryByRole("button", { name: /select skills/i })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: /select skills/i })).toBeNull();
   expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("Use configured distribution skill");
   expect((screen.getByLabelText("Workspace access") as HTMLSelectElement).value).toBe("read");
   fireEvent.click(screen.getByRole("button",{name:`Delete publish_app::${added}`}));
@@ -72,6 +70,9 @@ it("activates, edits, connects and reloads Release independently of the other fl
   fireEvent.click(screen.getByRole("button",{name:"Save workflow"}));
   await waitFor(()=>expect(save).toHaveBeenCalledTimes(3));
   const final=save.mock.calls[2][0];
-  expect(final.flows.find(f=>f.id==="release")!.nodes).toEqual([{...initial.flows[3].nodes[0],prompt:"Use configured distribution skill",model:"fixture-model",access:"read",skills:["fixture-publish"],position:{x:80,y:80}}]);
+  for (const node of final.flows.flatMap((flow) => flow.nodes)) {
+    expect(node).not.toHaveProperty("skills");
+  }
+  expect(final.flows.find(f=>f.id==="release")!.nodes).toEqual([{...initial.flows[3].nodes[0],prompt:"Use configured distribution skill",model:"fixture-model",access:"read",position:{x:80,y:80}}]);
   expect(final.flows.filter(f=>f.id!=="release")).toEqual(initial.flows.filter(f=>f.id!=="release"));
 });

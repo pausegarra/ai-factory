@@ -1,5 +1,5 @@
 use super::release_publication;
-use crate::{now, Factory, Result, RunDetail};
+use crate::{now, refresh_release_prompt, Factory, Flow, Result, RunDetail};
 use anyhow::Context;
 use serde_json::json;
 
@@ -36,6 +36,7 @@ pub(super) fn reuse_completed(factory: &Factory, current: &RunDetail) -> Result<
     if !is_publication(current) || current.run.attempt <= 1 {
         return Ok(false);
     }
+    let current_flow = effective_release_flow(&current.flow)?;
     let mut candidates: Vec<_> = factory
         .store
         .runs()?
@@ -64,7 +65,7 @@ pub(super) fn reuse_completed(factory: &Factory, current: &RunDetail) -> Result<
                 .event
                 .actor
                 .eq_ignore_ascii_case(&current.event.actor)
-            || serde_json::to_value(&previous.flow)? != serde_json::to_value(&current.flow)?
+            || effective_release_flow(&previous.flow)? != current_flow
             || !is_publication(&previous)
             || !confirmed(&previous)
         {
@@ -104,4 +105,12 @@ pub(super) fn reuse_completed(factory: &Factory, current: &RunDetail) -> Result<
         return Ok(true);
     }
     Ok(false)
+}
+
+fn effective_release_flow(flow: &Flow) -> Result<serde_json::Value> {
+    // The default prompt upgrade does not change the identity of a published
+    // workflow. Normalize the comparison while preserving frozen run data.
+    let mut effective = flow.clone();
+    refresh_release_prompt(&mut effective);
+    Ok(serde_json::to_value(effective)?)
 }

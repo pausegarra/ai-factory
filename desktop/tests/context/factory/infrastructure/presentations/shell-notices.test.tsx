@@ -10,7 +10,7 @@ vi.mock("../../../../../src/context/factory/infrastructure/ipc/factory-api", () 
   factoryApi: {
     settings: vi.fn(), snapshot: vi.fn(), poll: vi.fn(), subscribe: vi.fn(),
     saveSettings: vi.fn(), importLegacy: vi.fn(), agentAccounts: vi.fn(),
-    agentModels: vi.fn(), installedSkills: vi.fn(),
+    agentModels: vi.fn(),
   },
 }));
 
@@ -32,7 +32,6 @@ beforeEach(() => {
   });
   vi.mocked(factoryApi.agentAccounts).mockResolvedValue([]);
   vi.mocked(factoryApi.agentModels).mockResolvedValue([]);
-  vi.mocked(factoryApi.installedSkills).mockResolvedValue([]);
   vi.mocked(factoryApi.subscribe).mockImplementation(async (callback) => {
     mocks.listeners.add(callback);
     return () => mocks.listeners.delete(callback);

@@ -32,7 +32,6 @@ pub mod context {
                 pub mod agent_model;
                 pub mod agent_usage;
                 pub mod connector_notification;
-                pub mod installed_skill;
                 pub(crate) mod issue_node_comment;
                 pub(crate) mod pr_workspace;
                 pub mod run_notification;
@@ -51,7 +50,6 @@ pub mod context {
             pub mod filesystem {
                 pub(crate) mod agent_home;
                 pub mod run_cleanup;
-                pub mod skill_catalog;
             }
             pub mod migration {
                 pub mod legacy;
@@ -78,7 +76,6 @@ pub mod context {
             }
             pub mod processes {
                 pub mod agent_models;
-                pub(crate) mod agent_skills;
                 pub mod agent_usage;
                 pub mod agents;
                 pub(crate) mod codex_login;
@@ -89,7 +86,6 @@ pub mod context {
     }
 }
 pub use context::factory::application::dto::agent_model::AgentModel;
-pub use context::factory::application::dto::installed_skill::InstalledSkill;
 pub use context::factory::application::services::factory::Factory;
 pub use context::factory::domain::entities::models::*;
 pub use context::factory::domain::entities::run_deletion::*;

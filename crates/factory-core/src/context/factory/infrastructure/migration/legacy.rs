@@ -324,7 +324,6 @@ fn parse_nodes(workflow: &Value, base: &Path) -> Result<Vec<FlowNode>> {
             model: text(v, "model").into(),
             effort: text(v, "effort").into(),
             token_overrides: Default::default(),
-            skills: None,
             access: text(v, "access").into(),
             prompt,
             result_schema: schema,
