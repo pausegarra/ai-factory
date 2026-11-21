@@ -58,6 +58,8 @@ export interface SourceConnector {
   owners: string[];
   authors: string[];
   reviewers: string[];
+  issue_title_prefix?: string;
+  release_issue_title_prefix?: string;
   review_all_open_pull_requests?: boolean;
   pull_request_authors?: string[];
 }
@@ -69,8 +71,6 @@ export interface Project {
 export const DEFAULT_ISSUE_TITLE_PREFIX = "[AI]";
 export const DEFAULT_RELEASE_ISSUE_TITLE_PREFIX = "[RELEASE]";
 export interface Settings {
-  issue_title_prefix?: string;
-  release_issue_title_prefix?: string;
   notification_connectors?: NotificationConnector[];
   source_connectors: SourceConnector[];
   // Keys are SourceConnector IDs; removed sources remain inactive.
@@ -99,7 +99,7 @@ export const TRIGGERS: Record<
     label: "New task",
     short: "Prefixed issue",
     description:
-      "Open issues whose titles start with the configured prefix in Settings, created by allowed authors.",
+      "Open issues whose titles start with the New issue prefix configured for their GitHub source, created by allowed authors.",
   },
   pr_approved: {
     label: "PR approved",
@@ -115,7 +115,7 @@ export const TRIGGERS: Record<
   release: {
     label: "Release",
     short: "Release",
-    description: "Open issues whose trimmed title starts with the configured Release prefix. Letter case matters. Created by allowed authors. Disabled by default.",
+    description: "Open issues whose trimmed title starts with the Release prefix configured for their GitHub source. Letter case matters. Created by allowed authors. Disabled by default.",
   },
 };
 export interface Run {
@@ -153,6 +153,15 @@ export interface RunDetail {
   event: unknown;
   flow: Flow;
   nodes: NodeRun[];
+  issue_work?: {
+    parent_closed: boolean;
+    repositories: {
+      repository: string;
+      sub_issues: number[];
+      pull_request: number | null;
+      status: "selected" | "pending" | "published" | "no_changes";
+    }[];
+  };
 }
 export interface CapacityUsage { active: number; limit: number }
 export interface ExecutionCapacity {

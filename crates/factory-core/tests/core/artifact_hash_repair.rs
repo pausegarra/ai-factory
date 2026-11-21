@@ -574,6 +574,9 @@ fi
                 ("GET", "/repos/acme/repo/issues/8") => {
                     json!({"state":"open","title":"[AI] hashes","user":{"login":"alice"}})
                 }
+                ("GET", p) if p.starts_with("/repos/acme/repo/issues/8/sub_issues?") => {
+                    json!([])
+                }
                 ("GET", "/repos/acme/repo") => {
                     json!({"full_name":"acme/repo","default_branch":"trunk"})
                 }

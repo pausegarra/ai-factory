@@ -1,5 +1,4 @@
 use super::*;
-use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 use crate::context::factory::infrastructure::repositories::pr_origins::TrackedPrOrigin;
 use std::collections::{HashMap, HashSet};
 
@@ -7,6 +6,7 @@ impl Github {
     pub(crate) async fn poll(factory: &Factory) -> Result<()> {
         let settings = factory.store.public_settings()?;
         let origins = factory.store.tracked_prs()?;
+        let pending_closures = factory.store.pending_issue_closures()?;
         let mut failures = vec![];
         for profile in &settings.source_connectors {
             let actor = &profile.account;
@@ -24,10 +24,22 @@ impl Github {
                     origin.source_connector_id.as_deref() == Some(profile.id.as_str())
                         && origin.actor.eq_ignore_ascii_case(actor)
                         && profile.allows_owner(origin.repository.split('/').next().unwrap_or(""))
+                        && profile
+                            .allows_owner(origin.issue_repository.split('/').next().unwrap_or(""))
+                })
+                .collect();
+            let closures: Vec<_> = pending_closures
+                .iter()
+                .filter(|(scope, _)| {
+                    scope.source_id == profile.id && scope.authorize(profile).is_ok()
                 })
                 .collect();
             if profile.owners.is_empty()
-                || !(issue || release || (approval && !tracked.is_empty()) || review)
+                || !(issue
+                    || release
+                    || (approval && !tracked.is_empty())
+                    || review
+                    || !closures.is_empty())
             {
                 continue;
             }
@@ -59,6 +71,17 @@ impl Github {
             if review {
                 if let Err(error) = api.poll_reviews(factory, profile).await {
                     failures.push(format!("Reviews @{actor}: {error}"));
+                }
+            }
+            for (scope, publication) in closures {
+                if let Err(error) = api
+                    .close_completed_issue_work(factory, profile, scope, publication)
+                    .await
+                {
+                    failures.push(format!(
+                        "Parent issue {}#{}: {error}",
+                        scope.parent_repository, scope.parent_number
+                    ));
                 }
             }
         }
@@ -133,18 +156,16 @@ impl Github {
             let repo = repository(&row)?;
             let n = row["number"].as_u64().context("Invalid issue number")?;
             let current = factory.store.public_settings()?;
+            let Some(source) = current.source_by_id(&profile.id) else {
+                return Ok(());
+            };
             let candidates: Vec<&str> = active
                 .iter()
                 .copied()
                 .filter(|trigger| {
-                    row["title"].as_str().is_none_or(|title| {
-                        issue_title_matches_trigger(
-                            title,
-                            trigger,
-                            &current.issue_title_prefix,
-                            &current.release_issue_title_prefix,
-                        )
-                    })
+                    row["title"]
+                        .as_str()
+                        .is_none_or(|title| source.matches_issue_title(title, trigger))
                 })
                 .collect();
             let mut pending = vec![];
@@ -175,17 +196,15 @@ impl Github {
                 continue;
             }
             let current = factory.store.public_settings()?;
+            let Some(source) = current.source_by_id(&profile.id) else {
+                return Ok(());
+            };
             let Some(title) = fresh["title"].as_str() else {
                 continue;
             };
             let body = fresh["body"].as_str().unwrap_or("");
             for trigger in pending {
-                if !issue_title_matches_trigger(
-                    title,
-                    trigger,
-                    &current.issue_title_prefix,
-                    &current.release_issue_title_prefix,
-                ) {
+                if !source.matches_issue_title(title, trigger) {
                     continue;
                 }
                 let mut event = if trigger == "release" {

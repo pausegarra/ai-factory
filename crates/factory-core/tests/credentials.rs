@@ -23,6 +23,7 @@ fn with_token(token: &str) -> Settings {
         reviewers: vec!["alice".into()],
         token: Some(token.into()),
         has_token: false,
+        ..Default::default()
     });
     settings
 }
@@ -59,6 +60,7 @@ fn github_tokens_are_not_written_to_sqlite() {
         reviewers: vec!["alice".into()],
         token: Some("fixture-token-must-not-reach-sqlite".into()),
         has_token: false,
+        ..Default::default()
     });
     factory.save_settings(settings).unwrap();
     let db = Connection::open(dir.path().join("factory.sqlite3")).unwrap();

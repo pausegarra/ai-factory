@@ -29,8 +29,10 @@ export function OverviewPage({
   onPage: (page: string) => void;
   onRun: (id: string) => void;
 }) {
-  const configured =
-    settings.source_connectors.some((t) => t.has_token && t.owners.length > 0);
+  const readySources = settings.source_connectors.filter((source) => source.has_token && source.owners.length > 0);
+  const configured = readySources.length > 0;
+  const prefixes = new Set(readySources.map((source) => source.issue_title_prefix ?? DEFAULT_ISSUE_TITLE_PREFIX));
+  const issuePrefix = prefixes.size === 1 ? [...prefixes][0] : undefined;
   const { metrics } = snapshot;
   const active = snapshot.runs.filter((r) =>
     ["running", "queued"].includes(r.status),
@@ -154,11 +156,11 @@ export function OverviewPage({
             <Empty
               icon={<Tray size={32} />}
               title="Ready for the first task"
-              description={
-                "Open an issue whose title starts with " +
-                (settings.issue_title_prefix ?? DEFAULT_ISSUE_TITLE_PREFIX) +
-                " in a connected repository. Your workflow starts automatically."
-              }
+              description={issuePrefix
+                ? `Open an issue whose title starts with ${issuePrefix} in a connected repository. Your workflow starts automatically.`
+                : configured
+                  ? "Open an issue in a connected repository and start its title with the prefix configured for that source in Sources. Your workflow starts automatically."
+                  : "Set up a GitHub source to discover new issues."}
             />
           )}
           <div className="panel-footer">

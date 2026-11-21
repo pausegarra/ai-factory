@@ -22,6 +22,9 @@ function fill(label="Work", token="fixture-token") {
 function apply() {fireEvent.click(screen.getByRole("button", {name:"Apply changes"}));}
 function open(label="Work") {fireEvent.click(screen.getByRole("button", {name:`Edit connector ${label}`}));}
 function save() {fireEvent.click(screen.getByRole("button", {name:"Save changes"}));}
+function prefixInput(label: string) {
+  return screen.getByRole<HTMLInputElement>("textbox", {name: label});
+}
 it("adds independent same-account sources, applies before saving and clears secrets after void success", async () => {
  const onSave=vi.fn(async (_s:Settings)=>{});
  render(<SourcesPage settings={noticeSettings()} onSave={onSave}/>);
@@ -188,4 +191,59 @@ it("loads legacy PR author settings as empty and saves without replacing a token
   expect(saved.pull_request_authors).toEqual([]);
   expect(saved.authors).toEqual(["alice"]);
   expect(saved.token).toBeUndefined();
+});
+
+it("defaults and saves both literal prefixes independently for same-account sources", async () => {
+  const onSave = vi.fn(async (settings: Settings) => structuredClone(settings));
+  const view = render(<SourcesPage settings={noticeSettings()} onSave={onSave} />);
+  const issue = () => prefixInput("New issue title prefix");
+  const release = () => prefixInput("Release issue title prefix");
+
+  add(); fill();
+  expect(issue().value).toBe("[AI]");
+  expect(release().value).toBe("[RELEASE]");
+  expect(document.getElementById(issue().getAttribute("aria-describedby")!)?.textContent)
+    .toContain("Letter case matters");
+  fireEvent.change(issue(), {target: {value: " \tBoT[.*] "}});
+  fireEvent.change(release(), {target: {value: " Ship: "}});
+  apply();
+  add(); fill("Personal", "fixture-other");
+  expect(issue().value).toBe("[AI]");
+  expect(release().value).toBe("[RELEASE]");
+  fireEvent.change(release(), {target: {value: " Deploy: "}});
+  apply(); save();
+  await screen.findByText("Source settings saved.");
+
+  const stored = onSave.mock.calls[0][0];
+  expect(stored.source_connectors.map(c => [c.issue_title_prefix, c.release_issue_title_prefix]))
+    .toEqual([["BoT[.*]", "Ship:"], ["[AI]", "Deploy:"]]);
+  expect(stored).not.toHaveProperty("issue_title_prefix");
+  expect(stored).not.toHaveProperty("release_issue_title_prefix");
+  view.unmount();
+
+  render(<SourcesPage settings={stored} onSave={onSave} />);
+  open();
+  expect(issue().value).toBe("BoT[.*]");
+  expect(release().value).toBe("Ship:");
+  fireEvent.change(release(), {target: {value: "discard:"}});
+  fireEvent.click(screen.getByRole("button", {name: "Cancel"}));
+  open();
+  expect(release().value).toBe("Ship:");
+});
+
+it.each([
+  ["New issue title prefix", "Issue title prefix cannot be empty.", ""],
+  ["Release issue title prefix", "Release issue title prefix cannot be empty.", " \t"],
+])("blocks saving an invalid %s and focuses its field", (label, message, value) => {
+  const onSave = vi.fn();
+  const source = {...newGitHubIssuesSource("work"), label: "Work", account: "alice", has_token: true};
+  render(<SourcesPage settings={{...noticeSettings(), source_connectors: [source]}} onSave={onSave} />);
+  open();
+  fireEvent.change(prefixInput(label), {target: {value}});
+  apply(); save();
+
+  expect(onSave).not.toHaveBeenCalled();
+  expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toContain(message);
+  expect(prefixInput(label).getAttribute("aria-invalid")).toBe("true");
+  expect(document.activeElement).toBe(prefixInput(label));
 });

@@ -25,10 +25,19 @@ it("reacts to connector readiness without borrowing owners from another token", 
 });
 
 it("shows the effective issue prefix and reacts to settings changes", () => {
-  const props = { snapshot: attentionSnapshot([]), settings: attentionSettings, onPage: vi.fn(), onRun: vi.fn() };
-  const view = render(<OverviewPage {...props} />);
+  const source = {id: "work", label: "Work", type: "github_issues" as const,
+    account: "alice", has_token: true, owners: ["team"], authors: [], reviewers: []};
+  const props = { snapshot: attentionSnapshot([]), onPage: vi.fn(), onRun: vi.fn() };
+  const view = render(<OverviewPage {...props} settings={{...attentionSettings, source_connectors: [source]}} />);
   expect(screen.getByText("Open an issue whose title starts with [AI] in a connected repository. Your workflow starts automatically.")).toBeTruthy();
-  view.rerender(<OverviewPage {...props} settings={{ ...attentionSettings, issue_title_prefix: "bot:" }} />);
+  const custom = {...source, issue_title_prefix: "bot:"};
+  view.rerender(<OverviewPage {...props} settings={{...attentionSettings, source_connectors: [custom]}} />);
   expect(screen.getByText("Open an issue whose title starts with bot: in a connected repository. Your workflow starts automatically.")).toBeTruthy();
-  expect(screen.queryByText(/Open an issue.*\[AI\]/)).toBeNull();
+
+  view.rerender(<OverviewPage {...props} settings={{...attentionSettings, source_connectors: [custom, {...source, id: "other", has_token: false}]}} />);
+  expect(screen.getByText(/Open an issue whose title starts with bot:/)).toBeTruthy();
+
+  view.rerender(<OverviewPage {...props} settings={{...attentionSettings, source_connectors: [custom, {...source, id: "other"}]}} />);
+  expect(screen.getByText(/start its title with the prefix configured for that source in Sources/)).toBeTruthy();
+  expect(screen.queryByText(/Open an issue.*starts with bot:/)).toBeNull();
 });

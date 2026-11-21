@@ -41,6 +41,7 @@ impl Store {
         super::run_deletions::migrate(&mut db)?;
         super::agent_accounts::migrate(&db)?;
         super::issue_node_comments::migrate(&db)?;
+        super::issue_work::migrate(&db)?;
         let s = Self {
             db: Mutex::new(db),
             credentials,

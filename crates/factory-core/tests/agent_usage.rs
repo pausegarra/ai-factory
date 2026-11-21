@@ -91,6 +91,7 @@ done"#,
         reviewers: vec![],
         token: Some("usage-fixture-source".into()),
         has_token: false,
+        ..Default::default()
     });
     settings
         .codex_bindings

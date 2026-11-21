@@ -55,7 +55,7 @@ impl Github {
                     && profile.allows_owner(event.repository.split('/').next().unwrap()),
                 "Release actor or repository no longer authorized"
             );
-            Ok(settings.release_issue_title_prefix)
+            Ok(profile.release_issue_title_prefix.clone())
         };
         check_active()?;
         self.verify_actor(&event.actor).await?;

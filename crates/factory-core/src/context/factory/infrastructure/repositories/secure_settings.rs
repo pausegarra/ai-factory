@@ -1,7 +1,4 @@
 use super::store::Store;
-use crate::context::factory::domain::entities::models::{
-    normalize_issue_title_prefix, normalize_release_issue_title_prefix,
-};
 use crate::*;
 use anyhow::ensure;
 use rusqlite::OptionalExtension;
@@ -223,9 +220,9 @@ impl Store {
         settings: &Settings,
     ) -> Result<(Settings, HashMap<String, Reference>)> {
         let mut clean = settings.clone();
-        clean.issue_title_prefix = normalize_issue_title_prefix(&clean.issue_title_prefix)?;
-        clean.release_issue_title_prefix =
-            normalize_release_issue_title_prefix(&clean.release_issue_title_prefix)?;
+        for source in &mut clean.source_connectors {
+            source.normalize_title_prefixes()?;
+        }
         clean.validate()?;
         let old = self.raw_settings()?;
         let old_refs = self.source_credential_refs()?;

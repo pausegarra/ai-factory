@@ -257,6 +257,7 @@ fn notification_cached_credentials_are_redacted_without_keychain_io() -> Result<
         owners: vec!["acme".into()],
         authors: vec!["alice".into()],
         reviewers: vec![],
+        ..Default::default()
     }];
     common::bind_fixture_codex(&f, &mut settings);
     f.save_settings(settings)?;

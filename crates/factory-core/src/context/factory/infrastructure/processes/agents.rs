@@ -1,6 +1,6 @@
-use crate::context::factory::domain::entities::models::issue_title_matches_trigger;
 mod artifact_repair;
 mod invocation;
+pub(crate) mod issue_workspace;
 mod output;
 mod release_completion;
 mod release_publication;
@@ -10,6 +10,7 @@ mod results;
 use super::agent_skills::SkillPolicy;
 use super::workspaces;
 use crate::context::factory::application::services::reviews;
+use crate::context::factory::domain::entities::issue_work::IssueScope;
 use crate::*;
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
@@ -178,7 +179,7 @@ async fn prepare(
     id: &str,
     event: &TriggerEvent,
     cancel: &CancellationToken,
-) -> Result<PathBuf> {
+) -> Result<Option<PathBuf>> {
     let s = factory.store.public_settings()?;
     ensure!(valid_repository(&event.repository), "Invalid repository");
     let profile = s.source_for_event(event)?;
@@ -210,15 +211,11 @@ async fn prepare(
                 )
                 .await?;
             let current = factory.store.public_settings()?;
+            let current_source = current.source_for_event(event)?;
             ensure!(
                 issue["state"] == "open"
                     && issue["title"].as_str().is_some_and(|title| {
-                        issue_title_matches_trigger(
-                            title,
-                            &event.trigger_id,
-                            &current.issue_title_prefix,
-                            &current.release_issue_title_prefix,
-                        )
+                        current_source.matches_issue_title(title, &event.trigger_id)
                     })
                     && issue["user"]["login"]
                         .as_str()
@@ -226,6 +223,52 @@ async fn prepare(
                     && issue.get("pull_request").is_none(),
                 "Issue no longer eligible"
             );
+            if event.trigger_id == "new_issue" {
+                let existing_scope = factory.store.issue_scope(event)?;
+                let save_scope = existing_scope.is_none();
+                let scope = match existing_scope {
+                    Some(IssueScope::SubIssues(scope)) => Some(scope),
+                    Some(IssueScope::SingleRepository) => None,
+                    None => match api.resolve_issue_work(event, profile, &issue).await {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            factory.set_run_status(
+                                id,
+                                "blocked",
+                                Some(factory.redact(&format!(
+                                    "Subissue scope could not be resolved: {error:#}"
+                                ))),
+                            )?;
+                            return Ok(None);
+                        }
+                    },
+                };
+                if let Some(scope) = scope {
+                    if scope.repositories.is_empty() {
+                        factory.set_run_status(
+                            id,
+                            "blocked",
+                            Some("All subissues are closed; no work is pending.".into()),
+                        )?;
+                        return Ok(None);
+                    }
+                    let current = factory.store.public_settings()?;
+                    if let Err(error) = scope.authorize(current.source_for_event(event)?) {
+                        factory.set_run_status(id, "blocked", Some(error.to_string()))?;
+                        return Ok(None);
+                    }
+                    if save_scope {
+                        factory.store.save_issue_scope(id, event, Some(&scope))?;
+                        factory.emit("run_changed", Some(id), None);
+                    }
+                    let workspace = workspaces::path(&factory.root, id)?;
+                    issue_workspace::prepare(factory, &workspace, event, &scope, cancel).await?;
+                    return Ok(Some(workspace));
+                }
+                if save_scope {
+                    factory.store.save_issue_scope(id, event, None)?;
+                }
+            }
         }
     }
     ensure!(
@@ -276,7 +319,7 @@ async fn prepare(
         )
         .await?;
     }
-    Ok(workspace)
+    Ok(Some(workspace))
 }
 pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
@@ -402,7 +445,45 @@ async fn execute_in_workspace(
     if release_completion::reuse_completed(factory, &detail)? {
         return Ok(Some("succeeded"));
     }
-    let workspace = tokio::select! {_=cancel.cancelled()=>{return Ok(None)},r=prepare(factory,id,&detail.event,&cancel)=>r}?;
+    if let Some(scope) = factory.store.issue_work(&detail.event)? {
+        if let Some(publication) = factory.store.issue_publication(&scope)? {
+            let profile_settings = factory.store.public_settings()?;
+            let profile = profile_settings.source_for_event(&detail.event)?;
+            scope.authorize(profile)?;
+            let api = factory.github(&factory.store.token_for_source(&profile.id).await?)?;
+            let workspace = workspaces::path(&factory.root, id)?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(None),
+                result = api.publish_actions(
+                    factory, &detail.event, id, &publication.node_id, &workspace,
+                    publication.result.as_ref().context("Stored publication request missing")?
+                ) => result?,
+            }
+            for mut node in detail.nodes {
+                if cancel.is_cancelled() {
+                    return Ok(None);
+                }
+                let published = node.id == publication.node_id;
+                node.status = if published { "succeeded" } else { "skipped" }.into();
+                node.finished_at = Some(now());
+                if published {
+                    node.result = Some(
+                        json!({"status":"succeeded","summary":"Resumed publication of the verified repository commits.","artifacts":[],"data":{}}),
+                    );
+                } else {
+                    node.error = Some("Reused verified work from the earlier attempt.".into());
+                }
+                factory.store.save_node(id, &node)?;
+                factory.emit("node_changed", Some(id), Some(&node.id));
+            }
+            return Ok(Some("succeeded"));
+        }
+    }
+    let Some(workspace) = (tokio::select! {_=cancel.cancelled()=>{return Ok(None)},r=prepare(factory,id,&detail.event,&cancel)=>r})?
+    else {
+        return Ok(None);
+    };
     {
         let run = factory.store.detail(id)?.run;
         if run.status == "cancelled" {
@@ -560,6 +641,34 @@ async fn execute_in_workspace(
             let nodes = factory.store.nodes(id)?;
             if nodes.iter().all(|n| n.status != "pending") {
                 let status = if nodes.iter().all(|n| n.status == "succeeded") {
+                    if factory.store.issue_work(&detail.event)?.is_some() {
+                        let mut publishes = nodes.iter().filter_map(|node| {
+                            let result = node.result.as_ref()?;
+                            result["data"]
+                                .get("publish")
+                                .is_some_and(|value| !value.is_null())
+                                .then_some((node, result))
+                        });
+                        if let Some((node, result)) = publishes.next() {
+                            ensure!(
+                                publishes.next().is_none(),
+                                "Multi-repository workflow returned multiple publication requests"
+                            );
+                            let source = factory
+                                .store
+                                .public_settings()?
+                                .source_for_event(&detail.event)?
+                                .id
+                                .clone();
+                            let api =
+                                factory.github(&factory.store.token_for_source(&source).await?)?;
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return Ok(None),
+                                result=api.publish_actions(factory, &detail.event, id, &node.id, &workspace, result)=>result.context("Multi-repository publication did not complete")?,
+                            }
+                        }
+                    }
                     "succeeded"
                 } else if nodes.iter().any(|n| n.status == "failed") {
                     "failed"
@@ -677,13 +786,23 @@ async fn execute_node(
     } else {
         prompt
     };
+    let issue_work = factory.store.issue_work(event)?;
+    let prompt = if let Some(scope) = &issue_work {
+        format!("{prompt}\n\n{}", issue_workspace::instructions(scope)?)
+    } else {
+        prompt
+    };
     let standing_instructions = include_str!("agent-instructions.md").replace(
         "{{publication_policy}}",
         release_publication::instructions(event, node),
     );
     let prompt = {
         let _gate = factory.lifecycle_gate.lock().unwrap();
-        let previous = factory.store.previous_successful(&event.repository, run)?;
+        let previous = if issue_work.is_some() {
+            json!([])
+        } else {
+            factory.store.previous_successful(&event.repository, run)?
+        };
         let mut prior = serde_json::to_string_pretty(&previous)?;
         if prior.len() > 65536 {
             let mut end = 65536;
@@ -794,6 +913,9 @@ async fn execute_node(
     }
     if node.agent == "codex" {
         cmd.args(["exec", "--json"]);
+        if issue_work.is_some() {
+            cmd.arg("--skip-git-repo-check");
+        }
         if settings.codex_yolo {
             cmd.arg("--dangerously-bypass-approvals-and-sandbox");
         } else {
@@ -922,6 +1044,7 @@ async fn execute_node(
             session: &session,
             codex_home: codex_home.as_deref(),
             skill_policy: &skill_policy,
+            multi_repo: issue_work.is_some(),
             transport_schema: &transport,
             validator: &validator,
             cancel: &cancel,
@@ -971,6 +1094,16 @@ async fn execute_node(
                     .any(|k| value["data"].get(*k).is_some_and(|v| !v.is_null())),
             "Read-only node cannot publish, merge or comment; update_pr, release and bump_version are also forbidden"
         );
+        if issue_work.is_some()
+            && value["status"] == "succeeded"
+            && value["data"]
+                .get("publish")
+                .is_some_and(|action| !action.is_null())
+        {
+            // The scheduler dispatches publication after all nodes finish successfully.
+            std::fs::write(&result_path, serde_json::to_vec_pretty(&value)?)?;
+            return Ok(value);
+        }
         if value["data"].get("merge").is_some_and(|v| !v.is_null())
             && value["data"].get("update_pr").is_none_or(Value::is_null)
         {

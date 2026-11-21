@@ -7,6 +7,7 @@ pub mod context {
             pub mod entities {
                 pub(crate) mod agent_account;
                 pub mod agent_usage;
+                pub(crate) mod issue_work;
                 pub mod models;
                 pub mod notification_connector;
                 pub(crate) mod pull_request_review;
@@ -59,6 +60,7 @@ pub mod context {
                 pub(crate) mod admission;
                 pub(crate) mod agent_accounts;
                 pub(crate) mod issue_node_comments;
+                pub(crate) mod issue_work;
                 pub(crate) mod pr_origins;
                 pub(crate) mod run_deletions;
                 pub(crate) mod secure_notifications;

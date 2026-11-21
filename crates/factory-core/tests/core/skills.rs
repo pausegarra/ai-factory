@@ -780,7 +780,7 @@ async fn release_issue_closure_rechecks_identity_and_accepts_already_closed() {
         let (root, factory) = fixture(&script, 4);
         configure_release(&root, &factory, "codex", None);
         let mut settings = factory.settings().unwrap();
-        settings.issue_title_prefix = "bot:".into();
+        settings.source_connectors[0].issue_title_prefix = "bot:".into();
         factory.save_settings(settings).unwrap();
         let id = factory
             .enqueue(common::from_source(
@@ -889,7 +889,7 @@ async fn release_issue_closure_retry_reuses_publication_after_close_or_confirmat
         let (root, factory) = fixture(AGENT, 4);
         configure_release(&root, &factory, "codex", None);
         let mut settings = factory.settings().unwrap();
-        settings.issue_title_prefix = "bot:".into();
+        settings.source_connectors[0].issue_title_prefix = "bot:".into();
         factory.save_settings(settings).unwrap();
         if failure == "permission" {
             root.issue_close_status
@@ -962,8 +962,8 @@ async fn release_prefix_closure_uses_current_prefix_and_preserves_publication() 
         configure_release(&root, &factory, "codex", None);
         root.issue.lock().unwrap()["title"] = json!(" \tship:fixture ");
         let mut s = factory.settings().unwrap();
-        s.issue_title_prefix = "task:".into();
-        s.release_issue_title_prefix = " ship: ".into();
+        s.source_connectors[0].issue_title_prefix = "task:".into();
+        s.source_connectors[0].release_issue_title_prefix = " ship: ".into();
         factory.save_settings(s).unwrap();
         let id = factory
             .enqueue(common::from_source(
@@ -983,9 +983,9 @@ async fn release_prefix_closure_uses_current_prefix_and_preserves_publication() 
         if matches!(change, "prefix" | "both" | "new_issue") {
             let mut changed = factory.settings().unwrap();
             if change == "new_issue" {
-                changed.issue_title_prefix = "other-task:".into();
+                changed.source_connectors[0].issue_title_prefix = "other-task:".into();
             } else {
-                changed.release_issue_title_prefix = "deploy:".into();
+                changed.source_connectors[0].release_issue_title_prefix = "deploy:".into();
             }
             factory.save_settings(changed).unwrap();
         }

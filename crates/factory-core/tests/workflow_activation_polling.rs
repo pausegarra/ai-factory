@@ -29,6 +29,7 @@ fn settings() -> Settings {
                 owners: vec!["acme".into()],
                 authors: vec!["alice".into()],
                 reviewers: vec!["alice".into()],
+                ..Default::default()
             },
             SourceConnector {
                 kind: factory_core::SourceKind::GithubIssues,

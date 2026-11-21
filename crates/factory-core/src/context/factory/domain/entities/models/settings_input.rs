@@ -1,5 +1,8 @@
 use super::super::source_connector::SourceConnector;
-use super::{Commands, Flow, Project, Settings};
+use super::{
+    Commands, Flow, Project, Settings, DEFAULT_ISSUE_TITLE_PREFIX,
+    DEFAULT_RELEASE_ISSUE_TITLE_PREFIX,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -8,7 +11,7 @@ use std::collections::BTreeMap;
 #[serde(default)]
 pub(super) struct SettingsInput {
     notification_connectors: Vec<serde_json::Value>,
-    source_connectors: Vec<SourceConnector>,
+    source_connectors: Vec<serde_json::Value>,
     codex_bindings: BTreeMap<String, String>,
     projects: Vec<Project>,
     commands: Commands,
@@ -32,8 +35,8 @@ impl Default for SettingsInput {
             codex_bindings: defaults.codex_bindings,
             projects: defaults.projects,
             commands: defaults.commands,
-            issue_title_prefix: defaults.issue_title_prefix,
-            release_issue_title_prefix: defaults.release_issue_title_prefix,
+            issue_title_prefix: DEFAULT_ISSUE_TITLE_PREFIX.into(),
+            release_issue_title_prefix: DEFAULT_RELEASE_ISSUE_TITLE_PREFIX.into(),
             issue_node_comments_enabled: defaults.issue_node_comments_enabled,
             codex_yolo: defaults.codex_yolo,
             poll_interval_seconds: defaults.poll_interval_seconds,
@@ -49,14 +52,32 @@ impl TryFrom<SettingsInput> for Settings {
     type Error = anyhow::Error;
 
     fn try_from(input: SettingsInput) -> Result<Self, Self::Error> {
-        let source_connectors = input.source_connectors;
+        let issue_prefix = super::normalize_issue_title_prefix(&input.issue_title_prefix)?;
+        let release_prefix =
+            super::normalize_release_issue_title_prefix(&input.release_issue_title_prefix)?;
+        let mut source_connectors =
+            Vec::<SourceConnector>::with_capacity(input.source_connectors.len());
         let mut ids = std::collections::HashSet::new();
-        for source in &source_connectors {
+        for mut source in input.source_connectors {
+            let fields = source
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("Invalid source connector configuration"))?;
+            // Existing sources inherit a global prefix only if they lack a local setting.
+            fields
+                .entry("issue_title_prefix")
+                .or_insert_with(|| serde_json::json!(issue_prefix));
+            fields
+                .entry("release_issue_title_prefix")
+                .or_insert_with(|| serde_json::json!(release_prefix));
+            let mut source: SourceConnector = serde_json::from_value(source)
+                .map_err(|_| anyhow::anyhow!("Invalid source connector configuration"))?;
+            source.normalize_title_prefixes()?;
             source.validate()?;
             anyhow::ensure!(
-                ids.insert(&source.id),
+                ids.insert(source.id.clone()),
                 "Source connector IDs must be unique"
             );
+            source_connectors.push(source);
         }
         let mut flows = input.flows;
         let legacy_ids = ["new_issue", "pr_approved", "pr_review"];
@@ -79,10 +100,6 @@ impl TryFrom<SettingsInput> for Settings {
             codex_bindings: input.codex_bindings,
             projects: input.projects,
             commands: input.commands,
-            issue_title_prefix: super::normalize_issue_title_prefix(&input.issue_title_prefix)?,
-            release_issue_title_prefix: super::normalize_release_issue_title_prefix(
-                &input.release_issue_title_prefix,
-            )?,
             issue_node_comments_enabled: input.issue_node_comments_enabled,
             codex_yolo: input.codex_yolo,
             poll_interval_seconds: input.poll_interval_seconds,

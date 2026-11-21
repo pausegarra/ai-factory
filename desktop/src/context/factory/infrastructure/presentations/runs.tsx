@@ -22,6 +22,14 @@ import { Badge, date, duration, Empty, Notice } from "./ui";
 import { DeleteRunDialog } from "./delete-run-dialog";
 import { RunLogOutput } from "./run-log-output";
 import { noticeText } from "./notice-content";
+
+const repositoryStatus = {
+  selected: "Selected",
+  pending: "Publication pending",
+  published: "Published",
+  no_changes: "No changes",
+};
+
 export function RunTable({
   runs,
   onSelect,
@@ -446,6 +454,32 @@ function RunDetailContent({
       </Notice>}
       {actionError && <Notice id={`${runFeedbackId}-action-error`} close={() => setActionError("")} focusAfterClose={() => runHeading.current}>{actionError}</Notice>}
       {run.error && <Notice>{run.error}</Notice>}
+      {!!detail.issue_work?.repositories.length && (
+        <section className="panel mb-4" aria-label="Affected repositories">
+          <div className="panel-heading">
+            <h2>Affected repositories</h2>
+            <span className="muted">
+              {detail.issue_work.parent_closed ? "Parent issue closed" : "Parent issue pending"}
+            </span>
+          </div>
+          <div className="table-scroll">
+            <table className="run-table">
+              <thead>
+                <tr><th scope="col">Repository</th><th scope="col">Scope</th><th scope="col">Publication</th></tr>
+              </thead>
+              <tbody>
+                {detail.issue_work.repositories.map(({ repository, sub_issues, status, pull_request }) => (
+                  <tr key={repository}>
+                    <td>{repository}</td>
+                    <td>Subissues {sub_issues.map(number => `#${number}`).join(", ")}</td>
+                    <td>{pull_request ? `PR #${pull_request}` : repositoryStatus[status]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
       <div className="detail-grid">
         <section className="panel timeline">
           <div className="panel-heading">

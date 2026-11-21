@@ -42,6 +42,7 @@ pub(super) fn detail_db(db: &Connection, id: &str) -> Result<RunDetail> {
         event: serde_json::from_str(&row.1)?,
         flow: serde_json::from_str(&row.2)?,
         nodes,
+        issue_work: None,
     })
 }
 
@@ -194,6 +195,7 @@ impl Store {
         tx.execute("DELETE FROM nodes WHERE run_id=?1", [id])?;
         tx.execute("DELETE FROM observations WHERE key IN (?1,?2,?3,?4,?5,?6,?9,?10,?11) OR substr(key,1,length(?7))=?7 OR substr(key,1,length(?8))=?8",params![format!("identity:{id}"),format!("pr-workspace:{id}"),format!("pr-update:{id}"),format!("pr-merge:{id}"),format!("release-workspace:{id}"),format!("pr-release:{id}"),format!("review-feedback:{id}:"),format!("review-history:{id}:"),format!("version-workspace:{id}"),format!("pr-version:{id}"),format!("release-issue-close:{id}")])?;
         tx.execute("DELETE FROM runs WHERE id=?1", [id])?;
+        super::issue_work::purge_unowned(&tx, &event_id)?;
         // Keep the event consumed while any attempt still owns it, including
         // attempts whose cleanup is pending. Release it with the last deletion.
         tx.execute(
@@ -215,9 +217,9 @@ impl Store {
                     r.get(0)
                 })?;
             if exists {
-                RunView::Available {
-                    detail: detail_db(&tx, id)?,
-                }
+                let mut detail = detail_db(&tx, id)?;
+                detail.issue_work = super::issue_work::summary(&tx, &detail.event)?;
+                RunView::Available { detail }
             } else {
                 RunView::Missing
             }
@@ -246,7 +248,7 @@ impl Store {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let ids = {
-            let mut q=tx.prepare("SELECT id FROM runs WHERE json_extract(json,'$.repository')=?1 AND id!=?2 AND json_extract(json,'$.status')='succeeded' AND NOT EXISTS(SELECT 1 FROM run_deletions d WHERE d.run_id=runs.id) ORDER BY created_at DESC,id DESC LIMIT 12")?;
+            let mut q=tx.prepare("SELECT id FROM runs WHERE json_extract(json,'$.repository')=?1 AND id!=?2 AND json_extract(json,'$.status')='succeeded' AND NOT EXISTS(SELECT 1 FROM run_deletions d WHERE d.run_id=runs.id) AND NOT EXISTS(SELECT 1 FROM issue_work w WHERE w.event_id=runs.event_id AND w.scope!='null') ORDER BY created_at DESC,id DESC LIMIT 12")?;
             let rows = q.query_map(params![repository, except], |r| r.get::<_, String>(0))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };

@@ -61,16 +61,9 @@ it("provides an isolated disabled Release flow in preview",async()=>{
  expect((await factoryApi.snapshot()).capacity.by_trigger.release).toEqual({active:0,limit:4});
 });
 
-it("defaults the issue prefix in isolated preview settings", async () => {
-  const first = await factoryApi.settings();
-  expect(first.issue_title_prefix).toBe("[AI]");
-  first.issue_title_prefix = "bot:";
-  expect((await factoryApi.settings()).issue_title_prefix).toBe("[AI]");
-});
-
-it("defaults the Release prefix in isolated preview settings", async () => {
-  const first = await factoryApi.settings();
-  expect(first.release_issue_title_prefix).toBe("[RELEASE]");
-  first.release_issue_title_prefix = "ship:";
-  expect((await factoryApi.settings()).release_issue_title_prefix).toBe("[RELEASE]");
+it("provides no source connectors or global prefixes in preview settings", async () => {
+  const settings = await factoryApi.settings();
+  expect(settings.source_connectors).toEqual([]);
+  expect(settings).not.toHaveProperty("issue_title_prefix");
+  expect(settings).not.toHaveProperty("release_issue_title_prefix");
 });
