@@ -10,7 +10,9 @@ mod results;
 use super::workspaces;
 use crate::context::factory::application::services::reviews;
 use crate::context::factory::domain::entities::issue_work::IssueScope;
-use crate::context::factory::domain::entities::pull_request_review::ReviewHeadChanged;
+use crate::context::factory::domain::entities::pull_request_review::{
+    ReviewHeadChanged, ReviewPullRequestClosed,
+};
 use crate::context::factory::infrastructure::rest_clients::github::Github;
 use crate::*;
 use anyhow::{bail, ensure, Context};
@@ -352,10 +354,13 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
         if let Err(error) =
             workspaces::cleanup(factory.cleanup.clone(), repository.clone(), id.into()).await
         {
+            let _gate = factory.lifecycle_gate.lock().unwrap();
             let mut run = factory.store.detail(id)?.run;
-            run.error = Some(format!("Temporary workspace cleanup pending: {error}"));
-            factory.store.save_run(&run)?;
-            factory.emit("run_changed", Some(id), None);
+            if run.status != "cancelled" || run.error.is_none() {
+                run.error = Some(format!("Temporary workspace cleanup pending: {error}"));
+                factory.store.save_run(&run)?;
+                factory.emit("run_changed", Some(id), None);
+            }
             return Err(match result {
                 Err(original) => {
                     original.context(format!("Workspace cleanup also failed: {error}"))
@@ -640,7 +645,12 @@ async fn execute_in_workspace(
                         state.status = v["status"].as_str().unwrap().into();
                         state.result = Some(v)
                     }
-                    Err(error) if error.is::<ReviewHeadChanged>() => return Err(error),
+                    Err(error)
+                        if error.is::<ReviewHeadChanged>()
+                            || error.is::<ReviewPullRequestClosed>() =>
+                    {
+                        return Err(error);
+                    }
                     Err(e) => {
                         state.status = "failed".into();
                         let error = f.redact(&format!("{e:#}"));
@@ -719,11 +729,8 @@ async fn execute_in_workspace(
                         _ = cancel.cancelled() => return Ok(None),
                         result = api.pr(&event.repository, event.number) => result?,
                     };
-                    // A review can be accepted for its pinned commit while a push
-                    // lands, or the PR can merge immediately after publication.
-                    if current["state"] == "open" {
-                        Github::check_review_head(event, &current)?;
-                    }
+                    // The PR can change while GitHub accepts a review of its pinned commit.
+                    Github::check_review_head(event, &current)?;
                 }
                 return Ok(Some(status));
             }

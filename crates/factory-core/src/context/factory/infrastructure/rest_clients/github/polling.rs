@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::factory::domain::entities::pull_request_review::ReviewPullRequestClosed;
 use crate::context::factory::infrastructure::repositories::pr_origins::TrackedPrOrigin;
 use std::collections::{HashMap, HashSet};
 
@@ -344,6 +345,8 @@ impl Github {
     }
 
     async fn poll_reviews(&self, factory: &Factory, profile: &SourceConnector) -> Result<()> {
+        // A run admitted during the search may be newer than the results.
+        let pending = factory.store.pending_pr_reviews(&profile.id)?;
         let reviewer = &profile.account;
         let query = if profile.review_all_open_pull_requests {
             "is:pr is:open".to_string()
@@ -364,20 +367,61 @@ impl Github {
                 .await?,
             );
         }
-        let mut candidates = vec![];
         let mut seen = HashSet::new();
-        let mut defaults = HashMap::<String, String>::new();
+        let mut identities = vec![];
         for row in rows {
+            let repo = repository(&row)?;
+            let n = row["number"].as_u64().context("Invalid PR number")?;
+            if seen.insert((repo.clone(), n)) {
+                identities.push((repo, n));
+            }
+        }
+        if !factory.workflow_enabled_for("pr_review", &profile.id)? {
+            return Ok(());
+        }
+        let settings = factory.store.public_settings()?;
+        let Some(current) = settings.source_by_id(&profile.id) else {
+            return Ok(());
+        };
+        if !current.account.eq_ignore_ascii_case(reviewer)
+            || !current.allows_actor("pr_review")
+            || current.owners != profile.owners
+            || current.review_all_open_pull_requests != profile.review_all_open_pull_requests
+        {
+            return Ok(());
+        }
+        let pending: Vec<_> = pending
+            .into_iter()
+            .filter(|run| {
+                run.actor.eq_ignore_ascii_case(reviewer)
+                    && current.allows_owner(run.repository.split('/').next().unwrap_or(""))
+            })
+            .collect();
+        // Compare the full search results before filtering for admission.
+        for run in &pending {
+            if !seen.contains(&(run.repository.to_lowercase(), run.number)) {
+                factory.cancel_pending_run(
+                    &run.id,
+                    "Pull request no longer appears in GitHub review search".into(),
+                )?;
+            }
+        }
+        let mut candidates = vec![];
+        let mut defaults = HashMap::<String, String>::new();
+        for (repo, n) in identities {
             if !factory.workflow_enabled_for("pr_review", &profile.id)? {
                 return Ok(());
             }
-            let repo = repository(&row)?;
-            let n = row["number"].as_u64().context("Invalid PR number")?;
-            if !seen.insert((repo.clone(), n)) {
-                continue;
-            }
             let pr = self.pr(&repo, n).await?;
-            if pr["state"] != "open" {
+            if let Err(error) = Self::check_review_open(&pr) {
+                if !error.is::<ReviewPullRequestClosed>() {
+                    return Err(error);
+                }
+                for run in &pending {
+                    if run.number == n && run.repository.eq_ignore_ascii_case(&repo) {
+                        factory.cancel_pending_run(&run.id, error.to_string())?;
+                    }
+                }
                 continue;
             }
             if !profile.allows_pull_request_author(pr["user"]["login"].as_str()) {

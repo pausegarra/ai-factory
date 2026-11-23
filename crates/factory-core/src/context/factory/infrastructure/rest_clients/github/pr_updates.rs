@@ -18,13 +18,13 @@ impl Github {
     pub(crate) async fn pr_workspace(&self, event: &TriggerEvent) -> Result<PrWorkspace> {
         let pr = self.pr(&event.repository, event.number).await?;
         let merged = pr["merged"] == true;
-        ensure!(
-            (pr["state"] == "open" && !merged) || (event.trigger_id == "pr_approved" && merged),
-            "PR is not open"
-        );
         if event.trigger_id == "pr_review" {
             Self::check_review_head(event, &pr)?;
         } else {
+            ensure!(
+                (pr["state"] == "open" && !merged) || (event.trigger_id == "pr_approved" && merged),
+                "PR is not open"
+            );
             ensure!(
                 pr["head"]["sha"] == event.head_sha,
                 "PR head changed before execution"

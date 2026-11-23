@@ -286,6 +286,26 @@ impl Store {
         let rows = q.query_map([], |r| r.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
+    pub(crate) fn pending_pr_reviews(&self, source_id: &str) -> Result<Vec<Run>> {
+        let db = self.db.lock().unwrap();
+        let mut query = db.prepare(
+            "SELECT json FROM runs
+             WHERE json_extract(json,'$.trigger_id')='pr_review'
+               AND json_extract(json,'$.status') IN ('queued','running')
+               AND json_extract(json,'$.origin_token_profile_id')=?1
+               AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)",
+        )?;
+        let rows = query.query_map([source_id], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+    pub(crate) fn run(&self, id: &str) -> Result<Option<Run>> {
+        let raw: Option<String> = self.db.lock().unwrap().query_row(
+            "SELECT json FROM runs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions WHERE run_id=runs.id)",
+            [id],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(raw.as_deref().map(serde_json::from_str).transpose()?)
+    }
     pub fn nodes(&self, id: &str) -> Result<Vec<NodeRun>> {
         let db = self.db.lock().unwrap();
         let mut q = db.prepare("SELECT json FROM nodes WHERE run_id=?1 AND NOT EXISTS(SELECT 1 FROM run_deletions d WHERE d.run_id=nodes.run_id) ORDER BY rowid")?;

@@ -492,6 +492,38 @@ async fn rereview_does_not_duplicate_a_head_already_owned_by_an_attempt() {
 }
 
 #[tokio::test]
+async fn polling_cancels_missing_review_runs_without_additional_requests() {
+    for status in ["running", "queued"] {
+        let (_dir, factory, server, state) = fixture(true).await;
+        factory.poll_now().await.unwrap();
+        let id = factory.snapshot().unwrap().runs[0].id.clone();
+        factory.set_run_status(&id, status, None).unwrap();
+
+        {
+            let mut state = state.lock().unwrap();
+            state.rows.clear();
+            state.incomplete = true;
+        }
+        assert!(factory.poll_now().await.is_err());
+        assert_eq!(factory.run_detail(&id).unwrap().run.status, status);
+
+        state.lock().unwrap().incomplete = false;
+        server.calls.lock().unwrap().clear();
+        factory.poll_now().await.unwrap();
+        let detail = factory.run_detail(&id).unwrap();
+        assert_eq!(detail.run.status, "cancelled");
+        assert_eq!(
+            detail.run.error.as_deref(),
+            Some("Pull request no longer appears in GitHub review search")
+        );
+        assert!(detail.nodes.iter().all(|node| node.status == "cancelled"));
+        let calls = server.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].path.starts_with("/search/issues?"));
+    }
+}
+
+#[tokio::test]
 async fn polling_defers_a_changed_head_while_its_review_is_running() {
     let (_dir, factory, _server, state) = fixture(true).await;
     state.lock().unwrap().reviews = vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
@@ -503,6 +535,7 @@ async fn polling_defers_a_changed_head_while_its_review_is_running() {
     set_head(&state, 'c');
     factory.poll_now().await.unwrap();
     assert_eq!(events(&factory).len(), 1);
+    assert_eq!(factory.run_detail(&id).unwrap().run.status, "running");
 
     factory.set_run_status(&id, "failed", None).unwrap();
     factory.poll_now().await.unwrap();

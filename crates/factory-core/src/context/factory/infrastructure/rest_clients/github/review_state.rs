@@ -1,15 +1,20 @@
 use super::merge_cleanup::valid_branch;
 use super::*;
 use crate::context::factory::domain::entities::pull_request_review::{
-    PullRequestReviewState, ReviewHeadChanged,
+    PullRequestReviewState, ReviewHeadChanged, ReviewPullRequestClosed,
 };
 
 impl Github {
+    pub(super) fn check_review_open(pr: &Value) -> Result<()> {
+        if pr["state"] == "closed" || pr["merged"] == true {
+            return Err(ReviewPullRequestClosed.into());
+        }
+        ensure!(pr["state"] == "open", "Invalid PR state");
+        Ok(())
+    }
+
     pub(crate) fn check_review_head(event: &TriggerEvent, pr: &Value) -> Result<()> {
-        ensure!(
-            pr["state"] == "open" && pr["merged"] != true,
-            "PR is not open"
-        );
+        Self::check_review_open(pr)?;
         if pr["head"]["sha"] != event.head_sha {
             return Err(ReviewHeadChanged.into());
         }
@@ -18,10 +23,7 @@ impl Github {
 
     pub(crate) async fn refresh_review_event(&self, event: &TriggerEvent) -> Result<TriggerEvent> {
         let pr = self.pr(&event.repository, event.number).await?;
-        ensure!(
-            pr["state"] == "open" && pr["merged"] != true,
-            "PR is not open"
-        );
+        Self::check_review_open(&pr)?;
         let default = self.repository_default(&event.repository).await?;
         ensure!(
             Self::review_targets_branch(&pr, &default)?,
