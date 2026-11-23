@@ -10,6 +10,8 @@ mod results;
 use super::workspaces;
 use crate::context::factory::application::services::reviews;
 use crate::context::factory::domain::entities::issue_work::IssueScope;
+use crate::context::factory::domain::entities::pull_request_review::ReviewHeadChanged;
+use crate::context::factory::infrastructure::rest_clients::github::Github;
 use crate::*;
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
@@ -328,34 +330,65 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
         return Ok(());
     }
     let workspace = workspaces::path(&factory.root, id)?;
-    factory
-        .store
-        .set_workspace(id, Some(&workspace.to_string_lossy()))?;
-    factory.emit("run_changed", Some(id), None);
-    let mut tasks = JoinSet::new();
-    let result = execute_in_workspace(factory, id, cancel.clone(), &mut tasks).await;
-    if !tasks.is_empty() {
-        cancel.cancel();
-    }
-    while tasks.join_next().await.is_some() {}
     let repository = factory.store.detail(id)?.run.repository;
-    let cleanup = workspaces::cleanup(factory.cleanup.clone(), repository, id.into()).await;
-    if cleanup.is_ok() {
+    let run_memory = factory
+        .root
+        .join("memory")
+        .join(&repository)
+        .join("runs")
+        .join(id);
+    let mut memory = run_memory.clone();
+    let result = loop {
+        factory
+            .store
+            .set_workspace(id, Some(&workspace.to_string_lossy()))?;
+        factory.emit("run_changed", Some(id), None);
+        let round = cancel.child_token();
+        let mut tasks = JoinSet::new();
+        let result = execute_in_workspace(factory, id, &memory, round.clone(), &mut tasks).await;
+        round.cancel();
+        while tasks.join_next().await.is_some() {}
+
+        if let Err(error) =
+            workspaces::cleanup(factory.cleanup.clone(), repository.clone(), id.into()).await
+        {
+            let mut run = factory.store.detail(id)?.run;
+            run.error = Some(format!("Temporary workspace cleanup pending: {error}"));
+            factory.store.save_run(&run)?;
+            factory.emit("run_changed", Some(id), None);
+            return Err(match result {
+                Err(original) => {
+                    original.context(format!("Workspace cleanup also failed: {error}"))
+                }
+                Ok(_) => error,
+            });
+        }
         factory.store.set_workspace(id, None)?;
         factory.emit("run_changed", Some(id), None);
-    } else if let Err(error) = &cleanup {
-        let mut run = factory.store.detail(id)?.run;
-        run.error = Some(format!("Temporary workspace cleanup pending: {error}"));
-        factory.store.save_run(&run)?;
-        factory.emit("run_changed", Some(id), None);
-    }
-    if let Err(error) = cleanup {
-        return Err(match result {
-            Err(original) => original.context(format!("Workspace cleanup also failed: {error}")),
-            Ok(_) => error,
-        });
-    }
-    if let Some(status) = result? {
+
+        match result {
+            Err(error) if error.is::<ReviewHeadChanged>() => {
+                let event = factory.store.detail(id)?.event;
+                let refreshed = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Ok(()),
+                    result = async {
+                        let source = factory.store.public_settings()?.source_for_event(&event)?.id.clone();
+                        let api = factory.github(&factory.store.token_for_source(&source).await?)?;
+                        api.refresh_review_event(&event).await
+                    } => result?,
+                };
+                if cancel.is_cancelled() || !factory.store.restart_pr_review(id, &refreshed)? {
+                    return Ok(());
+                }
+                // Keep prior evidence readable and start the new DAG with empty memory.
+                memory = run_memory.join(format!("review-{}", uuid::Uuid::new_v4()));
+                factory.emit("run_changed", Some(id), None);
+            }
+            outcome => break outcome?,
+        }
+    };
+    if let Some(status) = result {
         let detail = factory.store.detail(id)?;
         let event = &detail.event;
         if status == "succeeded" && release_completion::is_publication(&detail) {
@@ -437,6 +470,7 @@ pub async fn execute(factory: &Arc<Factory>, id: &str, cancel: CancellationToken
 async fn execute_in_workspace(
     factory: &Arc<Factory>,
     id: &str,
+    memory: &Path,
     cancel: CancellationToken,
     tasks: &mut JoinSet<Result<(String, String)>>,
 ) -> Result<Option<&'static str>> {
@@ -491,13 +525,7 @@ async fn execute_in_workspace(
     }
     let session = factory.root.join("sessions").join(id);
     std::fs::create_dir_all(&session)?;
-    let memory = factory
-        .root
-        .join("memory")
-        .join(&detail.event.repository)
-        .join("runs")
-        .join(id);
-    std::fs::create_dir_all(&memory)?;
+    std::fs::create_dir_all(memory)?;
     let mut active = HashSet::new();
     let mut known_reviewers = HashSet::new();
     let mut writer = false;
@@ -587,7 +615,7 @@ async fn execute_in_workspace(
             let node = node.clone();
             let run = id.to_string();
             let ws = workspace.clone();
-            let mem = memory.clone();
+            let mem = memory.to_owned();
             let c = cancel.clone();
             let event = current.event.clone();
             let dependencies = deps
@@ -612,6 +640,7 @@ async fn execute_in_workspace(
                         state.status = v["status"].as_str().unwrap().into();
                         state.result = Some(v)
                     }
+                    Err(error) if error.is::<ReviewHeadChanged>() => return Err(error),
                     Err(e) => {
                         state.status = "failed".into();
                         let error = f.redact(&format!("{e:#}"));
@@ -676,6 +705,26 @@ async fn execute_in_workspace(
                 } else {
                     "failed"
                 };
+                if detail.event.trigger_id == "pr_review" && status != "failed" {
+                    let event = &detail.event;
+                    let source = factory
+                        .store
+                        .public_settings()?
+                        .source_for_event(event)?
+                        .id
+                        .clone();
+                    let api = factory.github(&factory.store.token_for_source(&source).await?)?;
+                    let current = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Ok(None),
+                        result = api.pr(&event.repository, event.number) => result?,
+                    };
+                    // A review can be accepted for its pinned commit while a push
+                    // lands, or the PR can merge immediately after publication.
+                    if current["state"] == "open" {
+                        Github::check_review_head(event, &current)?;
+                    }
+                }
                 return Ok(Some(status));
             }
             if !progressed {

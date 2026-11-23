@@ -418,8 +418,7 @@ impl Store {
         db.commit()?;
         Ok(())
     }
-    /// This is the only transition from terminal nodes back to pending. Archive
-    /// evidence and feedback in the same transaction, without reviving cancelled runs.
+    /// Archive evidence and feedback for a content review's next round.
     pub(crate) fn requeue_review(
         &self,
         run: &str,
@@ -482,6 +481,48 @@ impl Store {
         tx.commit()?;
         Ok(true)
     }
+
+    pub(crate) fn restart_pr_review(&self, id: &str, event: &TriggerEvent) -> Result<bool> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let detail = super::run_deletions::detail_db(&tx, id)?;
+        let mut run = detail.run;
+        if run.status != "running" {
+            return Ok(false);
+        }
+        ensure!(
+            run.trigger_id == "pr_review"
+                && run.trigger_id == event.trigger_id
+                && run.event_id == event.event_id,
+            "Review restart event mismatch"
+        );
+        run.title.clone_from(&event.title);
+        run.current_step = None;
+        tx.execute(
+            "UPDATE runs SET json=?1,event=?2 WHERE id=?3",
+            params![
+                serde_json::to_string(&run)?,
+                serde_json::to_string(event)?,
+                id
+            ],
+        )?;
+        tx.execute(
+            "UPDATE nodes SET json=json_set(json,'$.status','pending','$.started_at',NULL,'$.finished_at',NULL,'$.error',NULL,'$.result',NULL,'$.session_id',NULL) WHERE run_id=?1",
+            [id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO observations(key,json) VALUES(?1,'true')",
+            [super::admission::review_head_event_id(event)],
+        )?;
+        let feedback_prefix = format!("review-feedback:{id}:");
+        tx.execute(
+            "DELETE FROM observations WHERE key=?1 OR substr(key,1,length(?2))=?2",
+            params![format!("pr-workspace:{id}"), feedback_prefix],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn observation(&self, key: &str) -> Result<Option<serde_json::Value>> {
         let v: Option<String> = self
             .db

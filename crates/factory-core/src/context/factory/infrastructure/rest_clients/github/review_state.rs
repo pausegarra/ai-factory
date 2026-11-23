@@ -1,8 +1,47 @@
 use super::merge_cleanup::valid_branch;
 use super::*;
-use crate::context::factory::domain::entities::pull_request_review::PullRequestReviewState;
+use crate::context::factory::domain::entities::pull_request_review::{
+    PullRequestReviewState, ReviewHeadChanged,
+};
 
 impl Github {
+    pub(crate) fn check_review_head(event: &TriggerEvent, pr: &Value) -> Result<()> {
+        ensure!(
+            pr["state"] == "open" && pr["merged"] != true,
+            "PR is not open"
+        );
+        if pr["head"]["sha"] != event.head_sha {
+            return Err(ReviewHeadChanged.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn refresh_review_event(&self, event: &TriggerEvent) -> Result<TriggerEvent> {
+        let pr = self.pr(&event.repository, event.number).await?;
+        ensure!(
+            pr["state"] == "open" && pr["merged"] != true,
+            "PR is not open"
+        );
+        let default = self.repository_default(&event.repository).await?;
+        ensure!(
+            Self::review_targets_branch(&pr, &default)?,
+            "PR review target is not the repository default branch"
+        );
+        let mut payload = event.payload.as_object().cloned().unwrap_or_default();
+        payload.insert("pull_request".into(), pr.clone());
+        let mut refreshed = pr_event(
+            "pr_review",
+            event.event_id.clone(),
+            &event.repository,
+            event.number,
+            &event.actor,
+            &pr,
+            Value::Object(payload),
+        )?;
+        refreshed.origin_token_profile_id = event.origin_token_profile_id.clone();
+        Ok(refreshed)
+    }
+
     pub(super) fn review_targets_branch(pr: &Value, default: &str) -> Result<bool> {
         let target = pr["base"]["ref"].as_str().context("Missing PR base ref")?;
         ensure!(valid_branch(target), "Invalid PR base ref");

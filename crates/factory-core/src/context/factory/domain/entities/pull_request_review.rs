@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug)]
+pub(crate) struct ReviewHeadChanged;
+
+impl std::fmt::Display for ReviewHeadChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PR head changed during review")
+    }
+}
+
+impl std::error::Error for ReviewHeadChanged {}
+
 /// Effective submitted decision of the account performing the review.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "SCREAMING_SNAKE_CASE")]
