@@ -65,6 +65,18 @@ fn default_review_prompts_match_static_and_test_execution_access() {
                 assert!(node.prompt.contains("Do not modify"));
             }
             if flow.id == "pr_review" {
+                for guidance in [
+                    "Write review.body as readable Markdown for GitHub",
+                    "short sections and/or lists",
+                    "one or a few short paragraphs",
+                    "Never put the entire body in a code fence",
+                    "omit empty headings",
+                    "available file/line references and severity",
+                    "decision, changes or findings, verification and relevant limitations",
+                    "include the exact checked base and head SHAs in the visible body",
+                ] {
+                    assert!(node.prompt.contains(guidance), "missing {guidance}");
+                }
                 assert!(node.prompt.contains("APPROVE requires status=succeeded"));
                 assert!(node
                     .prompt
@@ -805,6 +817,20 @@ printf '%s' '{"status":"succeeded","summary":"role complete","artifacts":[],"dat
             assert!(prompt.contains("For read access, put findings in summary/data"));
             assert!(prompt.contains("Analysis-only nodes without an approved field"));
             assert!(prompt.contains("Reserved action keys in node data"));
+            for guidance in [
+                "When returning a review or comment authorized by your assigned task and output contract",
+                "Markdown for GitHub in data.review.body or the data.comment string",
+                "one or a few short paragraphs",
+                "never fence the entire body",
+                "the authorized value inside the existing JSON envelope",
+                "include the exact checked base and head SHAs in the visible body",
+                "This guidance does not grant permission to submit actions",
+                "For a new_issue node whose summary covers multiple topics",
+                "one short paragraph per topic, separated by a blank line",
+                "Keep the existing summary string in the JSON envelope",
+            ] {
+                assert!(prompt.contains(guidance), "{agent}/{role}: missing {guidance}");
+            }
             assert!(prompt.contains("review_details"));
             assert!(!prompt.contains("If review rejects changes return status=blocked."));
             assert!(prompt.contains(

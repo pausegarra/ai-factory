@@ -459,6 +459,278 @@ async fn issue_node_comments_one_retry_does_not_block_another_ready_run() {
     server.shutdown().await;
 }
 
+async fn post_automatic_summary_with_redaction(
+    webhook_url: &str,
+    summary: &str,
+    redaction_checks: &[(&str, &str)],
+) -> String {
+    use factory_core::context::factory::infrastructure::repositories::store::Store;
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = common::open_with_api(dir.path().into(), "http://127.0.0.1:9").unwrap();
+    configure(&f);
+    let mut settings = f.settings().unwrap();
+    settings
+        .notification_connectors
+        .push(NotificationConnector {
+            id: "redaction-fixture".into(),
+            label: "Redaction fixture".into(),
+            enabled: false,
+            events: vec![],
+            provider: ConnectorProvider::GoogleChat(GoogleChatConnectorConfig {
+                webhook_url: Some(webhook_url.into()),
+                ..Default::default()
+            }),
+        });
+    f.save_settings(settings).unwrap();
+    let id = enqueue(&f, 41);
+    f.shutdown().await;
+    drop(f);
+
+    let store = Store::open_with_credentials(dir.path(), common::backend(dir.path())).unwrap();
+    let mut node = store.nodes(&id).unwrap().remove(0);
+    store.load_redaction_secrets().unwrap();
+    assert_eq!(store.redact_cached(summary), summary);
+    for &(input, expected) in redaction_checks {
+        assert_eq!(store.redact_cached(input), expected);
+    }
+    node.status = "succeeded".into();
+    node.result = Some(json!({"summary":summary}));
+    store.save_node(&id, &node).unwrap();
+    drop(store);
+
+    let key: String = db(dir.path())
+        .query_row("SELECT key FROM issue_node_comments", [], |row| row.get(0))
+        .unwrap();
+    let marker = format!("<!-- ai-factory:{key} -->");
+    let path = "/repos/acme/repo/issues/41/comments";
+    let mut server = Script::start(vec![
+        user(),
+        list(),
+        Step::new("POST", path, Reply::Json(201, receipt(&marker))),
+    ])
+    .await;
+    let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
+    f.start_notification_delivery();
+    wait(
+        dir.path(),
+        "SELECT count(*) FROM issue_node_comments WHERE state='delivered'",
+        1,
+    )
+    .await;
+    f.shutdown().await;
+    server.shutdown().await;
+
+    server.assert_done();
+    assert_eq!(server.writes(), vec![("POST".into(), path.into())]);
+    let requests = server.requests();
+    let (_, _, posted) = requests
+        .iter()
+        .find(|(method, request_path, _)| method == "POST" && request_path == path)
+        .unwrap();
+    let body = posted["body"].as_str().unwrap();
+    assert_eq!(body.matches("<!--").count(), 1);
+    assert_eq!(body.matches(marker.as_str()).count(), 1);
+    assert!(body.len() <= 6000);
+    let suffix = format!("\n\n{marker}");
+    let visible = body.strip_suffix(suffix.as_str()).unwrap();
+    let published_summary = visible.splitn(3, "\n\n").nth(2).unwrap();
+    for &(pattern, _) in redaction_checks {
+        assert!(
+            !body.contains(pattern),
+            "synthetic pattern in POST: {pattern}"
+        );
+    }
+    published_summary.to_owned()
+}
+
+#[tokio::test]
+async fn issue_node_comments_redacts_overlapping_patterns_before_preserving_paragraphs() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=abc%20def&token=defghi",
+        "abc\n\nde\u{200b}fghi",
+        &[
+            ("abc def", "[REDACTED]"),
+            ("defghi", "[REDACTED]"),
+            ("abc defghi", "[REDACTED]"),
+        ],
+    )
+    .await;
+    assert_eq!(published_summary, "[REDACTED]");
+}
+
+#[tokio::test]
+async fn issue_node_comments_redacts_pattern_created_by_markdown_fence_escape() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C~~~demo",
+        "Decisión.\n\n~~~demo\n\nVerificación.",
+        &[(r"\~~~demo", "[REDACTED]")],
+    )
+    .await;
+    assert_eq!(
+        published_summary,
+        "Decisión.\n\n[REDACTED]\n\nVerificación."
+    );
+}
+
+#[tokio::test]
+async fn issue_node_comments_preserves_fence_like_diagnostics_in_lists() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=unrelated-fixture",
+        "Verificación incompleta.\n\n- ~~~text\ntimeout\n\n2. + ```text\nfixture failure\n\n- ~~~unavailable\n\nConsulta [Check](https://example.invalid/check).",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        published_summary,
+        "Verificación incompleta.\n\n- \\~~~text timeout\n\n2. + \\```text fixture failure\n\n- \\~~~unavailable\n\nConsulta [Check](https://example.invalid/check)."
+    );
+}
+
+#[tokio::test]
+async fn issue_node_comments_preserves_inline_code_at_start_of_summary_paragraphs() {
+    let summary = "```cargo check``` pasó.\n\n- ````a ` b```` es un ejemplo.";
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=unrelated-fixture",
+        summary,
+        &[],
+    )
+    .await;
+    assert_eq!(published_summary, summary);
+}
+
+#[tokio::test]
+async fn issue_node_comments_redacts_pattern_created_by_list_fence_escape() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C~~~text",
+        "Verificación parcial.\n\n- ~~~text\ntimeout\n\nConsulta [Check](https://example.invalid/check).",
+        &[(r"\~~~text", "[REDACTED]")],
+    )
+    .await;
+    assert_eq!(
+        published_summary,
+        "Verificación parcial.\n\n- [REDACTED] timeout\n\nConsulta [Check](https://example.invalid/check)."
+    );
+}
+
+#[tokio::test]
+async fn issue_node_comments_neutralizes_a_fence_created_by_truncating_inline_code() {
+    let summary = format!("```long fixture {}``` passed.", "é".repeat(1800));
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=unrelated-fixture",
+        &summary,
+        &[],
+    )
+    .await;
+    assert!(published_summary.starts_with(r"\```long fixture "));
+    assert!(published_summary.ends_with('…'));
+    assert!(published_summary.len() <= 3500);
+}
+
+#[tokio::test]
+async fn issue_node_comments_preserves_reference_like_diagnostics() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=unrelated-fixture",
+        "Verificación incompleta.\n\n[ERROR]: timeout\n\n[build\\]]: failed\n\n[Check](https://example.invalid/check)\n\n[INFO] See [check]: details",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        published_summary,
+        "Verificación incompleta.\n\n\\[ERROR]: timeout\n\n\\[build\\]]: failed\n\n[Check](https://example.invalid/check)\n\n[INFO] See [check]: details"
+    );
+}
+
+#[tokio::test]
+async fn issue_node_comments_redacts_pattern_created_by_reference_escape() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C%5BERROR%5D%3A%20timeout",
+        "Verificación incompleta.\n\n[ERROR]: timeout",
+        &[(r"\[ERROR]: timeout", "[REDACTED]")],
+    )
+    .await;
+    assert_eq!(published_summary, "Verificación incompleta.\n\n[REDACTED]");
+}
+
+#[tokio::test]
+async fn issue_node_comments_preserves_reference_like_diagnostics_in_lists() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=unrelated-fixture",
+        "Verificación incompleta.\n\n- [ERROR]: timeout\n\n2) [RETRY]: unavailable\n\n+ * [BUILD]: failed\n\n- [Check](https://example.invalid/check)",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        published_summary,
+        "Verificación incompleta.\n\n- \\[ERROR]: timeout\n\n2) \\[RETRY]: unavailable\n\n+ * \\[BUILD]: failed\n\n- [Check](https://example.invalid/check)"
+    );
+}
+
+#[tokio::test]
+async fn issue_node_comments_preserves_diagnostic_after_partial_redaction_of_reference_escape() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C%5BERROR%5D",
+        "Verificación incompleta.\n\n[ERROR]: timeout\n\nConsulta [Check](https://example.invalid/check).",
+        &[(r"\[ERROR]", "[REDACTED]")],
+    )
+    .await;
+    assert_eq!(
+        published_summary,
+        "Verificación incompleta.\n\n\\[REDACTED]: timeout\n\nConsulta [Check](https://example.invalid/check)."
+    );
+}
+
+#[tokio::test]
+async fn issue_node_comments_rechecks_redaction_after_escaping_replacement() {
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C%5BERROR%5D&token=%5C%5BREDACTED%5D",
+        "[ERROR]: timeout",
+        &[(r"\[ERROR]", "[REDACTED]"), (r"\[REDACTED]", "[REDACTED]")],
+    )
+    .await;
+    assert_eq!(published_summary, "Step completed; no summary available.");
+}
+
+#[tokio::test]
+async fn issue_node_comments_checks_reconstructed_pattern_before_truncation() {
+    let incomplete_pattern = r"\[REDACTED]: ti";
+    // The 3500-byte limit reserves three bytes for the ellipsis.
+    let padding = "x".repeat(3500 - '…'.len_utf8() - "\n\n".len() - incomplete_pattern.len());
+    let summary = format!("{padding}\n\n[ERROR]: timeout");
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C%5BERROR%5D&token=%5C%5BREDACTED%5D%3A%20timeout",
+        &summary,
+        &[
+            (r"\[ERROR]", "[REDACTED]"),
+            (r"\[REDACTED]: timeout", "[REDACTED]"),
+        ],
+    )
+    .await;
+    assert!(
+        !published_summary.contains(incomplete_pattern),
+        "the POST contains the prefix of a reconstructed redaction pattern"
+    );
+    assert_eq!(published_summary, "Step completed; no summary available.");
+}
+
+#[tokio::test]
+async fn issue_node_comments_checks_fence_escape_before_reapplying_limit() {
+    let incomplete_pattern = r"\```";
+    let padding = "x".repeat(3500 - '…'.len_utf8() - "\n\n".len() - "```a".len());
+    let summary = format!("{padding}\n\n```ab``` passed.");
+    let published_summary = post_automatic_summary_with_redaction(
+        "https://example.invalid/messages?key=%5C%60%60%60a",
+        &summary,
+        &[(r"\```a", "[REDACTED]")],
+    )
+    .await;
+    assert!(
+        !published_summary.contains(incomplete_pattern),
+        "the POST contains the prefix of a pattern reconstructed by the final fence escape"
+    );
+    assert_eq!(published_summary, "Step completed; no summary available.");
+}
+
 #[tokio::test]
 async fn issue_node_comments_cold_cache_redacts_all_profiles_before_unicode_limit() {
     use factory_core::context::factory::infrastructure::repositories::store::Store;
@@ -487,9 +759,11 @@ async fn issue_node_comments_cold_cache_redacts_all_profiles_before_unicode_limi
     let mut n = store.nodes(&id).unwrap().remove(0);
     n.status = "failed".into();
     n.error = Some("alice-token bob-token PRIVATE_ERROR".into());
-    n.result = Some(
-        json!({"summary":format!("{} alice-token bob-token {}","x".repeat(3400),"é🦀".repeat(1800)),"data":{"private":"DO_NOT_PUBLISH"}}),
+    let summary = format!(
+        "Decision. Built locally.\r\n \r\nVerification. Unit checks passed.\nWrapped fixture output.\n\u{200b}\nLimitations. Fixture <tag> @alice \u{0000}alice-token bob-token bob-\u{202e}token.\n\n{}",
+        "é🦀".repeat(1800)
     );
+    n.result = Some(json!({"summary":summary,"data":{"private":"DO_NOT_PUBLISH"}}));
     store.save_node(&id, &n).unwrap();
     drop(store);
     let snapshot: String = db(dir.path())
@@ -501,19 +775,64 @@ async fn issue_node_comments_cold_cache_redacts_all_profiles_before_unicode_limi
         .query_row("SELECT key FROM issue_node_comments", [], |r| r.get(0))
         .unwrap();
     let marker = format!("<!-- ai-factory:{key} -->");
+    let posted = Arc::new(tokio::sync::Notify::new());
+    let accepted = posted.clone();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let comments_path = "/repos/acme/repo/issues/41/comments";
     let mut server = Script::start(vec![
         user(),
         list(),
         Step::new(
             "POST",
-            "/repos/acme/repo/issues/41/comments",
-            Reply::Json(201, receipt(&marker)),
-        ),
+            comments_path,
+            Reply::Wait(release.clone(), receipt(&marker)),
+        )
+        .then(move || accepted.notify_one()),
     ])
     .await;
     let f = common::open_with_api(dir.path().into(), &server.base).unwrap();
     f.cancel(&id).unwrap();
     assert_eq!(f.run_detail(&id).unwrap().nodes[0].status, "failed");
+    f.start_notification_delivery();
+    tokio::time::timeout(Duration::from_secs(3), posted.notified())
+        .await
+        .unwrap();
+    f.shutdown().await;
+    assert_eq!(
+        db(dir.path())
+            .query_row(
+                "SELECT count(*) FROM issue_node_comments WHERE state='pending' AND failures=0",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+    drop(f);
+
+    let requests = server.requests();
+    let body = requests
+        .iter()
+        .find(|(method, path, _)| method == "POST" && path == comments_path)
+        .unwrap()
+        .2["body"]
+        .as_str()
+        .unwrap();
+    server.assert_done();
+    assert_eq!(server.writes(), vec![("POST".into(), comments_path.into())]);
+    release.notify_one();
+    server.shutdown().await;
+
+    let mut reopened = Script::start(vec![
+        user(),
+        Step::new(
+            "GET",
+            &format!("{comments_path}?per_page=100&page=1"),
+            Reply::Json(200, json!([receipt(body)])),
+        ),
+    ])
+    .await;
+    let f = common::open_with_api(dir.path().into(), &reopened.base).unwrap();
     f.start_notification_delivery();
     wait(
         dir.path(),
@@ -522,27 +841,55 @@ async fn issue_node_comments_cold_cache_redacts_all_profiles_before_unicode_limi
     )
     .await;
     f.shutdown().await;
-    let requests = server.requests();
-    let body = requests.iter().find(|(m, _, _)| m == "POST").unwrap().2["body"]
-        .as_str()
+    reopened.assert_done();
+    assert!(reopened.writes().is_empty());
+    reopened.shutdown().await;
+
+    let (delivered_key, raw_receipt): (String, String) = db(dir.path())
+        .query_row(
+            "SELECT key, receipt FROM issue_node_comments WHERE state='delivered'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .unwrap();
-    assert!(body.contains("[REDACTED]"));
-    assert!(body.contains("failed"));
-    assert!(body.ends_with(&marker));
+    assert_eq!(delivered_key, key);
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw_receipt).unwrap()["comment_id"],
+        json!(9001)
+    );
+    assert!(body.starts_with("AI Factory · Builder [REDACTED] [REDACTED] ("));
+    assert!(body.contains(" · failed\n\nRun "));
+    assert_eq!(body.matches("<!--").count(), 1);
     assert!(body.len() <= 6000);
-    for text in [
+    for forbidden in [
         "alice-token",
         "bob-token",
         "PRIVATE_ERROR",
         "DO_NOT_PUBLISH",
+        "<tag>",
+        "@alice",
+        "\u{0000}",
+        "\u{202e}",
     ] {
-        assert!(!body.contains(text));
+        assert!(!body.contains(forbidden));
     }
     let log = f.logs(&id, &n.id, 0).unwrap().text;
     assert!(!log.contains("alice-token"));
     assert!(!log.contains("bob-token"));
-    server.assert_done();
-    server.shutdown().await;
+
+    let suffix = format!("\n\n{marker}");
+    let visible = body.strip_suffix(suffix.as_str()).unwrap();
+    let summary = visible.splitn(3, "\n\n").nth(2).unwrap();
+    assert!(summary.starts_with(concat!(
+        "Decision. Built locally.\n\n",
+        "Verification. Unit checks passed. Wrapped fixture output.\n\n",
+        "Limitations. Fixture ‹tag› ＠alice [REDACTED] [REDACTED] [REDACTED].\n\n",
+    )));
+    assert!((3494..=3500).contains(&summary.len()));
+    let (_, tail) = summary.rsplit_once("\n\n").unwrap();
+    let payload = tail.strip_suffix('…').unwrap();
+    assert!(payload.starts_with("é🦀"));
+    assert!(payload.chars().all(|ch| ch == 'é' || ch == '🦀'));
 }
 #[tokio::test]
 async fn issue_node_comments_redaction_failure_fails_closed_without_http() {

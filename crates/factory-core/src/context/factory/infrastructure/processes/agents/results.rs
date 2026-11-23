@@ -140,6 +140,37 @@ pub(super) fn validate(
 mod tests {
     use super::*;
     #[test]
+    fn comment_markdown_survives_both_response_formats() {
+        let schema = super::super::envelope(&json!({"type":"object"}));
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let markdown = "## Evidence\n\n- See [test](https://example.invalid/test) and `check`.\n\n> Fixture output\n\n```text\nstatus: \"blocked\"\\n\n```";
+        for data in [
+            json!({"review":{"event":"COMMENT","body":markdown}}),
+            json!({"comment":markdown}),
+        ] {
+            for codex in [false, true] {
+                let status = if data.get("review").is_some() {
+                    "blocked"
+                } else {
+                    "succeeded"
+                };
+                let summary = "Decision. Review complete.\n\nVerification. See the fixture.";
+                let mut outer = json!({"status":status,"summary":summary,"artifacts":[]});
+                if codex {
+                    outer["data_json"] = json!(serde_json::to_string(&data).unwrap());
+                } else {
+                    outer["data"] = data.clone();
+                }
+                let raw = serde_json::to_string(&outer).unwrap();
+                let parsed = parse_response(Some(&raw), codex, &validator).unwrap();
+                assert_eq!(parsed["data"], data, "codex={codex}");
+                assert_eq!(parsed["summary"], summary, "codex={codex}");
+                assert_eq!(parsed["status"], status, "codex={codex}");
+            }
+        }
+    }
+
+    #[test]
     fn missing_inner_brace_is_repairable_without_a_partial_result() {
         let schema = super::super::envelope(&json!({"type":"object"}));
         let validator = jsonschema::validator_for(&schema).unwrap();
