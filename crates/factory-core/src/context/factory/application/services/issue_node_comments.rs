@@ -2,6 +2,9 @@ use crate::context::factory::application::dto::issue_node_comment::*;
 use crate::TriggerEvent;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
+
+const MAX_DETAILS_BYTES: usize = 3500;
+
 pub(crate) fn terminal_for_issue_comment(status: &str) -> bool {
     matches!(status, "succeeded" | "blocked" | "failed" | "skipped")
 }
@@ -43,6 +46,119 @@ fn clean(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+fn clean_summary(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut summary = String::new();
+    let mut separator = "";
+    for line in normalized.split('\n') {
+        let line = clean(line);
+        if line.is_empty() {
+            if !summary.is_empty() {
+                separator = "\n\n";
+            }
+            continue;
+        }
+        summary.push_str(separator);
+        summary.push_str(&line);
+        separator = " ";
+    }
+    summary
+}
+
+fn starts_like_link_reference(paragraph: &str) -> bool {
+    let Some(label) = paragraph.strip_prefix('[') else {
+        return false;
+    };
+    let mut chars = label.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+            }
+            '[' => return false,
+            ']' => return chars.as_str().starts_with(':'),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn after_list_markers(mut paragraph: &str) -> &str {
+    while let Some((marker, content)) = paragraph.split_once(' ') {
+        let ordered = marker.strip_suffix(['.', ')']).is_some_and(|digits| {
+            (1..=9).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !ordered && !matches!(marker, "-" | "+" | "*") {
+            break;
+        }
+        paragraph = content;
+    }
+    paragraph
+}
+
+fn starts_with_code_fence(content: &str) -> bool {
+    // GFM forbids backticks in the info string of a backtick fence.
+    content.starts_with("~~~")
+        || (content.starts_with("```") && !content.trim_start_matches('`').contains('`'))
+}
+
+fn escape_summary_markdown(text: &str) -> String {
+    text.split("\n\n")
+        .map(|paragraph| {
+            let content = after_list_markers(paragraph);
+            // Fences can consume the footer and reference definitions can hide diagnostics.
+            if starts_with_code_fence(content) || starts_like_link_reference(content) {
+                let prefix = &paragraph[..paragraph.len() - content.len()];
+                format!("{prefix}\\{content}")
+            } else {
+                paragraph.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn summary_text(text: &str, redact: &impl Fn(&str) -> String) -> String {
+    let raw_redacted = redact(text);
+    // Redact the whole flattened field first so matches spanning paragraphs can merge.
+    let flat = clean(&raw_redacted);
+    let redacted_flat = clean(&redact(&flat));
+    let structured = clean_summary(&raw_redacted);
+    let redacted_structured = clean_summary(&redact(&structured));
+    let safe = if redacted_flat == flat || clean(&redacted_structured) == redacted_flat {
+        redacted_structured
+    } else {
+        redacted_flat
+    };
+
+    let escaped = escape_summary_markdown(&safe);
+    let redacted_markdown = redact(&escaped);
+    // A replacement such as [REDACTED] can begin a new reference definition.
+    let escaped_redaction = escape_summary_markdown(&redacted_markdown);
+    // Check the whole candidate before truncation can cut a reconstructed match.
+    if redact(&escaped_redaction) != escaped_redaction {
+        return String::new();
+    }
+    if escaped_redaction.len() <= MAX_DETAILS_BYTES {
+        return escaped_redaction;
+    }
+
+    let truncated = limited(&escaped_redaction, MAX_DETAILS_BYTES);
+    // Truncation can remove the backticks that kept the opening run inline.
+    let escaped_truncated = escape_summary_markdown(&truncated);
+    if escaped_truncated.len() > MAX_DETAILS_BYTES
+        && redact(&escaped_truncated) != escaped_truncated
+    {
+        return String::new();
+    }
+    let bounded = limited(&escaped_truncated, MAX_DETAILS_BYTES);
+    // A truncation ellipsis can create a new match.
+    if redact(&bounded) == bounded {
+        bounded
+    } else {
+        String::new()
+    }
+}
 fn safe_link(url: &str) -> Option<String> {
     let url = reqwest::Url::parse(url).ok()?;
     let host = url.host_str()?.trim_matches(['[', ']']);
@@ -80,7 +196,11 @@ pub(crate) fn request_for(
     let name = field(&s.node_name).chars().take(160).collect::<String>();
     let node = field(&s.node_id).chars().take(96).collect::<String>();
     let name = if name.is_empty() { "Step" } else { &name };
-    let summary = s.summary.as_deref().map(field).filter(|s| !s.is_empty());
+    let summary = s
+        .summary
+        .as_deref()
+        .map(|text| summary_text(text, &redact))
+        .filter(|text| !text.is_empty());
     let error = s.error.as_deref().map(field).filter(|s| !s.is_empty());
     let text = match s.status.as_str() {
         "skipped" => format!(
@@ -100,7 +220,7 @@ pub(crate) fn request_for(
         limited(&field(&s.run_id), 256),
         s.run_attempt,
         s.revision,
-        limited(&text, 3500)
+        limited(&text, MAX_DETAILS_BYTES)
     );
     if let Some(url) = url.and_then(safe_link).filter(|u| u.len() <= 1000) {
         body.push_str(&format!("\n\n[Run]({url})"));
@@ -474,5 +594,66 @@ mod tests {
         let body = request_for(&s, None, |text| text.replace("SUPER_SECRET", "[redacted]")).body;
         assert!(!body.contains("SUPER_SECRET"));
         assert!(body.contains("[redacted]"));
+    }
+
+    #[test]
+    fn issue_node_comment_summary_structure_stays_safe() {
+        let mut s = sample("succeeded");
+        let marker = marker_for("run-a", "builder", 1);
+
+        let brief = request_for(&s, None, str::to_owned).body;
+        assert!(brief.ends_with(&format!("\n\nTerminado\n\n{marker}")));
+
+        s.summary = Some("joined\n\nkey".into());
+        let redacted = request_for(&s, None, |text| text.replace("joined key", "[redacted]"));
+        assert!(redacted
+            .body
+            .ends_with(&format!("\n\n[redacted]\n\n{marker}")));
+        assert!(!redacted.body.contains("joined"));
+
+        s.summary = Some("Decision.\n\nVerification. IN\u{200b}LINE.".into());
+        let body = request_for(&s, None, |text| text.replace("INLINE", "[redacted]")).body;
+        assert!(body.ends_with(&format!(
+            "\n\nDecision.\n\nVerification. [redacted].\n\n{marker}"
+        )));
+
+        for fence in ["```", "~~~"] {
+            s.summary = Some(format!("Verification.\n\n{fence}text\nfixture fragment"));
+            let body = request_for(&s, None, str::to_owned).body;
+            assert!(body.ends_with(&format!(
+                "\n\nVerification.\n\n\\{fence}text fixture fragment\n\n{marker}"
+            )));
+        }
+    }
+
+    #[test]
+    fn issue_node_comment_sanitized_blank_lines_preserve_one_paragraph_break() {
+        let mut s = sample("succeeded");
+        let marker = marker_for("run-a", "builder", 1);
+        let expected = format!(
+            "AI Factory · Builder (builder) · succeeded\n\n\
+             Run run-a · attempt 1 · result 1\n\n\
+             Decisión.\n\nVerificación.\n\n{marker}"
+        );
+
+        for summary in [
+            "Decisión.\n\u{200b}\nVerificación.",
+            "\u{200b}\nDecisión.\n\u{200b}\n \n\u{202e}\nVerificación.\n\u{202e}",
+        ] {
+            s.summary = Some(summary.into());
+            assert_eq!(request_for(&s, None, str::to_owned).body, expected);
+        }
+    }
+
+    #[test]
+    fn issue_node_comment_truncation_does_not_emit_a_reconstructed_pattern() {
+        let mut s = sample("succeeded");
+        s.summary = Some(format!("{}tail{}", "x".repeat(3493), "z".repeat(16)));
+        let marker = marker_for("run-a", "builder", 1);
+        let body = request_for(&s, None, |text| text.replace("tail…", "[redacted]")).body;
+        assert!(!body.contains("tail…"));
+        assert!(body.ends_with(&format!(
+            "\n\nStep completed; no summary available.\n\n{marker}"
+        )));
     }
 }

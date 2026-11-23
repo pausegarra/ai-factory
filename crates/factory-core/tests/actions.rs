@@ -755,9 +755,74 @@ fn assert_compact_receipts(f: &Factory, remote_id: u64) {
 
 #[tokio::test]
 async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_surviving_retry() {
-    for trigger in ["new_issue", "pr_review"] {
-        let e = event(trigger);
+    let pr_event = event("pr_review");
+    let checked_head = &pr_event.head_sha;
+    let checked_base = "b".repeat(40);
+    let detailed_review = format!(
+        r#"## Summary
+
+The retry can reuse stale data.
+
+- Base SHA: `{checked_base}`
+- Head SHA: `{checked_head}`
+
+## Findings
+
+- **High** — `src/retry.rs:42` reuses the previous result. See [test output](https://example.invalid/test).
+- **Medium** — `src/status.rs:18` hides the failing check.
+
+## Verification
+
+> Local fixture reproduced both failures.
+
+```text
+result: stale
+```"#
+    );
+    let short_review = "The retry now checks the current result. The local regression test passed.";
+    let neutral_review =
+        "Required verification could not run in the fixture. The review records the gap.";
+    let detailed_approval = format!(
+        r#"## Decision
+
+Approve. No blocking findings.
+
+- Base SHA: `{checked_base}`
+- Head SHA: `{checked_head}`
+
+## Changes
+
+- The retry reads the current result in `src/retry.rs:42`.
+- Architecture check confirmed that the application layer owns the retry policy.
+
+## Verification
+
+- The focused regression test and workspace checks passed.
+
+## Limitations
+
+- Optional installer packaging was not run."#
+    );
+    let generic_comment = "## Result\n\nThe local build passed.\n\n## Evidence\n\n- Checked `cargo check`.\n- See [run log](https://example.invalid/log).";
+    for (trigger, review_event, markdown) in [
+        ("new_issue", None, generic_comment),
+        (
+            "pr_review",
+            Some("REQUEST_CHANGES"),
+            detailed_review.as_str(),
+        ),
+        ("pr_review", Some("APPROVE"), detailed_approval.as_str()),
+        ("pr_review", Some("APPROVE"), short_review),
+        ("pr_review", Some("COMMENT"), neutral_review),
+    ] {
+        let e = if review_event.is_some() {
+            pr_event.clone()
+        } else {
+            event(trigger)
+        };
         let review = trigger == "pr_review";
+        let mut review_snapshot = pr(&e, "feature", &e.head_sha);
+        review_snapshot["base"]["sha"] = json!(&checked_base);
         let path = if review {
             "/repos/acme/repo/pulls/5/reviews"
         } else {
@@ -772,7 +837,7 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
             steps.push(Step::new(
                 "GET",
                 PR_PATH,
-                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
+                Reply::Json(200, review_snapshot.clone()),
             ));
         }
         steps.push(Step::new(
@@ -792,7 +857,7 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
             steps.push(Step::new(
                 "GET",
                 PR_PATH,
-                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
+                Reply::Json(200, review_snapshot.clone()),
             ));
         }
         steps.push(Step::new(
@@ -807,21 +872,19 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
             Reply::Json(200, json!({"login":"alice"})),
         ));
         if review {
-            steps.push(Step::new(
-                "GET",
-                PR_PATH,
-                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
-            ));
+            steps.push(Step::new("GET", PR_PATH, Reply::Json(200, review_snapshot)));
         }
-        let script = Script::start(steps).await;
+        let mut script = Script::start(steps).await;
         let (dir, f) = factory(&script.base);
         let api = Github::with_base("alice-token", &script.base).unwrap();
         let first = f.enqueue(e.clone()).unwrap().unwrap();
-        let r = result(if review {
-            json!({"review":{"event":"COMMENT","body":"private review body"}})
-        } else {
-            json!({"comment":"private comment body"})
+        let mut r = result(match review_event {
+            Some(kind) => json!({"review":{"event":kind,"body":markdown}}),
+            None => json!({"comment":markdown}),
         });
+        if matches!(review_event, Some("REQUEST_CHANGES" | "COMMENT")) {
+            r["status"] = json!("blocked");
+        }
         api.publish_actions(&f, &e, &first, "report", dir.path(), &r)
             .await
             .unwrap();
@@ -843,6 +906,49 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
         assert_compact_receipts(&f, 71);
         script.assert_done();
         assert_eq!(script.writes(), vec![("POST".into(), path.into())]);
+        let requests = script.requests();
+        let (_, _, posted) = requests
+            .iter()
+            .find(|(method, request_path, _)| method == "POST" && request_path == path)
+            .unwrap();
+        let posted_body = posted["body"].as_str().unwrap();
+        let (visible, marker) = posted_body
+            .rsplit_once("\n\n<!-- ai-factory:action:")
+            .unwrap();
+        assert_eq!(visible, markdown);
+        let digest = marker.strip_suffix(" -->").unwrap();
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let expected = match review_event {
+            Some(kind) => json!({"commit_id":e.head_sha,"event":kind,"body":posted_body}),
+            None => json!({"body":posted_body}),
+        };
+        assert_eq!(posted, &expected);
+        if review_event == Some("APPROVE") && markdown == detailed_approval.as_str() {
+            let base_line = format!("- Base SHA: `{checked_base}`");
+            let head_line = format!("- Head SHA: `{checked_head}`");
+            assert!(visible.lines().any(|line| line == base_line.as_str()));
+            assert!(visible.lines().any(|line| line == head_line.as_str()));
+            assert_eq!(posted["commit_id"].as_str(), Some(checked_head.as_str()));
+            let headings: Vec<_> = visible
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .collect();
+            assert_eq!(
+                headings,
+                vec![
+                    "## Decision",
+                    "## Changes",
+                    "## Verification",
+                    "## Limitations"
+                ]
+            );
+        }
+        if markdown == short_review {
+            assert_eq!(visible.lines().count(), 1);
+        }
+        f.shutdown().await;
+        script.shutdown().await;
     }
 }
 
