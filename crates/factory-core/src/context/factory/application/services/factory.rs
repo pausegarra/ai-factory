@@ -1,5 +1,6 @@
 use crate::context::factory::application::dto::connector_notification::ConnectorNotificationJob;
 use crate::context::factory::application::interfaces::run_cleanup::RunCleanup;
+use crate::context::factory::domain::entities::pull_request_review::ReviewPullRequestClosed;
 use crate::context::factory::domain::entities::run_transition::RunTransition;
 use crate::context::factory::infrastructure::filesystem::run_cleanup::LocalRunCleanup;
 use crate::context::factory::infrastructure::{
@@ -506,10 +507,10 @@ impl Factory {
     }
     pub fn set_run_status(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
         let _gate = self.lifecycle_gate.lock().unwrap();
-        self.set_run_status_inner(id, status, error)
+        let run = self.store.run(id)?.context("Run not found or deleting")?;
+        self.set_run_status_inner(run, status, error)
     }
-    fn set_run_status_inner(&self, id: &str, status: &str, error: Option<String>) -> Result<()> {
-        let mut r = self.store.detail(id)?.run;
+    fn set_run_status_inner(&self, mut r: Run, status: &str, error: Option<String>) -> Result<()> {
         r.status = status.into();
         r.error = error;
         if status == "running" {
@@ -520,6 +521,7 @@ impl Factory {
         }
         let transition = self.store.save_run_transition(&r)?;
         self.publish_run_transition(transition);
+        let id = &r.id;
         if !["queued", "running"].contains(&status) {
             for mut n in self.store.nodes(id)? {
                 if ["pending", "running"].contains(&n.status.as_str()) {
@@ -542,24 +544,29 @@ impl Factory {
     }
     pub fn cancel(&self, id: &str) -> Result<()> {
         let _gate = self.lifecycle_gate.lock().unwrap();
-        let d = self.store.detail(id)?;
+        let run = self.store.run(id)?.context("Run not found or deleting")?;
         ensure!(
-            ["queued", "running"].contains(&d.run.status.as_str()),
+            matches!(run.status.as_str(), "queued" | "running"),
             "Run is already terminal"
         );
-        if let Some(worker) = self.active.lock().unwrap().get(id) {
-            worker.cancel.cancel();
-        }
-        self.set_run_status_inner(id, "cancelled", None)?;
-        for mut n in d.nodes {
-            if ["pending", "running"].contains(&n.status.as_str()) {
-                n.status = "cancelled".into();
-                n.finished_at = Some(now());
-                self.store.save_node(id, &n)?;
+        self.cancel_run_inner(run, None)
+    }
+    pub(crate) fn cancel_pending_run(&self, id: &str, reason: String) -> Result<()> {
+        let _gate = self.lifecycle_gate.lock().unwrap();
+        if let Some(run) = self.store.run(id)? {
+            if matches!(run.status.as_str(), "queued" | "running") {
+                self.cancel_run_inner(run, Some(reason))?;
             }
         }
-        self.emit("run_changed", Some(id), None);
         Ok(())
+    }
+    fn cancel_run_inner(&self, run: Run, reason: Option<String>) -> Result<()> {
+        let id = run.id.clone();
+        let transition = self.set_run_status_inner(run, "cancelled", reason);
+        if let Some(worker) = self.active.lock().unwrap().get(&id) {
+            worker.cancel.cancel();
+        }
+        transition
     }
     pub fn retry(&self, id: &str) -> Result<String> {
         let _gate = self.lifecycle_gate.lock().unwrap();
@@ -711,24 +718,22 @@ impl Factory {
                                     );
                                 }
                             }
-                            if worker
-                                .store
-                                .detail(&r.id)
-                                .is_ok_and(|d| d.run.status == "running")
-                            {
-                                let status = if worker.stop.is_cancelled() {
-                                    "interrupted"
-                                } else {
-                                    "cancelled"
-                                };
-                                let _ = worker.set_run_status(
-                                    &r.id,
-                                    status,
-                                    Some("Execution stopped before completion".into()),
-                                );
-                            }
                             {
                                 let _gate = worker.lifecycle_gate.lock().unwrap();
+                                if let Ok(Some(run)) = worker.store.run(&r.id) {
+                                    if run.status == "running" {
+                                        let status = if worker.stop.is_cancelled() {
+                                            "interrupted"
+                                        } else {
+                                            "cancelled"
+                                        };
+                                        let _ = worker.set_run_status_inner(
+                                            run,
+                                            status,
+                                            Some("Execution stopped before completion".into()),
+                                        );
+                                    }
+                                }
                                 let removed = worker.active.lock().unwrap().remove(&r.id).is_some();
                                 if removed {
                                     worker.emit("capacity_changed", Some(&r.id), None);
@@ -794,7 +799,13 @@ impl Factory {
         id: &str,
         cancel: CancellationToken,
     ) -> Result<()> {
-        agents::execute(self, id, cancel).await
+        match agents::execute(self, id, cancel).await {
+            Err(error) if error.is::<ReviewPullRequestClosed>() => {
+                self.cancel_pending_run(id, self.redact(&format!("{error:#}")))?;
+                Ok(())
+            }
+            result => result,
+        }
     }
 }
 

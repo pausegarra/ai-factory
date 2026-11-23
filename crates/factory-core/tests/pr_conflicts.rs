@@ -357,6 +357,12 @@ printf '%s' '{{"status":"succeeded","summary":"local repair done","artifacts":[]
 
     async fn run(&self) -> RunDetail {
         let id = self.factory.enqueue(self.event.clone()).unwrap().unwrap();
+        if self.event.trigger_id == "pr_review" {
+            // These cases exercise the queued worker against a fixture with no discovery results.
+            let mut settings = self.factory.settings().unwrap();
+            settings.flows[2].enabled = false;
+            self.factory.save_settings(settings).unwrap();
+        }
         self.factory.start();
         let detail = self.wait(&id).await;
         self.factory.shutdown().await;

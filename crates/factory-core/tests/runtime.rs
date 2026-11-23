@@ -29,6 +29,17 @@ async fn fixture() -> (
     String,
     tokio::task::JoinHandle<()>,
 ) {
+    fixture_with_open_reviews(&[]).await
+}
+
+async fn fixture_with_open_reviews(
+    open_reviews: &'static [u64],
+) -> (
+    tempfile::TempDir,
+    Arc<Factory>,
+    String,
+    tokio::task::JoinHandle<()>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
     std::fs::create_dir(&source).unwrap();
@@ -75,13 +86,24 @@ async fn fixture() -> (
                 let body = if path == "/user" {
                     json!({"login":"alice"})
                 } else if path.starts_with("/search/issues?") {
-                    json!({"total_count":0,"incomplete_results":false,"items":[]})
+                    let rows: Vec<_> = if path.contains("reviewed-by") {
+                        open_reviews.iter().map(|number| json!({
+                            "number":number,
+                            "repository_url":"https://api.github.com/repos/acme/repo",
+                            "pull_request":{}
+                        })).collect()
+                    } else {
+                        vec![]
+                    };
+                    json!({"total_count":rows.len(),"incomplete_results":false,"items":rows})
                 } else if path == "/repos/acme/repo" {
                     json!({"full_name":"acme/repo","default_branch":"main"})
                 } else if path == "/repos/acme/repo/git/ref/heads/main" {
                     json!({"ref":"refs/heads/main","object":{"type":"commit","sha":sha}})
                 } else if path.contains("/sub_issues?") {
                     json!([])
+                } else if path.contains("/reviews?") {
+                    json!([{"state":"CHANGES_REQUESTED","commit_id":sha,"user":{"login":"alice"}}])
                 } else if path.starts_with("/repos/acme/repo/pulls/") {
                     let number = path.rsplit('/').next().unwrap().parse::<u64>().unwrap();
                     json!({"number":number,"state":"open","merged":false,"html_url":format!("https://github.com/acme/repo/pull/{number}"),"base":{"ref":"main","repo":{"full_name":"acme/repo"}},"head":{"ref":"feature","sha":sha,"repo":{"full_name":"acme/repo"}}})
@@ -316,7 +338,7 @@ printf '%s' '{"status":"succeeded","summary":"continued","artifacts":[],"data":{
 
 #[tokio::test]
 async fn four_real_processes_from_three_triggers_share_default_capacity() {
-    let (_dir, factory, sha, server) = fixture().await;
+    let (_dir, factory, sha, server) = fixture_with_open_reviews(&[4]).await;
     let mut ids = Vec::new();
     for (number, trigger) in [
         (1, "new_issue"),
@@ -411,7 +433,7 @@ async fn graceful_shutdown_stops_descendants_and_leaves_no_running_history() {
 
 #[tokio::test]
 async fn approvals_wait_without_blocking_other_triggers_and_resume_in_stable_order() {
-    let (dir, factory, sha, server) = fixture().await;
+    let (dir, factory, sha, server) = fixture_with_open_reviews(&[5]).await;
     let mut limits = factory.settings().unwrap();
     limits
         .trigger_max_concurrent
@@ -998,7 +1020,7 @@ async fn configured_approval_capacity_two_runs_two_agents_and_queues_the_third()
 
 #[tokio::test]
 async fn trigger_capacity_saturation_does_not_block_other_categories() {
-    let (dir, factory, sha, server) = fixture().await;
+    let (dir, factory, sha, server) = fixture_with_open_reviews(&[114]).await;
     install_signalled_agent(dir.path());
     let mut s = factory.settings().unwrap();
     s.max_concurrent = 8;
@@ -1143,7 +1165,7 @@ async fn global_capacity_release_starts_another_trigger_without_new_event() {
 
 #[tokio::test]
 async fn retry_shares_its_trigger_capacity_at_runtime() {
-    let (dir, factory, sha, server) = fixture().await;
+    let (dir, factory, sha, server) = fixture_with_open_reviews(&[141, 142]).await;
     install_signalled_agent(dir.path());
     let mut s = factory.settings().unwrap();
     s.max_concurrent = 2;

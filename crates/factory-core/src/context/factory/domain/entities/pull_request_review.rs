@@ -11,6 +11,17 @@ impl std::fmt::Display for ReviewHeadChanged {
 
 impl std::error::Error for ReviewHeadChanged {}
 
+#[derive(Debug)]
+pub(crate) struct ReviewPullRequestClosed;
+
+impl std::fmt::Display for ReviewPullRequestClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pull request closed during review")
+    }
+}
+
+impl std::error::Error for ReviewPullRequestClosed {}
+
 /// Effective submitted decision of the account performing the review.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "SCREAMING_SNAKE_CASE")]

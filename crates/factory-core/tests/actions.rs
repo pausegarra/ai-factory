@@ -512,21 +512,44 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
     );
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReviewChange {
+    PushWhileQueued,
+    PushDuringHistoryRead,
+    PushDuringPublication,
+    CloseDuringHistoryRead,
+    CloseAfterPublication,
+    MissingDuringAgent,
+}
+
 #[tokio::test]
 async fn review_head_changes_restart_the_same_run_from_its_first_node() {
+    review_run_lifecycle(&[
+        ReviewChange::PushDuringHistoryRead,
+        ReviewChange::PushWhileQueued,
+        ReviewChange::PushDuringPublication,
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn review_worker_cancels_when_pr_closes_during_publication() {
+    review_run_lifecycle(&[
+        ReviewChange::CloseDuringHistoryRead,
+        ReviewChange::CloseAfterPublication,
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn review_polling_stops_the_active_agent_when_pr_disappears() {
+    review_run_lifecycle(&[ReviewChange::MissingDuringAgent]).await;
+}
+
+async fn review_run_lifecycle(changes: &[ReviewChange]) {
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Push {
-        WhileQueued,
-        DuringHistoryRead,
-        DuringPublication,
-    }
-    for push in [
-        Push::DuringHistoryRead,
-        Push::WhileQueued,
-        Push::DuringPublication,
-    ] {
+    for &change in changes {
         let local = tempfile::tempdir().unwrap();
         let source = local.path().join("source");
         std::fs::create_dir(&source).unwrap();
@@ -546,7 +569,7 @@ async fn review_head_changes_restart_the_same_run_from_its_first_node() {
             &[
                 "update-ref",
                 head_ref,
-                if push == Push::WhileQueued {
+                if change == ReviewChange::PushWhileQueued {
                     &new_head
                 } else {
                     &old_head
@@ -562,6 +585,7 @@ async fn review_head_changes_restart_the_same_run_from_its_first_node() {
         let next_head = new_head.clone();
         let posted = Arc::new(Mutex::new(Vec::new()));
         let writes = posted.clone();
+        let closed = AtomicBool::new(false);
         let base = server(move |method, path, body| match (method, path) {
             ("GET", "/user") => (200, json!({"login":"alice"})),
             ("GET", "/repos/acme/repo") => (
@@ -570,19 +594,31 @@ async fn review_head_changes_restart_the_same_run_from_its_first_node() {
             ),
             ("GET", PR_PATH) => {
                 let head = git(&repo, &["rev-parse", head_ref]);
-                (200, pr(&served, "feature", &head))
+                let mut pr = pr(&served, "feature", &head);
+                if closed.load(Ordering::SeqCst) {
+                    pr["state"] = json!("closed");
+                }
+                (200, pr)
             }
             ("GET", "/repos/acme/repo/git/ref/heads/main") => (200, reference("main", &base_sha)),
             ("GET", "/repos/acme/repo/pulls/5/reviews?per_page=100&page=1") => {
-                if push == Push::DuringHistoryRead {
+                if change == ReviewChange::PushDuringHistoryRead {
                     git(&repo, &["update-ref", head_ref, &next_head]);
+                }
+                if change == ReviewChange::CloseDuringHistoryRead {
+                    closed.store(true, Ordering::SeqCst);
                 }
                 (200, json!([]))
             }
             ("POST", "/repos/acme/repo/pulls/5/reviews") => {
                 writes.lock().unwrap().push(body["commit_id"].clone());
-                if push == Push::DuringPublication && body["commit_id"] == initial_head {
+                if change == ReviewChange::PushDuringPublication
+                    && body["commit_id"] == initial_head
+                {
                     git(&repo, &["update-ref", head_ref, &next_head]);
+                }
+                if change == ReviewChange::CloseAfterPublication {
+                    closed.store(true, Ordering::SeqCst);
                 }
                 (201, json!({"id":1,"commit_id":body["commit_id"]}))
             }
@@ -606,6 +642,7 @@ set -eu
 prompt=$(cat)
 head=$(git rev-parse HEAD)
 printf '%s:%s\n' "$AI_FACTORY_NODE_ID" "$head" >> '{}'
+{}
 data='{{}}'
 if [ "$AI_FACTORY_NODE_ID" = first ]; then
   [ ! -e stale ] && [ ! -e "$AI_FACTORY_MEMORY_DIR/stale" ]
@@ -615,7 +652,7 @@ else
   data='{{"review":{{"event":"APPROVE","body":"Review completed"}}}}'
 fi
 printf '{{"status":"succeeded","summary":"%s:%s","artifacts":[],"data":%s}}' "$AI_FACTORY_NODE_ID" "$head" "$data" > "$AI_FACTORY_RESULT_PATH"
-"#, order.display())).unwrap();
+"#, order.display(), if change == ReviewChange::MissingDuringAgent { "exec sleep 60" } else { "" })).unwrap();
         for executable in [&git_wrapper, &agent] {
             std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -638,7 +675,29 @@ printf '{{"status":"succeeded","summary":"%s:%s","artifacts":[],"data":%s}}' "$A
         flow.nodes = vec![first, publish];
         f.save_settings(settings).unwrap();
         let id = f.enqueue(event.clone()).unwrap().unwrap();
+        let set_polling = |enabled| {
+            let mut settings = f.settings().unwrap();
+            settings
+                .flows
+                .iter_mut()
+                .find(|flow| flow.id == "pr_review")
+                .unwrap()
+                .enabled = enabled;
+            f.save_settings(settings).unwrap();
+        };
+        set_polling(false);
         f.start();
+        if change == ReviewChange::MissingDuringAgent {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !order.exists() || f.snapshot().unwrap().service.last_poll_at.is_none() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            set_polling(true);
+            f.poll_now().await.unwrap();
+        }
         let detail = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let detail = f.run_detail(&id).unwrap();
@@ -650,7 +709,40 @@ printf '{{"status":"succeeded","summary":"%s:%s","artifacts":[],"data":%s}}' "$A
         })
         .await
         .unwrap();
+        if change == ReviewChange::MissingDuringAgent && detail.run.status == "cancelled" {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while f.run_detail(&id).unwrap().run.workspace.is_some() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("polling must stop the agent and allow workspace cleanup");
+        }
         f.shutdown().await;
+
+        let cancellation_reason = match change {
+            ReviewChange::CloseDuringHistoryRead | ReviewChange::CloseAfterPublication => {
+                Some("Pull request closed during review")
+            }
+            ReviewChange::MissingDuringAgent => {
+                Some("Pull request no longer appears in GitHub review search")
+            }
+            _ => None,
+        };
+        if let Some(reason) = cancellation_reason {
+            assert_eq!(detail.run.status, "cancelled", "{:?}", detail.run.error);
+            assert_eq!(detail.run.error.as_deref(), Some(reason));
+            if change == ReviewChange::CloseAfterPublication {
+                assert_eq!(*posted.lock().unwrap(), vec![json!(old_head)]);
+            } else {
+                assert!(detail.nodes.iter().any(|node| node.status == "cancelled"));
+                assert!(posted.lock().unwrap().is_empty());
+            }
+            let cleaned = f.run_detail(&id).unwrap();
+            assert!(cleaned.run.workspace.is_none());
+            assert_eq!(cleaned.run.error.as_deref(), Some(reason));
+            continue;
+        }
 
         assert_eq!(detail.run.status, "succeeded", "{:?}", detail.run.error);
         assert_eq!(detail.run.attempt, 1);
@@ -661,13 +753,13 @@ printf '{{"status":"succeeded","summary":"%s:%s","artifacts":[],"data":%s}}' "$A
             new_head
         );
         assert_eq!(f.snapshot().unwrap().runs.len(), 1);
-        let expected_posts = if push == Push::DuringPublication {
+        let expected_posts = if change == ReviewChange::PushDuringPublication {
             vec![json!(old_head), json!(new_head)]
         } else {
             vec![json!(new_head)]
         };
         assert_eq!(*posted.lock().unwrap(), expected_posts);
-        let before = if push == Push::WhileQueued {
+        let before = if change == ReviewChange::PushWhileQueued {
             String::new()
         } else {
             format!("first:{old_head}\npublish:{old_head}\n")
