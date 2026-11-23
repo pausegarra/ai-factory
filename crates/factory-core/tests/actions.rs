@@ -513,6 +513,173 @@ if path.contains("/reviews?"){return(200,json!(*saved.lock().unwrap()))}(200,pr(
 }
 
 #[tokio::test]
+async fn review_head_changes_restart_the_same_run_from_its_first_node() {
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Push {
+        WhileQueued,
+        DuringHistoryRead,
+        DuringPublication,
+    }
+    for push in [
+        Push::DuringHistoryRead,
+        Push::WhileQueued,
+        Push::DuringPublication,
+    ] {
+        let local = tempfile::tempdir().unwrap();
+        let source = local.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["config", "user.name", "Alice"]);
+        git(&source, &["config", "user.email", "alice@example.com"]);
+        git(&source, &["commit", "--allow-empty", "-m", "base"]);
+        let base_sha = git(&source, &["rev-parse", "HEAD"]);
+        git(&source, &["checkout", "-b", "feature"]);
+        git(&source, &["commit", "--allow-empty", "-m", "old head"]);
+        let old_head = git(&source, &["rev-parse", "HEAD"]);
+        git(&source, &["commit", "--allow-empty", "-m", "new head"]);
+        let new_head = git(&source, &["rev-parse", "HEAD"]);
+        let head_ref = "refs/pull/5/head";
+        git(
+            &source,
+            &[
+                "update-ref",
+                head_ref,
+                if push == Push::WhileQueued {
+                    &new_head
+                } else {
+                    &old_head
+                },
+            ],
+        );
+
+        let mut event = event("pr_review");
+        event.head_sha = old_head.clone();
+        let served = event.clone();
+        let repo = source.clone();
+        let initial_head = old_head.clone();
+        let next_head = new_head.clone();
+        let posted = Arc::new(Mutex::new(Vec::new()));
+        let writes = posted.clone();
+        let base = server(move |method, path, body| match (method, path) {
+            ("GET", "/user") => (200, json!({"login":"alice"})),
+            ("GET", "/repos/acme/repo") => (
+                200,
+                json!({"full_name":"acme/repo","default_branch":"main"}),
+            ),
+            ("GET", PR_PATH) => {
+                let head = git(&repo, &["rev-parse", head_ref]);
+                (200, pr(&served, "feature", &head))
+            }
+            ("GET", "/repos/acme/repo/git/ref/heads/main") => (200, reference("main", &base_sha)),
+            ("GET", "/repos/acme/repo/pulls/5/reviews?per_page=100&page=1") => {
+                if push == Push::DuringHistoryRead {
+                    git(&repo, &["update-ref", head_ref, &next_head]);
+                }
+                (200, json!([]))
+            }
+            ("POST", "/repos/acme/repo/pulls/5/reviews") => {
+                writes.lock().unwrap().push(body["commit_id"].clone());
+                if push == Push::DuringPublication && body["commit_id"] == initial_head {
+                    git(&repo, &["update-ref", head_ref, &next_head]);
+                }
+                (201, json!({"id":1,"commit_id":body["commit_id"]}))
+            }
+            ("GET", path) if path.starts_with("/search/") => (
+                200,
+                json!({"incomplete_results":false,"total_count":0,"items":[]}),
+            ),
+            _ => (404, json!({"unexpected":path})),
+        })
+        .await;
+        let (dir, f) = factory(&base);
+        let git_wrapper = dir.path().join("git-wrapper");
+        let agent = dir.path().join("agent");
+        let order = dir.path().join("order");
+        std::fs::write(&git_wrapper, format!(
+            "#!/bin/sh\ncase \"$1\" in\nclone) exec git clone --no-hardlinks -- '{}' \"$5\";;\nfetch) exec git fetch --no-tags '{}' \"$4\";;\nesac\nexec git \"$@\"\n",
+            source.display(), source.display(),
+        )).unwrap();
+        std::fs::write(&agent, format!(r#"#!/bin/sh
+set -eu
+prompt=$(cat)
+head=$(git rev-parse HEAD)
+printf '%s:%s\n' "$AI_FACTORY_NODE_ID" "$head" >> '{}'
+data='{{}}'
+if [ "$AI_FACTORY_NODE_ID" = first ]; then
+  [ ! -e stale ] && [ ! -e "$AI_FACTORY_MEMORY_DIR/stale" ]
+  touch stale "$AI_FACTORY_MEMORY_DIR/stale"
+else
+  printf '%s' "$prompt" | grep -q "first:$head"
+  data='{{"review":{{"event":"APPROVE","body":"Review completed"}}}}'
+fi
+printf '{{"status":"succeeded","summary":"%s:%s","artifacts":[],"data":%s}}' "$AI_FACTORY_NODE_ID" "$head" "$data" > "$AI_FACTORY_RESULT_PATH"
+"#, order.display())).unwrap();
+        for executable in [&git_wrapper, &agent] {
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut settings = f.settings().unwrap();
+        settings.commands.git = git_wrapper.to_string_lossy().into();
+        settings.commands.opencode = agent.to_string_lossy().into();
+        let flow = settings
+            .flows
+            .iter_mut()
+            .find(|flow| flow.id == "pr_review")
+            .unwrap();
+        let mut first = flow.nodes[0].clone();
+        first.id = "first".into();
+        first.agent = "opencode".into();
+        first.access = "write".into();
+        first.result_schema = json!({"type":"object"});
+        let mut publish = first.clone();
+        publish.id = "publish".into();
+        publish.depends_on = vec![first.id.clone()];
+        flow.nodes = vec![first, publish];
+        f.save_settings(settings).unwrap();
+        let id = f.enqueue(event.clone()).unwrap().unwrap();
+        f.start();
+        let detail = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let detail = f.run_detail(&id).unwrap();
+                if !matches!(detail.run.status.as_str(), "queued" | "running") {
+                    break detail;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        f.shutdown().await;
+
+        assert_eq!(detail.run.status, "succeeded", "{:?}", detail.run.error);
+        assert_eq!(detail.run.attempt, 1);
+        assert_eq!(detail.event.event_id, event.event_id);
+        assert_eq!(detail.event.head_sha, new_head);
+        assert_eq!(
+            detail.event.payload["pull_request"]["head"]["sha"],
+            new_head
+        );
+        assert_eq!(f.snapshot().unwrap().runs.len(), 1);
+        let expected_posts = if push == Push::DuringPublication {
+            vec![json!(old_head), json!(new_head)]
+        } else {
+            vec![json!(new_head)]
+        };
+        assert_eq!(*posted.lock().unwrap(), expected_posts);
+        let before = if push == Push::WhileQueued {
+            String::new()
+        } else {
+            format!("first:{old_head}\npublish:{old_head}\n")
+        };
+        assert_eq!(
+            std::fs::read_to_string(order).unwrap(),
+            format!("{before}first:{new_head}\npublish:{new_head}\n")
+        );
+    }
+}
+
+#[tokio::test]
 async fn review_retargeted_away_from_principal_is_not_published() {
     for during_history_read in [false, true] {
         let writes = Arc::new(AtomicUsize::new(0));
@@ -616,16 +783,16 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
         if review {
             steps.push(Step::new(
                 "GET",
-                PR_PATH,
-                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
-            ));
-            steps.push(Step::new(
-                "GET",
                 "/repos/acme/repo",
                 Reply::Json(
                     200,
                     json!({"full_name":"acme/repo","default_branch":"main"}),
                 ),
+            ));
+            steps.push(Step::new(
+                "GET",
+                PR_PATH,
+                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
             ));
         }
         steps.push(Step::new(
@@ -633,12 +800,19 @@ async fn deleting_attempt_preserves_completed_comment_and_review_receipts_for_su
             path,
             Reply::Json(201, json!({"id":71,"body":"private response body","user":{"login":"alice"},"extra":"not retained"})),
         ));
-        // Receipt short-circuits all reconciliation and POSTs on surviving attempt.
+        // Receipt short-circuits history reconciliation and POST on the retry.
         steps.push(Step::new(
             "GET",
             "/user",
             Reply::Json(200, json!({"login":"alice"})),
         ));
+        if review {
+            steps.push(Step::new(
+                "GET",
+                PR_PATH,
+                Reply::Json(200, pr(&e, "feature", &e.head_sha)),
+            ));
+        }
         let script = Script::start(steps).await;
         let (dir, f) = factory(&script.base);
         let api = Github::with_base("alice-token", &script.base).unwrap();

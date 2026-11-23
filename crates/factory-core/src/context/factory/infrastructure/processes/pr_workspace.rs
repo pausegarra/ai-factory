@@ -1,4 +1,5 @@
 use super::agents::git_output;
+use crate::context::factory::infrastructure::rest_clients::github::Github;
 use crate::{Factory, Result, TriggerEvent};
 use anyhow::ensure;
 use std::path::Path;
@@ -43,6 +44,10 @@ pub(crate) async fn prepare(
             None,
         )
         .await?;
+        if sha != *expected && event.trigger_id == "pr_review" {
+            let current = api.pr(&event.repository, event.number).await?;
+            Github::check_review_head(event, &current)?;
+        }
         ensure!(
             sha == *expected,
             "PR refs changed during workspace preparation"

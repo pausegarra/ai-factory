@@ -492,6 +492,24 @@ async fn rereview_does_not_duplicate_a_head_already_owned_by_an_attempt() {
 }
 
 #[tokio::test]
+async fn polling_defers_a_changed_head_while_its_review_is_running() {
+    let (_dir, factory, _server, state) = fixture(true).await;
+    state.lock().unwrap().reviews = vec![submitted_review("alice", "CHANGES_REQUESTED", 'a')];
+    set_head(&state, 'b');
+    factory.poll_now().await.unwrap();
+    let id = factory.snapshot().unwrap().runs[0].id.clone();
+    factory.set_run_status(&id, "running", None).unwrap();
+
+    set_head(&state, 'c');
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 1);
+
+    factory.set_run_status(&id, "failed", None).unwrap();
+    factory.poll_now().await.unwrap();
+    assert_eq!(events(&factory).len(), 2);
+}
+
+#[tokio::test]
 async fn deleting_an_attempt_does_not_automatically_replay_its_unchanged_head() {
     for legacy in [false, true] {
         let (_dir, factory, _server, state) = fixture(true).await;

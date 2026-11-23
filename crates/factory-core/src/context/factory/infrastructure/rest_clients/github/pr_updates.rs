@@ -22,10 +22,14 @@ impl Github {
             (pr["state"] == "open" && !merged) || (event.trigger_id == "pr_approved" && merged),
             "PR is not open"
         );
-        ensure!(
-            pr["head"]["sha"] == event.head_sha,
-            "PR head changed before execution"
-        );
+        if event.trigger_id == "pr_review" {
+            Self::check_review_head(event, &pr)?;
+        } else {
+            ensure!(
+                pr["head"]["sha"] == event.head_sha,
+                "PR head changed before execution"
+            );
+        }
         let base_ref = pr["base"]["ref"].as_str().context("Missing PR base ref")?;
         let head_ref = pr["head"]["ref"].as_str().context("Missing PR head ref")?;
         ensure!(

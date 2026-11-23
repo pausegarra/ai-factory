@@ -10,6 +10,17 @@ struct ReviewObservation {
     requested: bool,
     generation: u64,
 }
+
+pub(super) fn review_head_event_id(event: &TriggerEvent) -> String {
+    format!(
+        "review-head:{}#{}:{}:{}",
+        event.repository.to_ascii_lowercase(),
+        event.number,
+        event.actor.to_ascii_lowercase(),
+        event.head_sha.to_ascii_lowercase()
+    )
+}
+
 fn review_generation(
     global: Option<&ReviewObservation>,
     local: Option<&ReviewObservation>,
@@ -97,11 +108,19 @@ impl Store {
                 if !present.insert(identity.clone()) { continue; }
                 let (generation, advance) = review_generation(global.get(&identity), local.get(&identity))?;
                 let updated_review = feedback.as_ref().is_some_and(|f| f.needs_updated_review(&candidate.head_sha));
+                // An executing review can pick up this revision itself. Leave
+                // it eligible for polling if that review stops before doing so.
+                if updated_review && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runs WHERE json_extract(json,'$.trigger_id')='pr_review' AND lower(json_extract(json,'$.repository'))=?1 AND json_extract(json,'$.number')=?2 AND lower(json_extract(json,'$.actor'))=?3 AND json_extract(json,'$.status')='running' AND lower(json_extract(event,'$.head_sha'))<>?4)",
+                    params![candidate.repository.to_lowercase(), i64::try_from(candidate.number)?, reviewer, candidate.head_sha.to_ascii_lowercase()], |row| row.get::<_, bool>(0)
+                )? {
+                    continue;
+                }
                 if advance || updated_review {
                     let mut event = candidate.clone();
                     if updated_review {
                         ensure!(candidate.head_sha.len() == 40 && candidate.head_sha.bytes().all(|c| c.is_ascii_hexdigit()), "Invalid review head");
-                        event.event_id = format!("review-head:{identity}:{reviewer}:{}", candidate.head_sha.to_ascii_lowercase());
+                        event.event_id = review_head_event_id(candidate);
                     } else {
                         event.event_id = format!("review:{identity}:{reviewer}:{generation}");
                     }

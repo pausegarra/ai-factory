@@ -424,7 +424,7 @@ impl Github {
         for kind in ["review", "comment"] {
             let Some(value) = action(kind) else { continue };
             use sha2::{Digest, Sha256};
-            let key = format!(
+            let action_key = format!(
                 "action:{:x}",
                 Sha256::digest(serde_json::to_vec(&json!([
                     event.event_id,
@@ -434,16 +434,22 @@ impl Github {
                     value
                 ]))?)
             );
-            let marker = format!("<!-- ai-factory:{key} -->");
-            if factory.store.observation(&key)?.is_some() {
-                continue;
+            // Keep the original marker readable on existing GitHub reviews.
+            // A local receipt only completes a review of its own revision.
+            let marker = format!("<!-- ai-factory:{action_key} -->");
+            let key = if kind == "review" {
+                format!(
+                    "action:{:x}",
+                    Sha256::digest(format!("{action_key}:{}", event.head_sha))
+                )
+            } else {
+                action_key
+            };
+            if event.trigger_id == "pr_review" {
+                let current = self.pr(&event.repository, event.number).await?;
+                Self::check_review_head(event, &current)?;
             }
             let path = if kind == "review" {
-                let current = self.pr(&event.repository, event.number).await?;
-                ensure!(
-                    current["head"]["sha"] == event.head_sha && current["state"] == "open",
-                    "PR changed since review request"
-                );
                 format!("/repos/{}/pulls/{}/reviews", event.repository, event.number)
             } else {
                 format!(
@@ -451,6 +457,9 @@ impl Github {
                     event.repository, event.number
                 )
             };
+            if factory.store.observation(&key)?.is_some() {
+                continue;
+            }
             let wanted_state = match value["event"].as_str().unwrap_or("") {
                 "APPROVE" => "APPROVED",
                 "REQUEST_CHANGES" => "CHANGES_REQUESTED",
@@ -466,23 +475,20 @@ impl Github {
                     && (kind != "review"
                         || (row["commit_id"] == event.head_sha && row["state"] == wanted_state))
             });
-            if let Some(receipt) = existing {
-                factory.store.record_action_receipt(&key, &receipt)?;
-                continue;
-            }
-            if kind == "review" {
+            if event.trigger_id == "pr_review" {
                 // Recheck after reading history: a PR may be retargeted while
                 // its nodes or the reconciliation request are in flight.
-                let current = self.pr(&event.repository, event.number).await?;
-                ensure!(
-                    current["head"]["sha"] == event.head_sha && current["state"] == "open",
-                    "PR changed since review request"
-                );
                 let default = self.repository_default(&event.repository).await?;
+                let current = self.pr(&event.repository, event.number).await?;
+                Self::check_review_head(event, &current)?;
                 ensure!(
                     Self::review_targets_branch(&current, &default)?,
                     "PR review target is not the repository default branch"
                 );
+            }
+            if let Some(receipt) = existing {
+                factory.store.record_action_receipt(&key, &receipt)?;
+                continue;
             }
             check_active()?;
             let body = if kind == "review" {
@@ -496,7 +502,15 @@ impl Github {
             } else {
                 json!({"body":body})
             };
-            let receipt = self.request(Method::POST, &path, Some(&payload)).await?;
+            let receipt = match self.request(Method::POST, &path, Some(&payload)).await {
+                Err(error) if event.trigger_id == "pr_review" => {
+                    if let Ok(current) = self.pr(&event.repository, event.number).await {
+                        Self::check_review_head(event, &current)?;
+                    }
+                    return Err(error);
+                }
+                result => result?,
+            };
             factory.store.record_action_receipt(&key, &receipt)?;
         }
         Ok(())
