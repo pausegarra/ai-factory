@@ -11,6 +11,7 @@ mod node_comments;
 mod polling;
 mod pr_updates;
 mod release_issues;
+mod review_markdown;
 mod review_state;
 mod version_bumps;
 
@@ -492,9 +493,9 @@ impl Github {
             }
             check_active()?;
             let body = if kind == "review" {
-                value["body"].as_str().unwrap()
+                review_markdown::format_review(value["body"].as_str().unwrap())
             } else {
-                value.as_str().unwrap()
+                value.as_str().unwrap().into()
             };
             let body = format!("{body}\n\n{marker}");
             let payload = if kind == "review" {
