@@ -896,16 +896,47 @@ Approve. No blocking findings.
 - Optional installer packaging was not run."#
     );
     let generic_comment = "## Result\n\nThe local build passed.\n\n## Evidence\n\n- Checked `cargo check`.\n- See [run log](https://example.invalid/log).";
-    for (trigger, review_event, markdown) in [
-        ("new_issue", None, generic_comment),
+    let flat_review = format!(
+        "Decisión: REQUEST_CHANGES. Base comprobada: {checked_base}; head: {checked_head}. \
+         Los informes coinciden con el diff autenticado. \
+         Hallazgos bloqueantes: en `src/retry.rs:42`, se reutiliza el resultado anterior. \
+         En `src/status.rs:18`, se omite el estado fallido. El fixture reproduce `count > 0. Findings: example`. \
+         No bloqueantes: el log omite el contexto del intento. \
+         Verificaciones: se ejecutó la suite. \
+         Limitaciones: no se comparó el baseline."
+    );
+    let formatted_review = format!(
+        "## Decisión\n\nREQUEST_CHANGES. Base comprobada: {checked_base}; head: {checked_head}. \
+         Los informes coinciden con el diff autenticado.\n\n\
+         ## Hallazgos bloqueantes\n\n\
+         - en `src/retry.rs:42`, se reutiliza el resultado anterior.\n\
+         - En `src/status.rs:18`, se omite el estado fallido. El fixture reproduce `count > 0. Findings: example`.\n\n\
+         ## No bloqueantes\n\nel log omite el contexto del intento.\n\n\
+         ## Verificaciones\n\nse ejecutó la suite.\n\n\
+         ## Limitaciones\n\nno se comparó el baseline."
+    );
+    for (trigger, review_event, markdown, expected_body) in [
+        ("new_issue", None, generic_comment, generic_comment),
         (
             "pr_review",
             Some("REQUEST_CHANGES"),
             detailed_review.as_str(),
+            detailed_review.as_str(),
         ),
-        ("pr_review", Some("APPROVE"), detailed_approval.as_str()),
-        ("pr_review", Some("APPROVE"), short_review),
-        ("pr_review", Some("COMMENT"), neutral_review),
+        (
+            "pr_review",
+            Some("REQUEST_CHANGES"),
+            flat_review.as_str(),
+            formatted_review.as_str(),
+        ),
+        (
+            "pr_review",
+            Some("APPROVE"),
+            detailed_approval.as_str(),
+            detailed_approval.as_str(),
+        ),
+        ("pr_review", Some("APPROVE"), short_review, short_review),
+        ("pr_review", Some("COMMENT"), neutral_review, neutral_review),
     ] {
         let e = if review_event.is_some() {
             pr_event.clone()
@@ -1007,10 +1038,17 @@ Approve. No blocking findings.
         let (visible, marker) = posted_body
             .rsplit_once("\n\n<!-- ai-factory:action:")
             .unwrap();
-        assert_eq!(visible, markdown);
+        assert_eq!(visible, expected_body);
         let digest = marker.strip_suffix(" -->").unwrap();
-        assert_eq!(digest.len(), 64);
-        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let (action, value) = match review_event {
+            Some(_) => ("review", &r["data"]["review"]),
+            None => ("comment", &r["data"]["comment"]),
+        };
+        use sha2::{Digest, Sha256};
+        let original_digest = Sha256::digest(
+            serde_json::to_vec(&json!([e.event_id, e.actor, "report", action, value])).unwrap(),
+        );
+        assert_eq!(digest, format!("{original_digest:x}"));
         let expected = match review_event {
             Some(kind) => json!({"commit_id":e.head_sha,"event":kind,"body":posted_body}),
             None => json!({"body":posted_body}),
